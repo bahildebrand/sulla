@@ -30,10 +30,11 @@ pub struct Bead {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Dependency {
+    #[serde(alias = "depends_on_id")]
     pub id: String,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
+    #[serde(default, alias = "type")]
     pub dependency_type: String,
 }
 
@@ -356,6 +357,17 @@ mod tests {
         assert_eq!(b.open_blockers(), vec!["x", "z"]);
         let free = bead(r#"{"id":"a","title":"t","status":"open"}"#);
         assert!(free.open_blockers().is_empty());
+    }
+
+    #[test]
+    fn parses_list_style_dependency_edges() {
+        let b = bead(
+            r#"{"id":"a","title":"t","status":"open","dependencies":[
+                {"issue_id":"a","depends_on_id":"x","type":"blocks","metadata":"{}"}
+            ]}"#,
+        );
+        assert_eq!(b.dependencies[0].id, "x");
+        assert_eq!(b.dependencies[0].dependency_type, "blocks");
     }
 
     #[test]
