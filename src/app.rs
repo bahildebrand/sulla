@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use color_eyre::Result;
-use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
@@ -250,6 +252,7 @@ impl App {
             Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Input(CEvent::Paste(s)) => self.on_paste(&s),
             Event::Input(CEvent::Resize(w, h)) => self.on_resize(w, h),
+            Event::Input(CEvent::Mouse(m)) => self.on_mouse(m),
             Event::Input(_) | Event::AgentOutput => {}
             Event::Tick => {
                 if self.esc_at.is_some_and(|t| t.elapsed() >= ESC_TIMEOUT) {
@@ -453,6 +456,29 @@ impl App {
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    fn on_mouse(&mut self, m: MouseEvent) {
+        let up = match m.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return,
+        };
+        if let View::Progress(id) = &self.view
+            && matches!(self.mode, Mode::Normal | Mode::Insert)
+        {
+            let (rows, cols) = self.pty_size();
+            let col = m.column.saturating_sub(1).min(cols - 1);
+            let row = m.row.saturating_sub(1).min(rows - 1);
+            if let Some(a) = self.agents.get_mut(id) {
+                a.scroll_at(if up { 3 } else { -3 }, col, row);
+            }
+            return;
+        }
+        if matches!(self.mode, Mode::Normal | Mode::Inspect { .. }) {
+            let code = if up { KeyCode::Up } else { KeyCode::Down };
+            self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
         }
     }
 
@@ -1065,7 +1091,7 @@ impl App {
             (KeyCode::Char('j') | KeyCode::Down, Some(a)) => a.scroll(-1),
             (KeyCode::Char('g'), Some(a)) if pending == Some('g') => a.scroll(isize::MAX / 2),
             (KeyCode::Char('g'), _) => self.pending = Some('g'),
-            (KeyCode::Char('G'), Some(a)) => a.scroll_reset(),
+            (KeyCode::Char('G'), Some(a)) => a.scroll(-(isize::MAX / 2)),
             (KeyCode::Char('X'), _) => self.confirm_kill(id),
             (KeyCode::Char('R'), _) => self.mark_review(&id),
             (KeyCode::Char('r'), _) => {

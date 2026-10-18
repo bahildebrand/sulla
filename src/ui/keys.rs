@@ -58,6 +58,26 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Vec<u8> {
     out
 }
 
+pub fn wheel(up: bool, col: u16, row: u16, enc: vt100::MouseProtocolEncoding) -> Vec<u8> {
+    let button: u32 = if up { 64 } else { 65 };
+    let (x, y) = (col as u32 + 1, row as u32 + 1);
+    match enc {
+        vt100::MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{x};{y}M").into_bytes(),
+        vt100::MouseProtocolEncoding::Utf8 => {
+            let mut out = b"\x1b[M".to_vec();
+            for v in [button, x, y] {
+                let c = char::from_u32(v + 32).unwrap_or(' ');
+                out.extend(c.to_string().into_bytes());
+            }
+            out
+        }
+        vt100::MouseProtocolEncoding::Default => {
+            let b = |v: u32| (v + 32).min(255) as u8;
+            vec![0x1b, b'[', b'M', b(button), b(x), b(y)]
+        }
+    }
+}
+
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
         format!("\x1b[200~{text}\x1b[201~").into_bytes()
@@ -91,5 +111,18 @@ mod tests {
             encode(k(KeyCode::F(2), KeyModifiers::NONE), false),
             b"\x1bOQ"
         );
+    }
+
+    #[test]
+    fn encodes_wheel_events() {
+        use vt100::MouseProtocolEncoding as E;
+        assert_eq!(wheel(true, 4, 9, E::Sgr), b"\x1b[<64;5;10M");
+        assert_eq!(wheel(false, 0, 0, E::Sgr), b"\x1b[<65;1;1M");
+        assert_eq!(wheel(true, 0, 0, E::Default), b"\x1b[M`!!");
+        assert_eq!(
+            wheel(false, 300, 0, E::Default),
+            [0x1b, b'[', b'M', 97, 255, 33]
+        );
+        assert_eq!(wheel(true, 300, 0, E::Utf8), "\x1b[M`\u{14d}!".as_bytes());
     }
 }

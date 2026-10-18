@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use color_eyre::{Result, eyre::WrapErr};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    MouseEventKind,
+};
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::DefaultTerminal;
 
@@ -85,6 +88,14 @@ fn main() -> Result<()> {
             }
             let ev = match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
+                    Ok(event::Event::Mouse(m))
+                        if !matches!(
+                            m.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) =>
+                    {
+                        continue;
+                    }
                     Ok(e) => Event::Input(e),
                     Err(_) => continue,
                 },
@@ -97,10 +108,10 @@ fn main() -> Result<()> {
     });
 
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(stdout(), EnableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), EnableBracketedPaste, EnableMouseCapture);
     let res = run(&mut terminal, &mut app, rx, &gate);
     app.shutdown();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
     res
 }
@@ -169,11 +180,16 @@ fn suspend_for_editor(
     dir: &Path,
 ) -> std::io::Result<ExitStatus> {
     gate.pause();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
     let r = editor_command(&editor_spec(), dir).and_then(|mut c| c.status());
     let _ = enable_raw_mode();
-    let _ = crossterm::execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste);
+    let _ = crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    );
     let _ = terminal.clear();
     gate.resume();
     r

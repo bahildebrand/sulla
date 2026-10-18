@@ -17,6 +17,9 @@ use crate::beads::Bead;
 
 pub const CHAT_ID: &str = "@chat";
 
+const MAX_WHEEL_EVENTS: usize = 500;
+const LINES_PER_WHEEL: usize = 3;
+
 pub struct Launch {
     pub id: String,
     pub session: String,
@@ -208,9 +211,27 @@ impl Agent {
     }
 
     pub fn scroll(&mut self, delta: isize) {
+        let (rows, cols) = self.parser.lock().unwrap().screen().size();
+        self.scroll_at(delta, cols / 2, rows / 2);
+    }
+
+    pub fn scroll_at(&mut self, delta: isize, col: u16, row: u16) {
         let mut p = self.parser.lock().unwrap();
-        let cur = p.screen().scrollback() as isize;
-        p.screen_mut().set_scrollback((cur + delta).max(0) as usize);
+        let screen = p.screen();
+        let (mode, enc, cur) = (
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+            screen.scrollback() as isize,
+        );
+        if self.alive && mode != vt100::MouseProtocolMode::None {
+            drop(p);
+            let event = crate::ui::keys::wheel(delta > 0, col, row, enc);
+            let n = delta.unsigned_abs().div_ceil(LINES_PER_WHEEL);
+            self.write(&event.repeat(n.min(MAX_WHEEL_EVENTS)));
+            return;
+        }
+        p.screen_mut()
+            .set_scrollback(cur.saturating_add(delta).max(0) as usize);
     }
 
     pub fn scroll_reset(&mut self) {
