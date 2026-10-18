@@ -23,6 +23,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
             Span::raw(format!("{title} ")),
         ]
     };
+    if let Some(loc) = app.slot_location(id) {
+        spans.push(Span::styled(
+            format!("[{loc}] "),
+            Style::new().fg(Color::Blue),
+        ));
+    }
     if app.parked_review.as_ref().is_some_and(|d| d.id == id) {
         spans.push(Span::styled(
             "[r back to review] ",

@@ -25,7 +25,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .find(|b| b.id == d.id)
                 .map(|b| b.title.as_str())
                 .unwrap_or("");
-            review::render(f, main, d, title)
+            review::render(f, main, d, title, app.slot_location(&d.id).as_deref())
         }
     }
     status_line(f, status, app);

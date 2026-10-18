@@ -25,6 +25,12 @@ pub trait Sandbox: Send {
     fn wrap(&self, slot: usize, launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder>;
     fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()>;
     fn shutdown(&mut self);
+    fn instance(&self, _slot: usize) -> Option<String> {
+        None
+    }
+    fn address(&self, _slot: usize) -> Option<String> {
+        None
+    }
 }
 
 pub struct Worktree;
@@ -69,6 +75,10 @@ impl Slots {
         let slot = (0..cap).find(|s| !self.taken.values().any(|t| t == s))?;
         self.taken.insert(id.to_string(), slot);
         Some(slot)
+    }
+
+    pub fn get(&self, id: &str) -> Option<usize> {
+        self.taken.get(id).copied()
     }
 
     pub fn release(&mut self, id: &str) -> Option<usize> {

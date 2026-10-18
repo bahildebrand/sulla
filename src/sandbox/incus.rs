@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,7 @@ use crate::config::IncusConfig;
 const MAX_NAME: usize = 63;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 const BOOT_POLL: Duration = Duration::from_secs(1);
+const ADDR_TRIES: u32 = 30;
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -156,6 +158,7 @@ pub struct Incus {
     cli: Cli,
     counts: HashMap<usize, u32>,
     resets: HashMap<usize, JoinHandle<Result<Reset>>>,
+    addrs: Arc<Mutex<HashMap<usize, String>>>,
 }
 
 impl Incus {
@@ -181,6 +184,7 @@ impl Incus {
             cli,
             counts: HashMap::new(),
             resets: HashMap::new(),
+            addrs: Arc::default(),
         };
         if !me.exists(&me.cfg.golden) {
             return Err(eyre!(
@@ -355,6 +359,27 @@ impl Incus {
             std::thread::sleep(BOOT_POLL);
         }
     }
+
+    fn refresh_address(&self, slot: usize) {
+        self.addrs.lock().unwrap().remove(&slot);
+        let addrs = self.addrs.clone();
+        let cli = self.cli.clone();
+        let name = self.name(slot);
+        std::thread::spawn(move || {
+            for _ in 0..ADDR_TRIES {
+                let ip = cli
+                    .run(&["list", &name, "--format", "json"])
+                    .ok()
+                    .and_then(|out| parse_ipv4(&out, &name));
+                if let Some(ip) = ip {
+                    addrs.lock().unwrap().insert(slot, ip);
+                    return;
+                }
+                std::thread::sleep(BOOT_POLL);
+            }
+            tracing::warn!("incus: no IPv4 on eth0 for {name}");
+        });
+    }
 }
 
 impl Sandbox for Incus {
@@ -377,6 +402,7 @@ impl Sandbox for Incus {
         }
         self.wait_ready(&name)?;
         tracing::info!("incus: {name} ready");
+        self.refresh_address(slot);
         Ok(())
     }
 
@@ -406,6 +432,7 @@ impl Sandbox for Incus {
             return Ok(());
         }
         self.settle(slot);
+        self.addrs.lock().unwrap().remove(&slot);
         let count = self.counts.entry(slot).or_insert(0);
         *count += 1;
         let job = Resetter {
@@ -430,6 +457,25 @@ impl Sandbox for Incus {
             self.settle(slot);
         }
     }
+
+    fn instance(&self, slot: usize) -> Option<String> {
+        Some(self.name(slot))
+    }
+
+    fn address(&self, slot: usize) -> Option<String> {
+        self.addrs.lock().unwrap().get(&slot).cloned()
+    }
+}
+
+fn parse_ipv4(json: &str, name: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let inst = v.as_array()?.iter().find(|i| i["name"] == name)?;
+    inst["state"]["network"]["eth0"]["addresses"]
+        .as_array()?
+        .iter()
+        .find(|a| a["family"] == "inet" && a["scope"] == "global")?["address"]
+        .as_str()
+        .map(String::from)
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -701,6 +747,40 @@ mod tests {
         let s = light_script(1000, false);
         assert!(!s.contains("volume"));
         assert!(!s.contains("image") && !s.contains("builder") && !s.contains("system prune"));
+    }
+
+    #[test]
+    fn parse_ipv4_picks_global_inet_on_eth0_for_exact_name() {
+        let json = r#"[
+          {"name": "sulla-proj-1a2b3c-10", "state": {"network": {"eth0": {"addresses": [
+            {"family": "inet", "address": "10.10.0.99", "scope": "global"}
+          ]}}}},
+          {"name": "sulla-proj-1a2b3c-1", "status": "Running", "state": {"network": {
+            "lo": {"addresses": [{"family": "inet", "address": "127.0.0.1", "scope": "local"}]},
+            "docker0": {"addresses": [{"family": "inet", "address": "172.17.0.1", "scope": "global"}]},
+            "eth0": {"addresses": [
+              {"family": "inet6", "address": "fd42::1", "scope": "global"},
+              {"family": "inet", "address": "169.254.0.5", "scope": "link"},
+              {"family": "inet", "address": "10.10.0.23", "netmask": "24", "scope": "global"},
+              {"family": "inet", "address": "10.10.0.24", "scope": "global"}
+            ]}
+          }}}
+        ]"#;
+        assert_eq!(
+            parse_ipv4(json, "sulla-proj-1a2b3c-1").as_deref(),
+            Some("10.10.0.23")
+        );
+        assert_eq!(
+            parse_ipv4(json, "sulla-proj-1a2b3c-10").as_deref(),
+            Some("10.10.0.99")
+        );
+        assert_eq!(parse_ipv4(json, "sulla-proj-1a2b3c-2"), None);
+        assert_eq!(
+            parse_ipv4(r#"[{"name": "a", "state": {"network": null}}]"#, "a"),
+            None
+        );
+        assert_eq!(parse_ipv4(r#"[{"name": "a", "state": null}]"#, "a"), None);
+        assert_eq!(parse_ipv4("not json", "a"), None);
     }
 
     #[test]

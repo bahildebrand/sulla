@@ -182,6 +182,15 @@ impl App {
         self.sandbox.name()
     }
 
+    pub fn slot_location(&self, id: &str) -> Option<String> {
+        let slot = self.slots.get(id)?;
+        let name = self.sandbox.instance(slot)?;
+        Some(match self.sandbox.address(slot) {
+            Some(ip) => format!("{name} {ip}"),
+            None => name,
+        })
+    }
+
     pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
         let now = Utc::now();
         let mut cols: [Vec<&Bead>; Column::ALL.len()] = Default::default();

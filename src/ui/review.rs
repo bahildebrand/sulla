@@ -321,18 +321,27 @@ fn wrap_into(
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
+pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str, loc: Option<&str>) {
     let (adds, dels) = diff.adds_dels();
-    let block = Block::bordered().title(Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!(" review {} ", diff.id), Style::new().bold()),
         Span::raw(format!("{title} ")),
+    ];
+    if let Some(loc) = loc {
+        spans.push(Span::styled(
+            format!("[{loc}] "),
+            Style::new().fg(Color::Blue),
+        ));
+    }
+    spans.extend([
         Span::styled(format!("+{adds} "), Style::new().fg(Color::Green)),
         Span::styled(format!("-{dels} "), Style::new().fg(Color::Red)),
         Span::styled(
             format!("{} comments ", diff.comments.len()),
             Style::new().fg(Color::Magenta),
         ),
-    ]));
+    ]);
+    let block = Block::bordered().title(Line::from(spans));
     if diff.files.is_empty() {
         f.render_widget(Paragraph::new("No changes.").block(block), area);
         return;
