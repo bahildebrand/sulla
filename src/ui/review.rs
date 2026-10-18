@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -33,6 +34,53 @@ pub struct Comment {
     pub new: Option<usize>,
     pub snippet: String,
     pub text: String,
+}
+
+const FEEDBACK_INSTRUCTIONS: &str = "Code review comments on your diff. Each comment is attached to a line: side \"new\" is a line in the new file, side \"old\" is a removed line from the old file. Address every comment and commit, then set the bead back to review.";
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Side {
+    New,
+    Old,
+    File,
+}
+
+#[derive(Serialize)]
+struct FeedbackComment<'a> {
+    file: &'a str,
+    line: Option<usize>,
+    side: Side,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+    code: &'a str,
+    comment: &'a str,
+}
+
+impl<'a> From<&'a Comment> for FeedbackComment<'a> {
+    fn from(c: &'a Comment) -> Self {
+        let (side, line) = match (c.new, c.old) {
+            (Some(n), _) => (Side::New, Some(n)),
+            (None, Some(o)) => (Side::Old, Some(o)),
+            _ => (Side::File, None),
+        };
+        Self {
+            file: &c.file,
+            line,
+            side,
+            old_line: c.old,
+            new_line: c.new,
+            code: &c.snippet,
+            comment: &c.text,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Feedback<'a> {
+    bead: &'a str,
+    instructions: &'a str,
+    comments: Vec<FeedbackComment<'a>>,
 }
 
 pub struct Diff {
@@ -181,33 +229,12 @@ impl Diff {
         if self.comments.is_empty() {
             return None;
         }
-        let comments: Vec<serde_json::Value> = self
-            .comments
-            .iter()
-            .map(|c| {
-                let (side, line) = match (c.new, c.old) {
-                    (Some(n), _) => ("new", Some(n)),
-                    (None, Some(o)) => ("old", Some(o)),
-                    _ => ("file", None),
-                };
-                serde_json::json!({
-                    "file": c.file,
-                    "line": line,
-                    "side": side,
-                    "old_line": c.old,
-                    "new_line": c.new,
-                    "code": c.snippet,
-                    "comment": c.text,
-                })
-            })
-            .collect();
-        let payload = serde_json::json!({
-            "type": "code_review",
-            "bead": self.id,
-            "instructions": "Code review comments on your diff. Each comment is attached to a line: side \"new\" means line is in the new file, side \"old\" means it refers to a removed line in the old file. Address every comment and commit, then set the bead back to review.",
-            "comments": comments,
-        });
-        Some(payload.to_string())
+        let feedback = Feedback {
+            bead: &self.id,
+            instructions: FEEDBACK_INSTRUCTIONS,
+            comments: self.comments.iter().map(FeedbackComment::from).collect(),
+        };
+        serde_json::to_string(&feedback).ok()
     }
 
     pub fn adds_dels(&self) -> (usize, usize) {
