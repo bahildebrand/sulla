@@ -732,8 +732,7 @@ impl App {
         self.report(r);
         match self.agents.get_mut(id) {
             Some(a) if a.alive => {
-                a.write(text.as_bytes());
-                a.write(b"\r");
+                a.submit(text);
             }
             _ => {
                 self.agents.remove(id);

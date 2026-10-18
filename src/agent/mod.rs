@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use color_eyre::{Result, eyre::eyre};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -14,6 +15,8 @@ pub use copilot::Copilot;
 
 use crate::app::Event;
 use crate::beads::Bead;
+
+const SUBMIT_DELAY: Duration = Duration::from_millis(200);
 
 pub struct Launch {
     pub bead: Bead,
@@ -70,7 +73,7 @@ pub fn session_id(repo: &std::path::Path, bead_id: &str) -> String {
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub alive: bool,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
 }
@@ -125,7 +128,7 @@ impl Agent {
         Ok(Self {
             parser,
             alive: true,
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
             child,
         })
@@ -133,9 +136,25 @@ impl Agent {
 
     pub fn write(&mut self, bytes: &[u8]) {
         if self.alive {
-            let _ = self.writer.write_all(bytes);
-            let _ = self.writer.flush();
+            let mut w = self.writer.lock().unwrap();
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
         }
+    }
+
+    pub fn submit(&mut self, text: &str) {
+        if !self.alive {
+            return;
+        }
+        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        self.write(&crate::ui::keys::paste(text, bracketed));
+        let w = self.writer.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SUBMIT_DELAY);
+            let mut w = w.lock().unwrap();
+            let _ = w.write_all(b"\r");
+            let _ = w.flush();
+        });
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
