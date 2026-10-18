@@ -97,7 +97,7 @@ impl Bead {
         if self.status == "closed" {
             let recent = self
                 .closed_at
-                .is_none_or(|t| now - t <= Duration::days(retention_days));
+                .is_none_or(|t| Duration::try_days(retention_days).is_none_or(|r| now - t <= r));
             return recent.then_some(Column::Done);
         }
         match self.state() {
@@ -272,6 +272,15 @@ mod tests {
         assert_eq!(recent.column(now, 3), Some(Column::Done));
         assert_eq!(old.column(now, 3), None);
         assert_eq!(event.column(now, 3), None);
+    }
+
+    #[test]
+    fn huge_retention_does_not_panic() {
+        let now: DateTime<Utc> = "2026-10-18T00:00:00Z".parse().unwrap();
+        let old = bead(
+            r#"{"id":"e","title":"t","status":"closed","issue_type":"task","closed_at":"2020-01-01T00:00:00Z"}"#,
+        );
+        assert_eq!(old.column(now, i64::MAX), Some(Column::Done));
     }
 
     #[test]
