@@ -35,16 +35,6 @@ pub struct Comment {
     pub text: String,
 }
 
-impl Comment {
-    fn location(&self) -> String {
-        match (self.new, self.old) {
-            (Some(n), _) => format!("{}:{n}", self.file),
-            (None, Some(o)) => format!("{}:{o} (removed line)", self.file),
-            _ => self.file.clone(),
-        }
-    }
-}
-
 pub struct Diff {
     pub id: String,
     pub files: Vec<FileDiff>,
@@ -191,24 +181,33 @@ impl Diff {
         if self.comments.is_empty() {
             return None;
         }
-        let items: Vec<String> = self
+        let comments: Vec<serde_json::Value> = self
             .comments
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                format!(
-                    "({}) {} `{}`: {}",
-                    i + 1,
-                    c.location(),
-                    c.snippet.replace('`', "'"),
-                    c.text
-                )
+            .map(|c| {
+                let (side, line) = match (c.new, c.old) {
+                    (Some(n), _) => ("new", Some(n)),
+                    (None, Some(o)) => ("old", Some(o)),
+                    _ => ("file", None),
+                };
+                serde_json::json!({
+                    "file": c.file,
+                    "line": line,
+                    "side": side,
+                    "old_line": c.old,
+                    "new_line": c.new,
+                    "code": c.snippet,
+                    "comment": c.text,
+                })
             })
             .collect();
-        Some(format!(
-            "Code review comments on your diff, each as (n) file:line `code`: comment. Address every one and commit, then set the bead back to review. {}",
-            items.join(" ; ")
-        ))
+        let payload = serde_json::json!({
+            "type": "code_review",
+            "bead": self.id,
+            "instructions": "Code review comments on your diff. Each comment is attached to a line: side \"new\" means line is in the new file, side \"old\" means it refers to a removed line in the old file. Address every comment and commit, then set the bead back to review.",
+            "comments": comments,
+        });
+        Some(payload.to_string())
     }
 
     pub fn adds_dels(&self) -> (usize, usize) {
@@ -402,9 +401,25 @@ mod tests {
         assert!(!d.add_comment("nope"));
         d.set_cursor(6);
         assert!(d.add_comment("rename this"));
+        d.set_cursor(5);
+        assert!(d.add_comment("why \"removed\"?"));
         let fb = d.feedback().unwrap();
-        assert!(fb.contains("(1) src/a.rs:1 `new`: rename this"));
-        assert_eq!(d.comment_count("src/a.rs"), 1);
+        assert!(!fb.contains('\n'));
+        let v: serde_json::Value = serde_json::from_str(&fb).unwrap();
+        assert_eq!(v["bead"], "x");
+        let c = &v["comments"];
+        assert_eq!(c[0]["file"], "src/a.rs");
+        assert_eq!(c[0]["line"], 1);
+        assert_eq!(c[0]["side"], "new");
+        assert_eq!(c[0]["code"], "new");
+        assert_eq!(c[0]["comment"], "rename this");
+        assert_eq!(c[1]["side"], "old");
+        assert_eq!(c[1]["old_line"], 1);
+        assert_eq!(c[1]["new_line"], serde_json::Value::Null);
+        assert_eq!(c[1]["comment"], "why \"removed\"?");
+        assert_eq!(d.comment_count("src/a.rs"), 2);
+        assert_eq!(d.delete_comments_at_cursor(), 1);
+        d.set_cursor(6);
         assert_eq!(d.delete_comments_at_cursor(), 1);
         assert!(d.feedback().is_none());
     }

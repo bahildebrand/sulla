@@ -88,7 +88,10 @@ const HELP: &[(&str, &str)] = &[
     ("Board", ""),
     ("h j k l / gg G", "move"),
     ("Enter / p / r", "open / progress / review"),
-    ("n", "new bead popup (title, description, priority, start state)"),
+    (
+        "n",
+        "new bead popup (title, description, priority, start state)",
+    ),
     ("+ -", "raise / lower priority"),
     ("X", "kill agent, hold bead"),
     ("D", "discard worktree + branch, hold bead"),
