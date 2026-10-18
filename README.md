@@ -32,7 +32,7 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `Enter` open, `p` progress, `r` review, `n` new bead, `+`/`-` priority, `X` kill, `D` discard, `s` release, `R` mark review, `A` launch/resume, `q` quit |
+| Board | `hjkl` `gg` `G` move, `Enter` open, `p` progress, `r` review, `i` inspect bead, `n` new bead, `+`/`-` priority, `X` kill, `D` discard, `s` release, `R` mark review, `A` launch/resume, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` scroll |
 | Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `m` merge, `s` send feedback, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:refresh` `:kill <id>` |

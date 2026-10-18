@@ -66,10 +66,21 @@ pub enum Action {
 pub enum Mode {
     Normal,
     Insert,
-    Input { kind: InputKind, buf: String },
+    Input {
+        kind: InputKind,
+        buf: String,
+    },
     NewBead(NewBeadForm),
-    Confirm { action: Action, msg: String },
+    Confirm {
+        action: Action,
+        msg: String,
+    },
     Help,
+    Inspect {
+        id: String,
+        text: String,
+        scroll: u16,
+    },
 }
 
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
@@ -413,6 +424,7 @@ impl App {
                 }
             }
             Mode::Help => {}
+            Mode::Inspect { id, text, scroll } => self.inspect_key(k, id, text, scroll),
             Mode::Normal => self.normal_key(k),
         }
     }
@@ -857,6 +869,42 @@ impl App {
         }
     }
 
+    fn inspect(&mut self, id: String) {
+        let r = self.beads.show_text(&id);
+        if let Some(text) = self.report(r) {
+            self.mode = Mode::Inspect {
+                id,
+                text,
+                scroll: 0,
+            };
+        }
+    }
+
+    fn inspect_key(&mut self, k: KeyEvent, id: String, text: String, mut scroll: u16) {
+        let pending = self.pending.take();
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let half = self.term.1 / 2;
+        let max = text.lines().count().saturating_sub(1) as u16;
+        match k.code {
+            KeyCode::Char('q') | KeyCode::Char('i') | KeyCode::Esc => return,
+            KeyCode::Char('j') | KeyCode::Down => scroll = scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => scroll = scroll.saturating_add(half),
+            KeyCode::Char('u') if ctrl => scroll = scroll.saturating_sub(half),
+            KeyCode::Char('g') if pending == Some('g') => scroll = 0,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('G') => scroll = max,
+            KeyCode::Char('p') => return self.open_progress(id),
+            KeyCode::Char('r') => return self.open_review(id),
+            _ => {}
+        }
+        self.mode = Mode::Inspect {
+            id,
+            text,
+            scroll: scroll.min(max),
+        };
+    }
+
     fn board_bead_key(&mut self, k: KeyEvent) {
         let Some(b) = self.selected() else { return };
         self.parked_review = None;
@@ -865,6 +913,7 @@ impl App {
                 Column::Review | Column::Done => self.open_review(b.id),
                 _ => self.open_progress(b.id),
             },
+            KeyCode::Char('i') => self.inspect(b.id),
             KeyCode::Char('p') => self.open_progress(b.id),
             KeyCode::Char('r') => self.open_review(b.id),
             KeyCode::Char('X') => self.confirm_kill(b.id),

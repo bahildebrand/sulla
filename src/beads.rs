@@ -177,6 +177,10 @@ impl Beads {
         }
     }
 
+    pub fn show_text(&self, id: &str) -> Result<String> {
+        self.run(&["show", id])
+    }
+
     pub fn claim(&self, id: &str) -> Result<()> {
         self.run(&["update", id, "--claim", "--actor", ACTOR])
             .map(drop)

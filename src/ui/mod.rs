@@ -34,6 +34,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::NewBead(form) = &app.mode {
         new_bead(f, form);
     }
+    if let Mode::Inspect { id, text, scroll } = &app.mode {
+        inspect(f, id, text, *scroll);
+    }
 }
 
 fn status_line(f: &mut Frame, area: Rect, app: &App) {
@@ -60,6 +63,11 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         Mode::NewBead(_) => vec![
             tag("NEW", Color::Green),
             Span::raw(" Tab next field, Enter create, Esc cancel").dim(),
+        ],
+        Mode::Inspect { .. } => vec![
+            tag("INSPECT", Color::Magenta),
+            Span::raw(" j k / Ctrl-d Ctrl-u / gg G scroll, p progress, r review, q Esc close")
+                .dim(),
         ],
         Mode::Confirm { msg, .. } => {
             vec![tag("CONFIRM", Color::Yellow), Span::raw(format!(" {msg}"))]
@@ -88,6 +96,7 @@ const HELP: &[(&str, &str)] = &[
     ("Board", ""),
     ("h j k l / gg G", "move"),
     ("Enter / p / r", "open / progress / review"),
+    ("i", "inspect bead (description, labels, deps)"),
     (
         "n",
         "new bead popup (title, description, priority, start state)",
@@ -139,6 +148,24 @@ fn help(f: &mut Frame, _app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" sulla keys ")),
+        area,
+    );
+}
+
+fn inspect(f: &mut Frame, id: &str, text: &str, scroll: u16) {
+    let lines: Vec<Line> = text.lines().map(|l| Line::raw(l.trim_end())).collect();
+    let [area] = Layout::vertical([Constraint::Length(lines.len() as u16 + 2)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Length(90)])
+        .flex(Flex::Center)
+        .areas(area);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(Block::bordered().title(format!(" inspect {id} "))),
         area,
     );
 }
