@@ -10,7 +10,7 @@ use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModi
 use crate::agent::{Agent, Backend, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::config::{AgentKind, Config};
-use crate::git::Git;
+use crate::git::{Git, RebaseConflict};
 use crate::scheduler::{self, Snapshot};
 use crate::ui::keys;
 use crate::ui::review::Diff;
@@ -58,6 +58,7 @@ impl Default for NewBeadForm {
 pub enum Action {
     Kill(String),
     Merge(String),
+    ResolveConflicts(String),
     Discard(String),
     Quit,
 }
@@ -597,6 +598,7 @@ impl App {
             Action::Quit => self.quit = true,
             Action::Kill(id) => self.kill(&id),
             Action::Merge(id) => self.merge(&id),
+            Action::ResolveConflicts(id) => self.resolve_conflicts(&id),
             Action::Discard(id) => self.discard(&id),
         }
     }
@@ -681,11 +683,33 @@ impl App {
             .git
             .merge(id, &self.base, &msg)
             .and_then(|_| self.beads.close(id, "merged by sulla"));
+        if let Err(e) = &r {
+            if e.downcast_ref::<RebaseConflict>().is_some() {
+                self.mode = Mode::Confirm {
+                    msg: format!(
+                        "Merge of {id} hit conflicts with {}. Have the agent resolve them automatically? y/n",
+                        self.base
+                    ),
+                    action: Action::ResolveConflicts(id.to_string()),
+                };
+                self.status = format!("merge conflicts in {id}");
+                self.mutated();
+                return;
+            }
+        }
         if self.report(r).is_some() {
             self.status = format!("merged {id} into {}", self.base);
             self.view = View::Board;
         }
         self.mutated();
+    }
+
+    fn resolve_conflicts(&mut self, id: &str) {
+        let text = format!(
+            "Merging into {base} failed with conflicts. Run `git rebase {base}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or merge.",
+            base = self.base
+        );
+        self.feedback(id, &text);
     }
 
     fn feedback(&mut self, id: &str, text: &str) {

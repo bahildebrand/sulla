@@ -20,6 +20,24 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+#[derive(Debug)]
+pub struct RebaseConflict {
+    pub base: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for RebaseConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rebase onto {} failed, worktree left untouched: {}",
+            self.base, self.detail
+        )
+    }
+}
+
+impl std::error::Error for RebaseConflict {}
+
 pub fn toplevel(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(
         run(path, &["rev-parse", "--show-toplevel"])?.trim(),
@@ -141,7 +159,11 @@ impl Git {
         }
         if let Err(e) = run(&wt, &["rebase", base]) {
             let _ = run(&wt, &["rebase", "--abort"]);
-            bail!("rebase onto {base} failed, worktree left untouched: {e}");
+            return Err(RebaseConflict {
+                base: base.to_string(),
+                detail: e.to_string(),
+            }
+            .into());
         }
         let merged_base = run(&wt, &["merge-base", base, "HEAD"])?.trim().to_string();
         let merged_head = run(&wt, &["rev-parse", "HEAD"])?.trim().to_string();
@@ -288,7 +310,8 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "human\n").unwrap();
         git(&dir, &["commit", "-qam", "human"]);
 
-        assert!(g.merge("x-2", "main", "x-2").is_err());
+        let err = g.merge("x-2", "main", "x-2").unwrap_err();
+        assert!(err.downcast_ref::<RebaseConflict>().is_some());
         assert!(wt.exists());
         assert!(
             run(&wt, &["status", "--porcelain"])
