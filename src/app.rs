@@ -19,7 +19,7 @@ pub enum Event {
     Input(CEvent),
     Tick,
     AgentOutput,
-    AgentExited(String, u64),
+    AgentExited(String),
     Snapshot(Result<Snapshot, String>),
 }
 
@@ -253,12 +253,8 @@ impl App {
                     self.write_focused(&[0x1b]);
                 }
             }
-            Event::AgentExited(id, generation) => {
-                if let Some(a) = self
-                    .agents
-                    .get_mut(&id)
-                    .filter(|a| a.generation == generation)
-                {
+            Event::AgentExited(id) => {
+                if let Some(a) = self.agents.get_mut(&id) {
                     a.alive = false;
                     self.status = format!("agent {id} exited");
                     if matches!(self.view, View::Progress(ref v) if *v == id)
@@ -734,10 +730,17 @@ impl App {
     fn feedback(&mut self, id: &str, text: &str) {
         let r = self.beads.set_state(id, State::Running);
         self.report(r);
-        self.agents.remove(id);
-        if let Some(b) = self.bead(id).cloned() {
-            let r = self.start_agent(&b, true, Some(text.to_string()));
-            self.report(r);
+        match self.agents.get_mut(id) {
+            Some(a) if a.alive => {
+                a.submit(text);
+            }
+            _ => {
+                self.agents.remove(id);
+                if let Some(b) = self.bead(id).cloned() {
+                    let r = self.start_agent(&b, true, Some(text.to_string()));
+                    self.report(r);
+                }
+            }
         }
         self.status = format!("feedback sent to {id}");
         self.parked_review = None;

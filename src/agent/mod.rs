@@ -3,7 +3,6 @@ mod copilot;
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -68,10 +67,7 @@ pub fn session_id(repo: &std::path::Path, bead_id: &str) -> String {
     )
 }
 
-static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
-
 pub struct Agent {
-    pub generation: u64,
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub alive: bool,
     writer: Box<dyn Write + Send>,
@@ -109,7 +105,6 @@ impl Agent {
         let mut reader = pair.master.try_clone_reader().map_err(|e| eyre!(e))?;
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
         let id = launch.bead.id.clone();
-        let generation = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
         let p = parser.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -124,11 +119,10 @@ impl Agent {
                     }
                 }
             }
-            let _ = tx.send(Event::AgentExited(id, generation));
+            let _ = tx.send(Event::AgentExited(id));
         });
 
         Ok(Self {
-            generation,
             parser,
             alive: true,
             writer,
@@ -142,6 +136,13 @@ impl Agent {
             let _ = self.writer.write_all(bytes);
             let _ = self.writer.flush();
         }
+    }
+
+    pub fn submit(&mut self, text: &str) {
+        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        let mut bytes = crate::ui::keys::paste(text, bracketed);
+        bytes.push(b'\r');
+        self.write(&bytes);
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
