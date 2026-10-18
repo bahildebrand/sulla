@@ -11,7 +11,25 @@ pub struct Config {
     pub poll_secs: u64,
     pub base_branch: Option<String>,
     pub kache: bool,
+    pub agent: AgentKind,
     pub copilot: CopilotConfig,
+    pub claude: ClaudeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentKind {
+    #[default]
+    Copilot,
+    Claude,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ClaudeConfig {
+    pub bin: String,
+    pub model: Option<String>,
+    pub extra_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,7 +48,9 @@ impl Default for Config {
             poll_secs: 2,
             base_branch: None,
             kache: true,
+            agent: AgentKind::default(),
             copilot: CopilotConfig::default(),
+            claude: ClaudeConfig::default(),
         }
     }
 }
@@ -39,6 +59,16 @@ impl Default for CopilotConfig {
     fn default() -> Self {
         Self {
             bin: "copilot".into(),
+            model: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            bin: "claude".into(),
             model: None,
             extra_args: Vec::new(),
         }
@@ -69,5 +99,13 @@ mod tests {
         assert_eq!(cfg.done_retention_days, 3);
         assert_eq!(cfg.copilot.bin, "copilot");
         assert_eq!(cfg.copilot.model.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn agent_selects_claude() {
+        let cfg: Config = toml::from_str("agent = \"claude\"\n[claude]\nmodel = \"m\"").unwrap();
+        assert_eq!(cfg.agent, AgentKind::Claude);
+        assert_eq!(cfg.claude.bin, "claude");
+        assert_eq!(Config::default().agent, AgentKind::Copilot);
     }
 }

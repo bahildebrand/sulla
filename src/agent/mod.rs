@@ -1,3 +1,4 @@
+mod claude;
 mod copilot;
 
 use std::io::{Read, Write};
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use color_eyre::{Result, eyre::eyre};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+pub use claude::Claude;
 pub use copilot::Copilot;
 
 use crate::app::Event;

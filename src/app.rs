@@ -7,9 +7,9 @@ use chrono::Utc;
 use color_eyre::Result;
 use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::agent::{Agent, Backend, Copilot, Launch};
+use crate::agent::{Agent, Backend, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
-use crate::config::Config;
+use crate::config::{AgentKind, Config};
 use crate::git::Git;
 use crate::scheduler::{self, Snapshot};
 use crate::ui::keys;
@@ -90,10 +90,16 @@ impl App {
             Duration::from_secs(cfg.poll_secs.max(1)),
             tx.clone(),
         );
-        let backend = Box::new(Copilot {
-            cfg: cfg.copilot.clone(),
-            repo,
-        });
+        let backend: Box<dyn Backend> = match cfg.agent {
+            AgentKind::Copilot => Box::new(Copilot {
+                cfg: cfg.copilot.clone(),
+                repo,
+            }),
+            AgentKind::Claude => Box::new(Claude {
+                cfg: cfg.claude.clone(),
+                repo,
+            }),
+        };
         Ok(Self {
             cfg,
             base,
