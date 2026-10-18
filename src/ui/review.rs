@@ -234,6 +234,27 @@ fn line_style(k: Kind) -> Style {
     }
 }
 
+fn wrap_into(
+    rows: &mut Vec<Line<'static>>,
+    prefix: Span<'static>,
+    prefix_w: usize,
+    text: &str,
+    style: Style,
+    width: usize,
+) {
+    let avail = width.saturating_sub(prefix_w).max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = chars.chunks(avail);
+    let first: String = chunks.next().unwrap_or(&[]).iter().collect();
+    rows.push(Line::from(vec![prefix, Span::styled(first, style)]));
+    for c in chunks {
+        rows.push(Line::from(vec![
+            Span::raw(" ".repeat(prefix_w)),
+            Span::styled(c.iter().collect::<String>(), style),
+        ]));
+    }
+}
+
 pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
     let (adds, dels) = diff.adds_dels();
     let block = Block::bordered().title(Line::from(vec![
@@ -283,6 +304,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
     let file = &diff.files[diff.sel];
     let mut rows: Vec<Line> = Vec::new();
     let mut cursor_row = 0;
+    let inner_w = right.width.saturating_sub(2) as usize;
     for (i, l) in file.lines.iter().enumerate() {
         if i == file.cursor {
             cursor_row = rows.len();
@@ -297,22 +319,27 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
         } else {
             "          ".to_string()
         };
-        rows.push(Line::from(vec![
+        wrap_into(
+            &mut rows,
             Span::styled(gutter, Style::new().fg(Color::DarkGray)),
-            Span::styled(l.text.replace('\t', "    "), style),
-        ]));
+            10,
+            &l.text.replace('\t', "    "),
+            style,
+            inner_w,
+        );
         for c in diff
             .comments
             .iter()
             .filter(|c| Diff::comment_matches(c, file, l))
         {
-            rows.push(Line::from(vec![
+            wrap_into(
+                &mut rows,
                 Span::raw("           "),
-                Span::styled(
-                    format!("▍ {}", c.text),
-                    Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+                11,
+                &format!("▍ {}", c.text),
+                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                inner_w,
+            );
         }
     }
     let height = right.height.saturating_sub(2) as usize;
