@@ -144,6 +144,32 @@ impl Git {
         Ok(out)
     }
 
+    pub fn log(&self, id: &str, base: &str) -> Result<String> {
+        let wt = self.worktree_path(id);
+        if wt.join(".git").exists() {
+            Self::log_range(&wt, &format!("{base}..HEAD"))
+        } else {
+            Self::log_range(&self.repo, &format!("{base}..{}", branch(id)))
+        }
+    }
+
+    pub fn merged_log(&self, id: &str) -> Result<String> {
+        let (b, h) = (merged_ref(id, "base"), merged_ref(id, "head"));
+        Self::log_range(&self.repo, &format!("{b}..{h}"))
+    }
+
+    fn log_range(dir: &Path, range: &str) -> Result<String> {
+        run(
+            dir,
+            &[
+                "log",
+                "--no-color",
+                "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B",
+                range,
+            ],
+        )
+    }
+
     pub fn merge(&self, id: &str, base: &str, message: &str) -> Result<()> {
         let wt = self.worktree_path(id);
         let br = branch(id);
@@ -270,6 +296,12 @@ mod tests {
         assert!(diff.contains("b.txt"));
         assert!(!diff.contains("c.txt"));
 
+        git(&wt, &["add", "b.txt"]);
+        git(&wt, &["commit", "-qm", "add b\n\nbody line"]);
+        let log = g.log("x-1", "main").unwrap();
+        assert!(log.starts_with("commit ") && log.contains("add b\n\nbody line"));
+        assert!(!log.contains("main moved") && !log.contains("init"));
+
         g.merge("x-1", "main", "x-1: work").unwrap();
         let merges = run(&dir, &["rev-list", "--merges", "--count", "main"]).unwrap();
         assert_eq!(merges.trim(), "0");
@@ -278,6 +310,7 @@ mod tests {
         assert!(!g.branch_exists("sulla/x-1"));
         let merged = g.merged_diff("x-1").unwrap();
         assert!(merged.contains("b.txt") && !merged.contains("c.txt"));
+        assert!(g.merged_log("x-1").unwrap().contains("add b"));
         assert!(
             run(&dir, &["status", "--porcelain"])
                 .unwrap()

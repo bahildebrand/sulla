@@ -821,8 +821,14 @@ impl App {
         } else {
             self.git.diff(&id, &self.base)
         };
+        let log = if done {
+            self.git.merged_log(&id)
+        } else {
+            self.git.log(&id, &self.base)
+        };
         if let Some(text) = self.report(r) {
-            self.view = View::Review(Diff::parse(&id, &text));
+            self.view =
+                View::Review(Diff::parse(&id, &text).with_commits(&log.unwrap_or_default()));
         }
     }
 

@@ -36,7 +36,9 @@ pub struct Comment {
     pub text: String,
 }
 
-const FEEDBACK_INSTRUCTIONS: &str = "Code review comments on your diff. Each comment is attached to a line: side \"new\" is a line in the new file, side \"old\" is a removed line from the old file. Address every comment and commit, then set the bead back to review.";
+pub const COMMIT_MSG: &str = "COMMIT_MSG";
+
+const FEEDBACK_INSTRUCTIONS: &str = "Code review comments on your diff. Each comment is attached to a line: side \"new\" is a line in the new file, side \"old\" is a removed line from the old file. Comments on file \"COMMIT_MSG\" refer to lines of your commit messages. Address every comment and commit, then set the bead back to review.";
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -158,6 +160,44 @@ impl Diff {
             sel: 0,
             comments: Vec::new(),
         }
+    }
+
+    pub fn with_commits(mut self, log: &str) -> Self {
+        let log = log.trim_end();
+        if log.is_empty() {
+            return self;
+        }
+        let mut lines = Vec::new();
+        let mut in_header = false;
+        let mut n = 0;
+        for l in log.lines() {
+            let (kind, new, text) = if l.starts_with("commit ") {
+                in_header = true;
+                (Kind::File, None, l.to_string())
+            } else if in_header {
+                in_header = !l.is_empty();
+                (Kind::Meta, None, l.to_string())
+            } else {
+                n += 1;
+                (Kind::Ctx, Some(n), format!(" {l}"))
+            };
+            lines.push(DLine {
+                kind,
+                text,
+                old: None,
+                new,
+            });
+        }
+        let cursor = lines.iter().position(|l| l.kind == Kind::Ctx).unwrap_or(0);
+        self.files.insert(
+            0,
+            FileDiff {
+                name: COMMIT_MSG.to_string(),
+                lines,
+                cursor,
+            },
+        );
+        self
     }
 
     pub fn next_file(&mut self) {
@@ -449,5 +489,27 @@ mod tests {
         d.set_cursor(6);
         assert_eq!(d.delete_comments_at_cursor(), 1);
         assert!(d.feedback().is_none());
+    }
+
+    #[test]
+    fn commit_messages_become_first_file() {
+        let log = "commit abc\nAuthor: a <a@a>\nDate:   now\n\nsubject\n\nbody\n\n";
+        let mut d = Diff::parse("x", SAMPLE).with_commits(log);
+        assert_eq!(d.files.len(), 3);
+        assert_eq!(d.files[0].name, COMMIT_MSG);
+        assert_eq!(d.adds_dels(), (2, 1));
+        let l = &d.files[0].lines;
+        assert_eq!(l[0].kind, Kind::File);
+        assert_eq!(l[3].kind, Kind::Meta);
+        assert_eq!((l[4].kind, l[4].new), (Kind::Ctx, Some(1)));
+        assert_eq!(l.len(), 7);
+        assert_eq!(d.files[0].cursor, 4);
+        assert!(d.add_comment("reword"));
+        let v: serde_json::Value = serde_json::from_str(&d.feedback().unwrap()).unwrap();
+        assert_eq!(v["comments"][0]["file"], COMMIT_MSG);
+        assert_eq!(v["comments"][0]["code"], "subject");
+        d.next_file();
+        assert_eq!(d.files[d.sel].name, "src/a.rs");
+        assert_eq!(Diff::parse("x", SAMPLE).with_commits("\n").files.len(), 2);
     }
 }
