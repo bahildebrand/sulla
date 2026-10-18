@@ -9,7 +9,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::app::{App, InputKind, Mode, View};
+use crate::app::{App, InputKind, Mode, NewBeadForm, View};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let [main, status] =
@@ -31,6 +31,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Help) {
         help(f, app);
     }
+    if let Mode::NewBead(form) = &app.mode {
+        new_bead(f, form);
+    }
 }
 
 fn status_line(f: &mut Frame, area: Rect, app: &App) {
@@ -49,12 +52,15 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         Mode::Input { kind, buf } => {
             let prompt = match kind {
                 InputKind::Command => ":".to_string(),
-                InputKind::NewBead => "new bead: ".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
                 InputKind::Comment => "comment: ".to_string(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
         }
+        Mode::NewBead(_) => vec![
+            tag("NEW", Color::Green),
+            Span::raw(" Tab next field, Enter create, Esc cancel").dim(),
+        ],
         Mode::Confirm { msg, .. } => {
             vec![tag("CONFIRM", Color::Yellow), Span::raw(format!(" {msg}"))]
         }
@@ -82,7 +88,7 @@ const HELP: &[(&str, &str)] = &[
     ("Board", ""),
     ("h j k l / gg G", "move"),
     ("Enter / p / r", "open / progress / review"),
-    ("n", "new bead"),
+    ("n", "new bead popup (title, description, priority)"),
     ("+ -", "raise / lower priority"),
     ("X", "kill agent, hold bead"),
     ("D", "discard worktree + branch, hold bead"),
@@ -126,6 +132,57 @@ fn help(f: &mut Frame, _app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" sulla keys ")),
+        area,
+    );
+}
+
+fn new_bead(f: &mut Frame, form: &NewBeadForm) {
+    let [area] = Layout::vertical([Constraint::Length(9)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Length(64)])
+        .flex(Flex::Center)
+        .areas(area);
+    let label = |i: usize, name: &str| {
+        let s = Span::raw(format!("{name:<13}"));
+        if form.field == i {
+            s.bold().yellow()
+        } else {
+            s.dim()
+        }
+    };
+    let cursor = |i: usize| if form.field == i { "█" } else { "" };
+    let prio = (0..=4)
+        .map(|p| {
+            let s = Span::raw(format!(" P{p} "));
+            if p == form.priority {
+                s.black().on_cyan()
+            } else {
+                s.dim()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut prio_line = vec![label(2, "Priority")];
+    prio_line.extend(prio);
+    let lines = vec![
+        Line::from(vec![
+            label(0, "Title"),
+            Span::raw(format!("{}{}", form.title, cursor(0))),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            label(1, "Description"),
+            Span::raw(format!("{}{}", form.description, cursor(1))),
+        ]),
+        Line::raw(""),
+        Line::from(prio_line),
+        Line::raw(""),
+        Line::from("Tab/S-Tab field  Left/Right or 0-4 priority  Enter create  Esc cancel").dim(),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" new bead (description and priority optional) ")),
         area,
     );
 }

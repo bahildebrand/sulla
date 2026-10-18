@@ -31,9 +31,26 @@ pub enum View {
 
 pub enum InputKind {
     Command,
-    NewBead,
     Feedback(String),
     Comment,
+}
+
+pub struct NewBeadForm {
+    pub title: String,
+    pub description: String,
+    pub priority: u8,
+    pub field: usize,
+}
+
+impl Default for NewBeadForm {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            priority: 2,
+            field: 0,
+        }
+    }
 }
 
 pub enum Action {
@@ -47,6 +64,7 @@ pub enum Mode {
     Normal,
     Insert,
     Input { kind: InputKind, buf: String },
+    NewBead(NewBeadForm),
     Confirm { action: Action, msg: String },
     Help,
 }
@@ -367,6 +385,11 @@ impl App {
                 self.write_focused(&keys::paste(text, bracketed));
             }
             Mode::Input { buf, .. } => buf.push_str(&text.replace(['\r', '\n'], " ")),
+            Mode::NewBead(form) => match form.field {
+                0 => form.title.push_str(&text.replace(['\r', '\n'], " ")),
+                1 => form.description.push_str(&text.replace('\r', "")),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -376,6 +399,7 @@ impl App {
         match mode {
             Mode::Insert => self.insert_key(k),
             Mode::Input { kind, buf } => self.input_key(k, kind, buf),
+            Mode::NewBead(form) => self.new_bead_key(k, form),
             Mode::Confirm { action, .. } => {
                 if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                     self.confirm(action);
@@ -439,12 +463,61 @@ impl App {
         }
     }
 
+    fn new_bead_key(&mut self, k: KeyEvent, mut form: NewBeadForm) {
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => {
+                self.status = "cancelled".into();
+                return;
+            }
+            KeyCode::Enter if ctrl || shift || form.field == 2 || form.field == 0 => {
+                let title = form.title.trim().to_string();
+                if title.is_empty() {
+                    self.status = "title required".into();
+                    form.field = 0;
+                } else {
+                    self.create_bead(&title, form.description.trim(), form.priority);
+                    return;
+                }
+            }
+            KeyCode::Enter => form.field = 2,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 3,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 2) % 3,
+            KeyCode::Right | KeyCode::Char('-') if form.field == 2 => {
+                form.priority = (form.priority + 1).min(4)
+            }
+            KeyCode::Left | KeyCode::Char('+') | KeyCode::Char('=') if form.field == 2 => {
+                form.priority = form.priority.saturating_sub(1)
+            }
+            KeyCode::Char(c @ '0'..='4') if form.field == 2 => form.priority = c as u8 - b'0',
+            KeyCode::Backspace => {
+                match form.field {
+                    0 => form.title.pop(),
+                    1 => form.description.pop(),
+                    _ => None,
+                };
+            }
+            KeyCode::Char('u') if ctrl => match form.field {
+                0 => form.title.clear(),
+                1 => form.description.clear(),
+                _ => {}
+            },
+            KeyCode::Char(c) if !ctrl => match form.field {
+                0 => form.title.push(c),
+                1 => form.description.push(c),
+                _ => {}
+            },
+            _ => {}
+        }
+        self.mode = Mode::NewBead(form);
+    }
+
     fn submit(&mut self, kind: InputKind, text: String) {
         if text.is_empty() {
             return;
         }
         match kind {
-            InputKind::NewBead => self.create_bead(&text),
             InputKind::Feedback(id) => self.feedback(&id, &text),
             InputKind::Command => self.command(&text),
             InputKind::Comment => {
@@ -465,7 +538,7 @@ impl App {
         match name {
             "q" | "quit" => self.request_quit(),
             "q!" | "quit!" => self.quit = true,
-            "new" | "n" if !rest.is_empty() => self.create_bead(rest),
+            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2),
             "max" => match rest.parse() {
                 Ok(n) => {
                     self.cfg.max_agents = n;
@@ -483,8 +556,8 @@ impl App {
         }
     }
 
-    fn create_bead(&mut self, title: &str) {
-        let r = self.beads.create(title, 2);
+    fn create_bead(&mut self, title: &str, description: &str, priority: u8) {
+        let r = self.beads.create(title, description, priority);
         if let Some(id) = self.report(r) {
             self.status = format!("created {id}");
             self.mutated();
@@ -693,10 +766,7 @@ impl App {
             KeyCode::Char('G') => *row = len.saturating_sub(1),
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('n') => {
-                self.mode = Mode::Input {
-                    kind: InputKind::NewBead,
-                    buf: String::new(),
-                };
+                self.mode = Mode::NewBead(NewBeadForm::default());
             }
             _ => self.board_bead_key(k),
         }

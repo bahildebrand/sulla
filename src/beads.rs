@@ -211,11 +211,13 @@ impl Beads {
             .map(drop)
     }
 
-    pub fn create(&self, title: &str, priority: u8) -> Result<String> {
-        Ok(self
-            .run(&["q", title, "-p", &priority.to_string()])?
-            .trim()
-            .to_string())
+    pub fn create(&self, title: &str, description: &str, priority: u8) -> Result<String> {
+        let p = priority.to_string();
+        let mut args = vec!["create", title, "-p", &p, "--silent"];
+        if !description.is_empty() {
+            args.extend(["-d", description]);
+        }
+        Ok(self.run(&args)?.trim().to_string())
     }
 }
 
