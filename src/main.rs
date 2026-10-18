@@ -61,14 +61,14 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
-    let mut cfg = Config::load().wrap_err("loading config")?;
+    let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
+    let mut cfg = Config::load(&repo).wrap_err("loading config")?;
     if let Some(n) = args.max_agents {
         cfg.max_agents = n;
     }
     if args.base.is_some() {
         cfg.base_branch = args.base;
     }
-    let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
     beads::Beads::new(&repo)
         .list_all()
         .wrap_err("bd is not usable here, run `bd init` in the repo")?;

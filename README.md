@@ -45,7 +45,11 @@ Press `?` in the app for the full list.
 
 ## Config
 
-`~/.config/sulla/config.toml`, all optional:
+`~/.config/sulla/config.toml`, all optional. A repo can override it with
+`<repo>/.sulla/config.toml` (untracked, `.sulla/` is in `.git/info/exclude`).
+The two files are merged key by key: nested tables like `[claude]` merge
+recursively, arrays and scalars in the repo file replace the global ones.
+CLI flags (`--max-agents`, `--base`) win over both.
 
 ```toml
 max_agents = 3
@@ -54,6 +58,7 @@ poll_secs = 2
 base_branch = "main"
 kache = true
 agent = "copilot" # or "claude"
+sandbox = "worktree" # or "incus"
 
 [copilot]
 bin = "copilot"
@@ -64,6 +69,21 @@ extra_args = []
 bin = "claude"
 model = "opus"
 extra_args = []
+
+# Incus system container sandbox, used when sandbox = "incus"
+[incus]
+bin = "incus"
+golden = "sulla-golden"   # container that slot containers are copied from
+snapshot = "clean"        # snapshot on each slot container used for hard resets
+prefix = "sulla"          # slot containers are named <prefix>-<repo-slug>-<slot>
+storage_pool = "default"
+memory = "8GiB"           # limits.memory per slot container
+# cpus = 4                # limits.cpu per slot container, unset by default
+nofile = 262144           # limits.kernel.nofile
+reset_every = 10          # hard reset a slot after this many beads, 0 = never
+reset_volumes = true      # light reset also prunes Docker volumes
+mounts = ["~/.claude", "~/.copilot"] # host paths shared at the same path
+env = {}                  # extra env passed to agents in containers
 ```
 
 Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
