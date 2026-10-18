@@ -647,7 +647,13 @@ impl App {
     }
 
     fn open_review(&mut self, id: String) {
-        let r = self.git.diff(&id, &self.base);
+        let done =
+            self.bead(&id).and_then(|b| b.column(Utc::now(), i64::MAX)) == Some(Column::Done);
+        let r = if done {
+            self.git.merged_diff(&id)
+        } else {
+            self.git.diff(&id, &self.base)
+        };
         if let Some(text) = self.report(r) {
             self.view = View::Review(Diff::parse(&id, &text));
         }
@@ -700,8 +706,7 @@ impl App {
         let Some(b) = self.selected() else { return };
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
-                Column::Review => self.open_review(b.id),
-                Column::Done => self.status = format!("{} is done", b.id),
+                Column::Review | Column::Done => self.open_review(b.id),
                 _ => self.open_progress(b.id),
             },
             KeyCode::Char('p') => self.open_progress(b.id),

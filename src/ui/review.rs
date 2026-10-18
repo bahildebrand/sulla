@@ -263,7 +263,10 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
             let n = diff.comment_count(&x.name);
             let mut spans = vec![Span::raw(base.to_string())];
             if n > 0 {
-                spans.push(Span::styled(format!(" 💬{n}"), Style::new().fg(Color::Magenta)));
+                spans.push(Span::styled(
+                    format!(" 💬{n}"),
+                    Style::new().fg(Color::Magenta),
+                ));
             }
             ListItem::new(Line::from(spans))
         })
@@ -318,12 +321,10 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, title: &str) {
         .min(rows.len().saturating_sub(height));
     let text: Vec<Line> = rows.into_iter().skip(top).take(height).collect();
     f.render_widget(
-        Paragraph::new(text).block(
-            Block::bordered().title(Span::styled(
-                format!(" [{}/{}] {} ", diff.sel + 1, diff.files.len(), file.name),
-                Style::new().fg(Color::Yellow),
-            )),
-        ),
+        Paragraph::new(text).block(Block::bordered().title(Span::styled(
+            format!(" [{}/{}] {} ", diff.sel + 1, diff.files.len(), file.name),
+            Style::new().fg(Color::Yellow),
+        ))),
         right,
     );
 }

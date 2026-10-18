@@ -30,6 +30,10 @@ pub fn branch(id: &str) -> String {
     format!("sulla/{id}")
 }
 
+fn merged_ref(id: &str, part: &str) -> String {
+    format!("refs/sulla/merged/{id}/{part}")
+}
+
 impl Git {
     pub fn new(repo: PathBuf) -> Self {
         Self { repo }
@@ -139,6 +143,8 @@ impl Git {
             let _ = run(&wt, &["rebase", "--abort"]);
             bail!("rebase onto {base} failed, worktree left untouched: {e}");
         }
+        let merged_base = run(&wt, &["merge-base", base, "HEAD"])?.trim().to_string();
+        let merged_head = run(&wt, &["rev-parse", "HEAD"])?.trim().to_string();
         if self.current_branch()? == base {
             let blocked = self.dirty_overlap(base, &br)?;
             if !blocked.is_empty() {
@@ -152,7 +158,27 @@ impl Git {
         } else {
             run(&self.repo, &["fetch", ".", &format!("{br}:{base}")])?;
         }
+        run(
+            &self.repo,
+            &["update-ref", &merged_ref(id, "base"), &merged_base],
+        )?;
+        run(
+            &self.repo,
+            &["update-ref", &merged_ref(id, "head"), &merged_head],
+        )?;
         self.remove(id)
+    }
+
+    pub fn merged_diff(&self, id: &str) -> Result<String> {
+        let (b, h) = (merged_ref(id, "base"), merged_ref(id, "head"));
+        if !self.ref_exists(&b) || !self.ref_exists(&h) {
+            bail!("no recorded merge for {id}");
+        }
+        run(&self.repo, &["diff", "--no-color", "--no-ext-diff", &b, &h])
+    }
+
+    fn ref_exists(&self, r: &str) -> bool {
+        run(&self.repo, &["rev-parse", "--verify", "--quiet", r]).is_ok()
     }
 
     fn dirty_overlap(&self, base: &str, br: &str) -> Result<Vec<String>> {
@@ -228,6 +254,8 @@ mod tests {
         assert!(dir.join("b.txt").exists());
         assert!(!wt.exists());
         assert!(!g.branch_exists("sulla/x-1"));
+        let merged = g.merged_diff("x-1").unwrap();
+        assert!(merged.contains("b.txt") && !merged.contains("c.txt"));
         assert!(
             run(&dir, &["status", "--porcelain"])
                 .unwrap()
