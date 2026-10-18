@@ -109,6 +109,7 @@ pub struct App {
     tx: Sender<Event>,
     refresh: Sender<()>,
     term: (u16, u16),
+    pub pending_edit: Option<PathBuf>,
     pub quit: bool,
 }
 
@@ -158,6 +159,7 @@ impl App {
             tx,
             refresh,
             term: (80, 24),
+            pending_edit: None,
             quit: false,
         })
     }
@@ -878,6 +880,38 @@ impl App {
         }
     }
 
+    fn request_edit(&mut self, id: &str) {
+        if id == CHAT_ID {
+            return;
+        }
+        let path = self.git.worktree_path(id);
+        if !path.join(".git").exists() {
+            self.status = format!("no worktree for {id}");
+            return;
+        }
+        self.pending_edit = Some(path);
+        if self.agents.get(id).is_some_and(|a| a.alive) {
+            self.status = format!("agent {id} is running, edits may conflict");
+        }
+    }
+
+    pub fn edit_finished(&mut self, r: std::io::Result<std::process::ExitStatus>) {
+        match r {
+            Ok(s) if s.success() => {}
+            Ok(s) => self.status = format!("editor exited with {s}"),
+            Err(e) => self.status = format!("editor failed: {e}"),
+        }
+        let View::Review(d) = &mut self.view else {
+            return;
+        };
+        let (id, sel, comments) = (d.id.clone(), d.sel, std::mem::take(&mut d.comments));
+        self.open_review(id);
+        if let View::Review(d) = &mut self.view {
+            d.comments = comments;
+            d.sel = sel.min(d.files.len().saturating_sub(1));
+        }
+    }
+
     fn open_review(&mut self, id: String) {
         let done =
             self.bead(&id).and_then(|b| b.column(Utc::now(), i64::MAX)) == Some(Column::Done);
@@ -986,6 +1020,7 @@ impl App {
                 _ => self.open_progress(b.id),
             },
             KeyCode::Char('i') => self.inspect(b.id),
+            KeyCode::Char('e') => self.request_edit(&b.id),
             KeyCode::Char('p') => self.open_progress(b.id),
             KeyCode::Char('r') => self.open_review(b.id),
             KeyCode::Char('X') => self.confirm_kill(b.id),
@@ -1039,6 +1074,7 @@ impl App {
                 }
             }
             (KeyCode::Char('A'), _) => self.relaunch(&id),
+            (KeyCode::Char('e'), _) => self.request_edit(&id),
             _ => {}
         }
     }
@@ -1097,6 +1133,7 @@ impl App {
             KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
             KeyCode::Char('i') => self.swap_to_agent(true),
             KeyCode::Char('R') => self.open_review(id),
+            KeyCode::Char('e') => self.request_edit(&id),
             _ => {}
         }
     }

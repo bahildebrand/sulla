@@ -115,6 +115,7 @@ const HELP: &[(&str, &str)] = &[
     ("h j k l / gg G", "move"),
     ("Enter / p / r", "open / progress / review"),
     ("i", "inspect bead (description, labels, deps)"),
+    ("e", "open $EDITOR in bead worktree"),
     (
         "n",
         "new bead popup (title, description, priority, start state)",
@@ -133,6 +134,7 @@ const HELP: &[(&str, &str)] = &[
     ("Esc Esc / Ctrl-]", "leave insert mode"),
     ("j k / Ctrl-u Ctrl-d / gg G", "scroll"),
     ("X R r A", "kill / mark review / review / relaunch"),
+    ("e", "open $EDITOR in bead worktree"),
     ("q / Esc", "back to review if opened from it, else board"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
@@ -145,6 +147,7 @@ const HELP: &[(&str, &str)] = &[
     ("p / a", "swap to agent view (keeps comments, r to return)"),
     ("i", "swap to agent view in insert mode"),
     ("R", "reload diff"),
+    ("e", "open $EDITOR in bead worktree, reloads diff after"),
 ];
 
 fn help(f: &mut Frame, _app: &App) {
