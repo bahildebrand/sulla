@@ -51,6 +51,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 InputKind::Command => ":".to_string(),
                 InputKind::NewBead => "new bead: ".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
+                InputKind::Comment => "comment: ".to_string(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
         }
@@ -95,8 +96,10 @@ const HELP: &[(&str, &str)] = &[
     ("j k / Ctrl-u Ctrl-d / gg G", "scroll"),
     ("X R r A", "kill / mark review / review / relaunch"),
     ("Review", ""),
-    ("j k / Ctrl-d Ctrl-u / gg G", "scroll"),
-    ("]f [f", "next / prev file"),
+    ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
+    ("Tab J / S-Tab K / ]f [f", "next / prev file"),
+    ("c / x", "comment on line / delete its comments"),
+    ("S", "send all comments to agent"),
     ("m", "rebase + fast-forward merge"),
     ("s", "send feedback to agent"),
     ("D", "discard worktree + branch, hold bead"),

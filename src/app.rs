@@ -33,6 +33,7 @@ pub enum InputKind {
     Command,
     NewBead,
     Feedback(String),
+    Comment,
 }
 
 pub enum Action {
@@ -446,6 +447,15 @@ impl App {
             InputKind::NewBead => self.create_bead(&text),
             InputKind::Feedback(id) => self.feedback(&id, &text),
             InputKind::Command => self.command(&text),
+            InputKind::Comment => {
+                if let View::Review(d) = &mut self.view {
+                    if d.add_comment(&text) {
+                        self.status = format!("{} comment(s), S to send", d.comments.len());
+                    } else {
+                        self.status = "cannot comment on this line".into();
+                    }
+                }
+            }
         }
     }
 
@@ -753,15 +763,31 @@ impl App {
         let id = d.id.clone();
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => self.view = View::Board,
-            KeyCode::Char('j') | KeyCode::Down => d.scroll_by(1),
-            KeyCode::Char('k') | KeyCode::Up => d.scroll_by(-1),
-            KeyCode::Char('d') if ctrl => d.scroll_by(half),
-            KeyCode::Char('u') if ctrl => d.scroll_by(-half),
-            KeyCode::Char('g') if pending == Some('g') => d.scroll = 0,
-            KeyCode::Char('G') => d.scroll_by(isize::MAX / 2),
+            KeyCode::Char('j') | KeyCode::Down => d.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => d.move_cursor(-1),
+            KeyCode::Char('d') if ctrl => d.move_cursor(half),
+            KeyCode::Char('u') if ctrl => d.move_cursor(-half),
+            KeyCode::Char('g') if pending == Some('g') => d.set_cursor(0),
+            KeyCode::Char('G') => d.set_cursor(usize::MAX),
+            KeyCode::Tab | KeyCode::Char('J') => d.next_file(),
+            KeyCode::BackTab | KeyCode::Char('K') => d.prev_file(),
             KeyCode::Char('f') if pending == Some(']') => d.next_file(),
             KeyCode::Char('f') if pending == Some('[') => d.prev_file(),
             KeyCode::Char(c @ ('g' | ']' | '[')) => self.pending = Some(c),
+            KeyCode::Char('c') => {
+                self.mode = Mode::Input {
+                    kind: InputKind::Comment,
+                    buf: String::new(),
+                };
+            }
+            KeyCode::Char('x') => {
+                let n = d.delete_comments_at_cursor();
+                self.status = format!("deleted {n} comment(s)");
+            }
+            KeyCode::Char('S') => match d.feedback() {
+                Some(text) => self.feedback(&id, &text),
+                None => self.status = "no comments to send".into(),
+            },
             KeyCode::Char('m') => {
                 self.mode = Mode::Confirm {
                     msg: format!("Rebase {id} onto {} and fast-forward merge? y/n", self.base),
