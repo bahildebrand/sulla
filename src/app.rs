@@ -121,7 +121,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config, repo: PathBuf, tx: Sender<Event>) -> Result<Self> {
-        let sandbox = sandbox::build(&cfg)?;
+        let sandbox = sandbox::build(&cfg, &repo)?;
         let git = Git::new(repo.clone());
         git.ensure_ignored()?;
         let base = match &cfg.base_branch {

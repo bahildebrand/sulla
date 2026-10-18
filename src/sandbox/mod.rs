@@ -1,7 +1,12 @@
-use std::collections::HashMap;
+mod incus;
 
-use color_eyre::{Result, eyre::bail};
+use std::collections::HashMap;
+use std::path::Path;
+
+use color_eyre::Result;
 use portable_pty::CommandBuilder;
+
+pub use incus::Incus;
 
 use crate::agent::Launch;
 use crate::config::{Config, SandboxKind};
@@ -44,11 +49,11 @@ impl Sandbox for Worktree {
     fn shutdown(&mut self) {}
 }
 
-pub fn build(cfg: &Config) -> Result<Box<dyn Sandbox>> {
-    match cfg.sandbox {
-        SandboxKind::Worktree => Ok(Box::new(Worktree)),
-        SandboxKind::Incus => bail!("incus sandbox not implemented yet"),
-    }
+pub fn build(cfg: &Config, repo: &Path) -> Result<Box<dyn Sandbox>> {
+    Ok(match cfg.sandbox {
+        SandboxKind::Worktree => Box::new(Worktree),
+        SandboxKind::Incus => Box::new(Incus::new(cfg.incus.clone(), repo.to_path_buf())?),
+    })
 }
 
 #[derive(Default)]
