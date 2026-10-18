@@ -109,7 +109,7 @@ const HELP: &[(&str, &str)] = &[
     ("?", "help"),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :refresh :kill <id>)",
+        "command (:q :q! :new <title> :max <n> :refresh :kill <id> :chat [new])",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
@@ -119,6 +119,7 @@ const HELP: &[(&str, &str)] = &[
         "n",
         "new bead popup (title, description, priority, start state)",
     ),
+    ("c / C", "open conversation agent / start a fresh one"),
     ("+ -", "raise / lower priority"),
     ("X", "kill agent, hold bead"),
     ("D", "discard worktree + branch, hold bead"),

@@ -25,6 +25,10 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
 - Killing an agent holds its bead in Pending until released with `s`.
 - Agents still marked running when sulla restarts are resumed via their agent session.
+- `c` opens a conversation agent in the main checkout, not tied to any bead. Its first prompt
+  explains the sulla states and how to create beads (staged in Backlog, wired with `bd dep add`,
+  released to Pending on your go), so you can plan work and have it fill the queue. It does not
+  count toward `max_agents`. `X` ends it, `C` starts a fresh one.
 
 ## Keys
 
@@ -32,10 +36,10 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `Enter` open, `p` progress, `r` review, `i` inspect bead, `n` new bead, `+`/`-` priority, `X` kill, `D` discard, `s` release, `R` mark review, `A` launch/resume, `q` quit |
+| Board | `hjkl` `gg` `G` move, `Enter` open, `p` progress, `r` review, `i` inspect bead, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `R` mark review, `A` launch/resume, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` scroll |
 | Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `m` merge, `s` send feedback, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept) |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:refresh` `:kill <id>` |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:refresh` `:kill <id>` `:chat [new]` |
 
 ## Config
 

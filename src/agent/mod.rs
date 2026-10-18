@@ -15,8 +15,12 @@ pub use copilot::Copilot;
 use crate::app::Event;
 use crate::beads::Bead;
 
+pub const CHAT_ID: &str = "@chat";
+
 pub struct Launch {
-    pub bead: Bead,
+    pub id: String,
+    pub session: String,
+    pub bead: bool,
     pub worktree: PathBuf,
     pub resume: bool,
     pub prompt: Option<String>,
@@ -44,6 +48,48 @@ pub fn task_prompt(bead: &Bead) -> String {
          A human will review the diff and may send feedback.",
         title = bead.title,
     )
+}
+
+pub fn chat_prompt(base: &str, max_agents: usize) -> String {
+    format!(
+        "You are a planning assistant inside sulla, a TUI that runs coding agents off a beads \
+         (`bd`) queue. You are in the main checkout of the repo on branch {base}. The user wants \
+         to talk through work and usually have you turn it into beads that sulla will run. \
+         Do not implement code changes yourself unless the user explicitly asks.\n\n\
+         How sulla works:\n\
+         - Board columns come from `sulla:<state>` labels: Backlog (`sulla:backlog`, never auto \
+         scheduled), Pending (no sulla label, or `sulla:held` which waits for the user to \
+         release it), In Progress (`sulla:running`), Ready for Review (`sulla:review`), Done \
+         (closed).\n\
+         - Sulla claims ready Pending beads (open, no unmet blockers, not epics) in priority \
+         order (P0 first, then oldest) and runs up to {max_agents} agents at once.\n\
+         - Each bead gets a fresh agent in its own git worktree on branch `sulla/<id>` off \
+         {base}. That agent sees only the bead title and description, so every description \
+         must be self-contained: goal, relevant files, constraints, and acceptance criteria.\n\
+         - The human reviews each diff in sulla and merges it into {base}, which closes the \
+         bead.\n\n\
+         Creating beads:\n\
+         - `bd create \"Title\" -d \"description\" -p <0-4> -t <task|bug|feature> -l \
+         sulla:backlog --silent` prints the new id. Always stage new beads in Backlog first so \
+         sulla does not start them before the plan is wired up.\n\
+         - Order work with `bd dep add <blocked-id> <blocker-id>`; sulla only starts a bead once \
+         its blockers are closed. Prefer small, independently mergeable beads, and avoid \
+         parallel beads that edit the same files.\n\
+         - Inspect existing work with `bd list`, `bd ready`, and `bd show <id>`.\n\
+         - When the user approves, release beads to Pending with \
+         `bd update <id> --remove-label sulla:backlog`.\n\
+         - Never add or remove `sulla:running` or `sulla:review` labels, never claim beads, \
+         and never close beads. Sulla manages those.\n\n\
+         Reply with one short line saying you are ready, then wait for the user."
+    )
+}
+
+pub fn chat_session(repo: &std::path::Path) -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    session_id(repo, &format!("{CHAT_ID}{nonce}"))
 }
 
 pub fn session_id(repo: &std::path::Path, bead_id: &str) -> String {
@@ -94,7 +140,9 @@ impl Agent {
         let mut cmd = backend.command(launch);
         cmd.cwd(&launch.worktree);
         cmd.env("TERM", "xterm-256color");
-        cmd.env("SULLA_BEAD", &launch.bead.id);
+        if launch.bead {
+            cmd.env("SULLA_BEAD", &launch.id);
+        }
         if kache {
             cmd.env("RUSTC_WRAPPER", "kache");
         }
@@ -104,7 +152,7 @@ impl Agent {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 5000)));
         let mut reader = pair.master.try_clone_reader().map_err(|e| eyre!(e))?;
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
-        let id = launch.bead.id.clone();
+        let id = launch.id.clone();
         let p = parser.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];

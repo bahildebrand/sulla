@@ -7,7 +7,7 @@ use chrono::Utc;
 use color_eyre::Result;
 use crossterm::event::{Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::agent::{Agent, Backend, Claude, Copilot, Launch};
+use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::config::{AgentKind, Config};
 use crate::git::{Git, RebaseConflict};
@@ -88,6 +88,8 @@ const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 pub struct App {
     pub cfg: Config,
     pub base: String,
+    repo: PathBuf,
+    chat_session: Option<String>,
     beads: Beads,
     git: Git,
     backend: Box<dyn Backend>,
@@ -127,16 +129,16 @@ impl App {
         let backend: Box<dyn Backend> = match cfg.agent {
             AgentKind::Copilot => Box::new(Copilot {
                 cfg: cfg.copilot.clone(),
-                repo,
             }),
             AgentKind::Claude => Box::new(Claude {
                 cfg: cfg.claude.clone(),
-                repo,
             }),
         };
         Ok(Self {
             cfg,
             base,
+            repo,
+            chat_session: None,
             beads,
             git,
             backend,
@@ -208,7 +210,7 @@ impl App {
         let now = Utc::now();
         self.agents
             .iter()
-            .filter(|(_, a)| a.alive)
+            .filter(|(id, a)| a.alive && id.as_str() != CHAT_ID)
             .filter(|(id, _)| {
                 !matches!(
                     self.bead(id).and_then(|b| b.column(now, i64::MAX)),
@@ -350,12 +352,54 @@ impl App {
     fn start_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
         let worktree = self.git.ensure_worktree(&bead.id, &self.base)?;
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
-        let launch = Launch {
-            bead,
+        let prompt = prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead)));
+        self.spawn(Launch {
+            session: agent::session_id(&self.repo, &bead.id),
+            id: bead.id,
+            bead: true,
             worktree,
             resume,
             prompt,
+        })
+    }
+
+    fn start_chat(&mut self, resume: bool) -> Result<()> {
+        let resume = resume && self.chat_session.is_some();
+        let session = match &self.chat_session {
+            Some(s) if resume => s.clone(),
+            _ => agent::chat_session(&self.repo),
         };
+        self.chat_session = Some(session.clone());
+        self.spawn(Launch {
+            id: CHAT_ID.to_string(),
+            session,
+            bead: false,
+            worktree: self.repo.clone(),
+            resume,
+            prompt: (!resume).then(|| agent::chat_prompt(&self.base, self.cfg.max_agents)),
+        })
+    }
+
+    fn open_chat(&mut self, fresh: bool) {
+        self.parked_review = None;
+        if fresh {
+            if let Some(mut a) = self.agents.remove(CHAT_ID) {
+                a.kill();
+            }
+            self.chat_session = None;
+        }
+        if !self.agents.get(CHAT_ID).is_some_and(|a| a.alive) {
+            self.agents.remove(CHAT_ID);
+            let r = self.start_chat(true);
+            if self.report(r).is_none() {
+                return;
+            }
+        }
+        self.open_progress(CHAT_ID.to_string());
+        self.enter_insert(CHAT_ID);
+    }
+
+    fn spawn(&mut self, launch: Launch) -> Result<()> {
         let (r, c) = self.pty_size();
         let agent = Agent::spawn(
             self.backend.as_ref(),
@@ -365,7 +409,7 @@ impl App {
             c,
             self.tx.clone(),
         )?;
-        self.agents.insert(launch.bead.id, agent);
+        self.agents.insert(launch.id, agent);
         Ok(())
     }
 
@@ -574,6 +618,7 @@ impl App {
                 self.mutated();
             }
             "kill" if !rest.is_empty() => self.confirm_kill(rest.to_string()),
+            "chat" => self.open_chat(rest == "new"),
             _ => self.status = format!("unknown command: {cmd}"),
         }
     }
@@ -601,6 +646,13 @@ impl App {
     }
 
     fn confirm_kill(&mut self, id: String) {
+        if id == CHAT_ID {
+            self.mode = Mode::Confirm {
+                msg: "End the conversation? y/n".into(),
+                action: Action::Kill(id),
+            };
+            return;
+        }
         self.mode = Mode::Confirm {
             msg: format!("Kill agent {id} and hold the bead? y/n"),
             action: Action::Kill(id),
@@ -620,6 +672,12 @@ impl App {
     fn kill(&mut self, id: &str) {
         if let Some(mut a) = self.agents.remove(id) {
             a.kill();
+        }
+        if id == CHAT_ID {
+            self.chat_session = None;
+            self.status = "conversation ended".into();
+            self.view = View::Board;
+            return;
         }
         let r = self
             .beads
@@ -753,6 +811,13 @@ impl App {
             return;
         }
         self.agents.remove(id);
+        if id == CHAT_ID {
+            let r = self.start_chat(true);
+            if self.report(r).is_some() {
+                self.status = "conversation resumed".into();
+            }
+            return;
+        }
         let Some(b) = self.bead(id).cloned() else {
             return;
         };
@@ -870,6 +935,8 @@ impl App {
             KeyCode::Char('n') => {
                 self.mode = Mode::NewBead(NewBeadForm::default());
             }
+            KeyCode::Char('c') => self.open_chat(false),
+            KeyCode::Char('C') => self.open_chat(true),
             _ => self.board_bead_key(k),
         }
     }
@@ -947,8 +1014,10 @@ impl App {
         let Some(id) = self.focused_id() else { return };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pty_size().0 / 2) as isize;
+        let chat = id == CHAT_ID;
         let agent = self.agents.get_mut(&id);
         match (k.code, agent) {
+            (KeyCode::Char('R' | 'r'), _) if chat => {}
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
                 if !self.back_to_review(id) {
                     self.view = View::Board;

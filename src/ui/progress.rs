@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use tui_term::widget::PseudoTerminal;
 
+use crate::agent::CHAT_ID;
 use crate::app::{App, Mode};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
@@ -14,10 +15,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
         .find(|b| b.id == id)
         .map(|b| b.title.as_str())
         .unwrap_or("");
-    let mut spans = vec![
-        Span::raw(format!(" {id} ")).bold(),
-        Span::raw(format!("{title} ")),
-    ];
+    let mut spans = if id == CHAT_ID {
+        vec![Span::raw(" conversation ").bold()]
+    } else {
+        vec![
+            Span::raw(format!(" {id} ")).bold(),
+            Span::raw(format!("{title} ")),
+        ]
+    };
     if app.parked_review.as_ref().is_some_and(|d| d.id == id) {
         spans.push(Span::styled(
             "[r back to review] ",

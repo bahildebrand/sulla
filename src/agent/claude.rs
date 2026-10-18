@@ -1,13 +1,10 @@
-use std::path::PathBuf;
-
 use portable_pty::CommandBuilder;
 
-use super::{Backend, Launch, session_id, task_prompt};
+use super::{Backend, Launch};
 use crate::config::ClaudeConfig;
 
 pub struct Claude {
     pub cfg: ClaudeConfig,
-    pub repo: PathBuf,
 }
 
 impl Backend for Claude {
@@ -22,19 +19,13 @@ impl Backend for Claude {
             cmd.args(["--model", m]);
         }
         cmd.args(&self.cfg.extra_args);
-        let id = session_id(&self.repo, &launch.bead.id);
         let flag = if launch.resume {
             "--resume"
         } else {
             "--session-id"
         };
-        cmd.args([flag, &id]);
-        let prompt = match (&launch.prompt, launch.resume) {
-            (Some(p), _) => Some(p.clone()),
-            (None, true) => None,
-            (None, false) => Some(task_prompt(&launch.bead)),
-        };
-        if let Some(p) = prompt {
+        cmd.args([flag, &launch.session]);
+        if let Some(p) = &launch.prompt {
             cmd.arg(p);
         }
         cmd
@@ -43,14 +34,15 @@ impl Backend for Claude {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use crate::beads::Bead;
 
     fn launch(resume: bool, prompt: Option<&str>) -> Launch {
-        let bead: Bead =
-            serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
         Launch {
-            bead,
+            id: "x-1".into(),
+            session: "s-1".into(),
+            bead: true,
             worktree: PathBuf::from("/w"),
             resume,
             prompt: prompt.map(String::from),
@@ -67,16 +59,15 @@ mod tests {
     fn backend() -> Claude {
         Claude {
             cfg: ClaudeConfig::default(),
-            repo: PathBuf::from("/r"),
         }
     }
 
     #[test]
     fn fresh_launch_sets_session_and_prompt() {
-        let a = args(&backend().command(&launch(false, None)));
+        let a = args(&backend().command(&launch(false, Some("do it"))));
         assert_eq!(a[0], "claude");
         assert!(a.contains(&"--session-id".to_string()));
-        assert!(a.last().unwrap().contains("bead x-1"));
+        assert_eq!(a.last().unwrap(), "do it");
     }
 
     #[test]
@@ -87,8 +78,9 @@ mod tests {
     }
 
     #[test]
-    fn feedback_prompt_overrides_task_prompt() {
+    fn resume_passes_feedback_prompt() {
         let a = args(&backend().command(&launch(true, Some("fix it"))));
+        assert_eq!(a[a.len() - 3], "--resume");
         assert_eq!(a.last().unwrap(), "fix it");
     }
 }
