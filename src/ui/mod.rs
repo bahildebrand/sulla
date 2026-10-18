@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
+use review::Diff;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let [main, status] =
@@ -37,6 +38,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Inspect { id, text, scroll } = &app.mode {
         inspect(f, id, text, *scroll);
     }
+    if let (
+        Mode::Input {
+            kind: InputKind::Comment,
+            buf,
+        },
+        View::Review(d),
+    ) = (&app.mode, &app.view)
+    {
+        comment(f, d, buf);
+    }
 }
 
 fn status_line(f: &mut Frame, area: Rect, app: &App) {
@@ -52,11 +63,18 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             tag("INSERT", Color::Green),
             Span::raw(" Esc Esc or Ctrl-] to leave").dim(),
         ],
+        Mode::Input {
+            kind: InputKind::Comment,
+            ..
+        } => vec![
+            tag("COMMENT", Color::Magenta),
+            Span::raw(" Enter add, Ctrl-u clear, Esc cancel").dim(),
+        ],
         Mode::Input { kind, buf } => {
             let prompt = match kind {
                 InputKind::Command => ":".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
-                InputKind::Comment => "comment: ".to_string(),
+                InputKind::Comment => String::new(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
         }
@@ -237,6 +255,43 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(Block::bordered().title(" new bead (only title required) ")),
+        area,
+    );
+}
+
+fn comment(f: &mut Frame, d: &Diff, buf: &str) {
+    let Some((file, line)) = d.comment_target() else {
+        return;
+    };
+    let inner_width = 62usize;
+    let wrapped = |text: &str| text.chars().count().div_ceil(inner_width).max(1);
+    let code = line.text.replace('\t', "    ");
+    let input = format!("{buf}█");
+    let rows = wrapped(&code) + wrapped(&input) + 4;
+    let height = (rows as u16 + 2).min(f.area().height);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Length(64)])
+        .flex(Flex::Center)
+        .areas(area);
+    let loc = match (line.new, line.old) {
+        (Some(n), _) => format!("{}:{n}", file.name),
+        (None, Some(o)) => format!("{}:{o} (old)", file.name),
+        _ => file.name.clone(),
+    };
+    let lines = vec![
+        Line::from(code).dim(),
+        Line::raw(""),
+        Line::from(input),
+        Line::raw(""),
+        Line::from("Enter add  Ctrl-u clear  Esc cancel").dim(),
+    ];
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(format!(" comment on {loc} "))),
         area,
     );
 }

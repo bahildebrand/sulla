@@ -188,16 +188,16 @@ impl Diff {
         c.file == file.name && c.old == l.old && c.new == l.new
     }
 
+    pub fn comment_target(&self) -> Option<(&FileDiff, &DLine)> {
+        let f = self.files.get(self.sel)?;
+        let l = f.lines.get(f.cursor)?;
+        (l.old.is_some() || l.new.is_some()).then_some((f, l))
+    }
+
     pub fn add_comment(&mut self, text: &str) -> bool {
-        let Some(f) = self.files.get(self.sel) else {
+        let Some((f, l)) = self.comment_target() else {
             return false;
         };
-        let Some(l) = f.lines.get(f.cursor) else {
-            return false;
-        };
-        if l.old.is_none() && l.new.is_none() {
-            return false;
-        }
         let c = Comment {
             file: f.name.clone(),
             old: l.old,

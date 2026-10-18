@@ -989,10 +989,14 @@ impl App {
             KeyCode::Char('f') if pending == Some('[') => d.prev_file(),
             KeyCode::Char(c @ ('g' | ']' | '[')) => self.pending = Some(c),
             KeyCode::Char('c') => {
-                self.mode = Mode::Input {
-                    kind: InputKind::Comment,
-                    buf: String::new(),
-                };
+                if d.comment_target().is_some() {
+                    self.mode = Mode::Input {
+                        kind: InputKind::Comment,
+                        buf: String::new(),
+                    };
+                } else {
+                    self.status = "cannot comment on this line".into();
+                }
             }
             KeyCode::Char('x') => {
                 let n = d.delete_comments_at_cursor();
