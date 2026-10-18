@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use color_eyre::{Result, eyre::eyre};
@@ -52,10 +53,109 @@ impl Host {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reset {
+    None,
+    Light,
+    Hard,
+}
+
+pub fn decide(outcome: Outcome, count: u32, reset_every: u32, light_ok: bool) -> Reset {
+    match outcome {
+        Outcome::Exited => Reset::None,
+        Outcome::Discarded => Reset::Hard,
+        _ if reset_every > 0 && count >= reset_every => Reset::Hard,
+        _ if !light_ok => Reset::Hard,
+        _ => Reset::Light,
+    }
+}
+
+fn light_script(uid: u32, volumes: bool) -> String {
+    let mut s = String::from("docker ps -aq | xargs -r docker rm -f && docker network prune -f");
+    if volumes {
+        s.push_str(" && docker volume prune -af");
+    }
+    s.push_str(&format!(" && {{ pkill -KILL -u {uid}; [ $? -le 1 ]; }}"));
+    s
+}
+
+#[derive(Debug, Clone)]
+struct Cli {
+    bin: String,
+}
+
+impl Cli {
+    fn run<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
+        let out = Command::new(&self.bin).args(args).output()?;
+        if !out.status.success() {
+            let argv: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
+            return Err(eyre!(
+                "{} {}: {}",
+                self.bin,
+                argv.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn query(&self, path: &str) -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(&self.run(&["query", path])?)?)
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.run(&["query", &format!("/1.0/instances/{name}")])
+            .is_ok()
+    }
+
+    fn running(&self, name: &str) -> Result<bool> {
+        let v = self.query(&format!("/1.0/instances/{name}/state"))?;
+        Ok(v["status"].as_str() == Some("Running"))
+    }
+}
+
+struct Resetter {
+    cli: Cli,
+    name: String,
+    snapshot: String,
+    script: String,
+    outcome: Outcome,
+    count: u32,
+    reset_every: u32,
+}
+
+impl Resetter {
+    fn run(self) -> Result<Reset> {
+        let mut plan = decide(self.outcome, self.count, self.reset_every, true);
+        if plan == Reset::Light {
+            tracing::info!("incus: light reset of {}", self.name);
+            let r = self
+                .cli
+                .run(&["exec", &self.name, "--", "sh", "-c", &self.script]);
+            if let Err(e) = &r {
+                tracing::warn!("incus: light reset of {} failed: {e:#}", self.name);
+            }
+            plan = decide(self.outcome, self.count, self.reset_every, r.is_ok());
+        }
+        if plan == Reset::Hard {
+            tracing::info!("incus: hard reset of {} to {}", self.name, self.snapshot);
+            if self.cli.running(&self.name)? {
+                self.cli.run(&["stop", "--force", &self.name])?;
+            }
+            self.cli
+                .run(&["snapshot", "restore", &self.name, &self.snapshot])?;
+        }
+        Ok(plan)
+    }
+}
+
 pub struct Incus {
     cfg: IncusConfig,
     repo: PathBuf,
     host: Host,
+    cli: Cli,
+    counts: HashMap<usize, u32>,
+    resets: HashMap<usize, JoinHandle<Result<Reset>>>,
 }
 
 impl Incus {
@@ -71,7 +171,17 @@ impl Incus {
             Ok(_) => {}
         }
         let host = Host::detect()?;
-        let me = Self { cfg, repo, host };
+        let cli = Cli {
+            bin: cfg.bin.clone(),
+        };
+        let me = Self {
+            cfg,
+            repo,
+            host,
+            cli,
+            counts: HashMap::new(),
+            resets: HashMap::new(),
+        };
         if !me.exists(&me.cfg.golden) {
             return Err(eyre!(
                 "incus sandbox: golden instance `{}` does not exist, build it first or set [incus] golden",
@@ -86,28 +196,63 @@ impl Incus {
     }
 
     fn run<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
-        let out = Command::new(&self.cfg.bin).args(args).output()?;
-        if !out.status.success() {
-            let argv: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
-            return Err(eyre!(
-                "{} {}: {}",
-                self.cfg.bin,
-                argv.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        self.cli.run(args)
     }
 
     fn exists(&self, name: &str) -> bool {
-        self.run(&["query", &format!("/1.0/instances/{name}")])
-            .is_ok()
+        self.cli.exists(name)
     }
 
     fn running(&self, name: &str) -> Result<bool> {
-        let out = self.run(&["query", &format!("/1.0/instances/{name}/state")])?;
-        let v: serde_json::Value = serde_json::from_str(&out)?;
-        Ok(v["status"].as_str() == Some("Running"))
+        self.cli.running(name)
+    }
+
+    fn docker_volume(&self, name: &str) -> Result<()> {
+        let pool = &self.cfg.storage_pool;
+        let vol = format!("{name}-docker");
+        let path = format!("/1.0/storage-pools/{pool}/volumes/custom/{vol}");
+        if self.cli.query(&path).is_err() {
+            tracing::info!("incus: creating storage volume {pool}/{vol}");
+            self.run(&[
+                "storage",
+                "volume",
+                "create",
+                pool,
+                &vol,
+                "--type=filesystem",
+            ])?;
+        }
+        let inst = self.cli.query(&format!("/1.0/instances/{name}"))?;
+        if inst["devices"].get("docker").is_none() {
+            tracing::info!("incus: attaching {vol} to {name}");
+            self.run(&[
+                "config",
+                "device",
+                "add",
+                name,
+                "docker",
+                "disk",
+                &format!("pool={pool}"),
+                &format!("source={vol}"),
+                "path=/var/lib/docker",
+            ])?;
+        }
+        Ok(())
+    }
+
+    fn settle(&mut self, slot: usize) {
+        let Some(h) = self.resets.remove(&slot) else {
+            return;
+        };
+        let name = self.name(slot);
+        match h.join() {
+            Ok(Ok(Reset::Hard)) => {
+                self.counts.insert(slot, 0);
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("incus: resetting {name} failed: {e:#}"),
+            Err(_) => tracing::warn!("incus: reset thread for {name} panicked"),
+        }
     }
 
     fn idmap_error(&self, e: color_eyre::Report) -> color_eyre::Report {
@@ -167,6 +312,7 @@ impl Incus {
             }
             self.add_disk(name, &format!("mount{i}"), &path)?;
         }
+        self.docker_volume(name)?;
         tracing::info!("incus: snapshotting {name} as {}", self.cfg.snapshot);
         self.run(&["snapshot", "create", name, &self.cfg.snapshot])?;
         Ok(())
@@ -217,12 +363,14 @@ impl Sandbox for Incus {
     }
 
     fn prepare(&mut self, slot: usize, launch: &Launch) -> Result<()> {
+        self.settle(slot);
         let name = self.name(slot);
         tracing::info!("incus: preparing {name} for {}", launch.id);
         if !self.exists(&name) {
             self.create(&name)?;
         }
         if !self.running(&name)? {
+            self.docker_volume(&name)?;
             tracing::info!("incus: starting {name}");
             self.run(&["start", &name])
                 .map_err(|e| self.idmap_error(e))?;
@@ -252,11 +400,36 @@ impl Sandbox for Incus {
     }
 
     fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()> {
-        tracing::info!("incus: {id} finished on {} ({outcome:?})", self.name(slot));
+        let name = self.name(slot);
+        tracing::info!("incus: {id} finished on {name} ({outcome:?})");
+        if outcome == Outcome::Exited {
+            return Ok(());
+        }
+        self.settle(slot);
+        let count = self.counts.entry(slot).or_insert(0);
+        *count += 1;
+        let job = Resetter {
+            cli: self.cli.clone(),
+            name: name.clone(),
+            snapshot: self.cfg.snapshot.clone(),
+            script: light_script(self.host.uid, self.cfg.reset_volumes),
+            outcome,
+            count: *count,
+            reset_every: self.cfg.reset_every,
+        };
+        let h = std::thread::Builder::new()
+            .name(format!("reset-{name}"))
+            .spawn(move || job.run())?;
+        self.resets.insert(slot, h);
         Ok(())
     }
 
-    fn shutdown(&mut self) {}
+    fn shutdown(&mut self) {
+        let slots: Vec<usize> = self.resets.keys().copied().collect();
+        for slot in slots {
+            self.settle(slot);
+        }
+    }
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
@@ -500,6 +673,34 @@ mod tests {
             err.contains("`sulla-no-such-incus` not found on PATH"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn decide_reset_kind() {
+        use Outcome::*;
+        assert_eq!(decide(Exited, 1, 10, true), Reset::None);
+        assert_eq!(decide(Exited, 10, 10, false), Reset::None);
+        assert_eq!(decide(Merged, 1, 10, true), Reset::Light);
+        assert_eq!(decide(Killed, 9, 10, true), Reset::Light);
+        assert_eq!(decide(Discarded, 1, 10, true), Reset::Hard);
+        assert_eq!(decide(Merged, 10, 10, true), Reset::Hard);
+        assert_eq!(decide(Killed, 11, 10, true), Reset::Hard);
+        assert_eq!(decide(Merged, 100, 0, true), Reset::Light);
+        assert_eq!(decide(Merged, 1, 0, false), Reset::Hard);
+        assert_eq!(decide(Killed, 1, 10, false), Reset::Hard);
+        assert_eq!(decide(Merged, 1, 1, true), Reset::Hard);
+    }
+
+    #[test]
+    fn light_script_keeps_images() {
+        let s = light_script(1000, true);
+        assert_eq!(
+            s,
+            "docker ps -aq | xargs -r docker rm -f && docker network prune -f && docker volume prune -af && { pkill -KILL -u 1000; [ $? -le 1 ]; }"
+        );
+        let s = light_script(1000, false);
+        assert!(!s.contains("volume"));
+        assert!(!s.contains("image") && !s.contains("builder") && !s.contains("system prune"));
     }
 
     #[test]
