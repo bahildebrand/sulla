@@ -706,8 +706,9 @@ impl App {
 
     fn resolve_conflicts(&mut self, id: &str) {
         let text = format!(
-            "Merging into {base} failed with conflicts. Run `git rebase {base}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or merge.",
-            base = self.base
+            "Merging into {base} failed with conflicts. Run `git rebase {base}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or merge. When done, run `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait.",
+            base = self.base,
+            id = id
         );
         self.feedback(id, &text);
     }
