@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,13 @@ pub struct Bead {
     pub description: String,
     pub created_at: Option<DateTime<Utc>>,
     pub closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Blocked {
+    id: String,
+    #[serde(default)]
+    blocked_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +176,15 @@ impl Beads {
             .into_iter()
             .filter(|b| b.is_work() && b.issue_type != "epic")
             .collect())
+    }
+
+    pub fn blocked(&self) -> Result<HashMap<String, Vec<String>>> {
+        let out = self.run(&["blocked", "--json"])?;
+        if out.trim().is_empty() {
+            return Ok(HashMap::new());
+        }
+        let list: Vec<Blocked> = serde_json::from_str(&out)?;
+        Ok(list.into_iter().map(|b| (b.id, b.blocked_by)).collect())
     }
 
     pub fn show(&self, id: &str) -> Result<Bead> {

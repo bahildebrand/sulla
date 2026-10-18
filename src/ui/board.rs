@@ -14,7 +14,7 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
         None if b.state() == Some(State::Held) => {
             Span::styled("⏸ ", Style::new().fg(Color::Yellow))
         }
-        None if b.status == "blocked" => Span::styled("⊘ ", Style::new().fg(Color::Red)),
+        None if b.status == "blocked" || app.blocked.contains_key(&b.id) => Span::styled("⊘ ", Style::new().fg(Color::Red)),
         None => Span::raw("  "),
     }
 }

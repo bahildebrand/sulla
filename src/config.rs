@@ -16,7 +16,6 @@ pub struct Config {
     pub sandbox: SandboxKind,
     pub copilot: CopilotConfig,
     pub claude: ClaudeConfig,
-    pub sandbox: SandboxKind,
     pub incus: IncusConfig,
 }
 
@@ -72,14 +71,6 @@ pub enum AgentKind {
     Claude,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxKind {
-    #[default]
-    Worktree,
-    Incus,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ClaudeConfig {
@@ -108,7 +99,6 @@ impl Default for Config {
             sandbox: SandboxKind::default(),
             copilot: CopilotConfig::default(),
             claude: ClaudeConfig::default(),
-            sandbox: SandboxKind::default(),
             incus: IncusConfig::default(),
         }
     }

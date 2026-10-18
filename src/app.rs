@@ -100,6 +100,7 @@ pub struct App {
     slots: Slots,
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
+    pub blocked: HashMap<String, Vec<String>>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
     pub view: View,
@@ -153,6 +154,7 @@ impl App {
             slots: Slots::default(),
             all: Vec::new(),
             ready: Vec::new(),
+            blocked: HashMap::new(),
             agents: HashMap::new(),
             failed: HashSet::new(),
             view: View::Board,
@@ -288,6 +290,7 @@ impl App {
                 }
                 self.all = s.all;
                 self.ready = s.ready;
+                self.blocked = s.blocked;
                 self.clamp();
                 self.reconcile();
                 self.schedule();
@@ -774,6 +777,30 @@ impl App {
         }
     }
 
+    fn release_backlog(&mut self) {
+        let backlog: Vec<Bead> = self
+            .all
+            .iter()
+            .filter(|b| b.status != "closed" && b.state() == Some(State::Backlog))
+            .cloned()
+            .collect();
+        if backlog.is_empty() {
+            self.status = "backlog is empty".into();
+            return;
+        }
+        let mut moved = 0;
+        for b in &backlog {
+            let r = self.beads.clear_state(b);
+            if self.report(r).is_some() {
+                moved += 1;
+            }
+        }
+        if moved == backlog.len() {
+            self.status = format!("released {moved} backlog bead(s) to pending");
+        }
+        self.mutated();
+    }
+
     fn move_to_backlog(&mut self, bead: &Bead) {
         if self.agents.contains_key(&bead.id) || bead.status == "closed" {
             return;
@@ -895,6 +922,16 @@ impl App {
             return;
         };
         let resume = self.git.worktree_path(id).join(".git").exists();
+        if !resume && let Some(by) = self.blocked.get(id) {
+            let by = by.join(", ");
+            if matches!(b.state(), Some(State::Held | State::Backlog)) {
+                let r = self.beads.clear_state(&b);
+                self.report(r);
+                self.mutated();
+            }
+            self.status = format!("{id} is blocked by {by}, queued in Pending");
+            return;
+        }
         let r = self.start_agent(&b, resume, None);
         if self.report(r).is_some() {
             self.failed.remove(id);
@@ -1100,6 +1137,7 @@ impl App {
             }
             KeyCode::Char('R') => self.mark_review(&b.id),
             KeyCode::Char('s') => self.release(&b),
+            KeyCode::Char('S') => self.release_backlog(),
             KeyCode::Char('B') => self.move_to_backlog(&b),
             KeyCode::Char('A') => self.relaunch(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {

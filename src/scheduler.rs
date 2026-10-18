@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,7 @@ pub struct Snapshot {
     pub taken: Instant,
     pub all: Vec<Bead>,
     pub ready: Vec<Bead>,
+    pub blocked: HashMap<String, Vec<String>>,
 }
 
 pub fn spawn_poller(beads: Beads, every: Duration, tx: Sender<Event>) -> Sender<()> {
@@ -23,6 +24,7 @@ pub fn spawn_poller(beads: Beads, every: Duration, tx: Sender<Event>) -> Sender<
                         taken,
                         all,
                         ready: beads.ready()?,
+                        blocked: beads.blocked()?,
                     })
                 })
                 .map_err(|e| e.to_string());
