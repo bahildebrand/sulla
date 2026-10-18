@@ -124,11 +124,31 @@ pub struct Agent {
     child: Box<dyn Child + Send + Sync>,
 }
 
+pub fn command(
+    backend: &dyn Backend,
+    launch: &Launch,
+    kache: bool,
+    slot: Option<usize>,
+) -> CommandBuilder {
+    let mut cmd = backend.command(launch);
+    cmd.cwd(&launch.worktree);
+    cmd.env("TERM", "xterm-256color");
+    if launch.bead {
+        cmd.env("SULLA_BEAD", &launch.id);
+    }
+    if let Some(slot) = slot {
+        cmd.env("SULLA_SLOT", slot.to_string());
+    }
+    if kache {
+        cmd.env("RUSTC_WRAPPER", "kache");
+    }
+    cmd
+}
+
 impl Agent {
     pub fn spawn(
-        backend: &dyn Backend,
-        launch: &Launch,
-        kache: bool,
+        cmd: CommandBuilder,
+        id: &str,
         rows: u16,
         cols: u16,
         tx: Sender<Event>,
@@ -140,22 +160,13 @@ impl Agent {
             pixel_height: 0,
         };
         let pair = native_pty_system().openpty(size).map_err(|e| eyre!(e))?;
-        let mut cmd = backend.command(launch);
-        cmd.cwd(&launch.worktree);
-        cmd.env("TERM", "xterm-256color");
-        if launch.bead {
-            cmd.env("SULLA_BEAD", &launch.id);
-        }
-        if kache {
-            cmd.env("RUSTC_WRAPPER", "kache");
-        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| eyre!(e))?;
         drop(pair.slave);
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 5000)));
         let mut reader = pair.master.try_clone_reader().map_err(|e| eyre!(e))?;
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
-        let id = launch.id.clone();
+        let id = id.to_string();
         let p = parser.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];

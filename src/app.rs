@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use color_eyre::Result;
+use color_eyre::{Result, eyre::eyre};
 use crossterm::event::{
     Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
@@ -13,6 +13,7 @@ use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::config::{AgentKind, Config};
 use crate::git::{Git, RebaseConflict};
+use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Snapshot};
 use crate::ui::keys;
 use crate::ui::review::Diff;
@@ -95,6 +96,8 @@ pub struct App {
     beads: Beads,
     git: Git,
     backend: Box<dyn Backend>,
+    sandbox: Box<dyn Sandbox>,
+    slots: Slots,
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
     pub agents: HashMap<String, Agent>,
@@ -117,6 +120,7 @@ pub struct App {
 
 impl App {
     pub fn new(cfg: Config, repo: PathBuf, tx: Sender<Event>) -> Result<Self> {
+        let sandbox = sandbox::build(&cfg)?;
         let git = Git::new(repo.clone());
         git.ensure_ignored()?;
         let base = match &cfg.base_branch {
@@ -145,6 +149,8 @@ impl App {
             beads,
             git,
             backend,
+            sandbox,
+            slots: Slots::default(),
             all: Vec::new(),
             ready: Vec::new(),
             agents: HashMap::new(),
@@ -168,6 +174,10 @@ impl App {
 
     pub fn backend_name(&self) -> &str {
         self.backend.name()
+    }
+
+    pub fn sandbox_name(&self) -> &str {
+        self.sandbox.name()
     }
 
     pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
@@ -328,7 +338,11 @@ impl App {
     }
 
     fn schedule(&mut self) {
-        let free = self.cfg.max_agents.saturating_sub(self.running_count());
+        let free = self
+            .cfg
+            .max_agents
+            .saturating_sub(self.running_count())
+            .min(self.slots.free(self.cfg.max_agents));
         if free == 0 {
             return;
         }
@@ -358,14 +372,50 @@ impl App {
         let worktree = self.git.ensure_worktree(&bead.id, &self.base)?;
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
         let prompt = prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead)));
-        self.spawn(Launch {
+        let slot = self
+            .slots
+            .acquire(&bead.id, self.cfg.max_agents)
+            .ok_or_else(|| eyre!("no free agent slot for {}", bead.id))?;
+        let launch = Launch {
             session: agent::session_id(&self.repo, &bead.id),
-            id: bead.id,
+            id: bead.id.clone(),
             bead: true,
             worktree,
             resume,
             prompt,
-        })
+        };
+        let r = self.spawn_sandboxed(slot, launch);
+        if let Err(e) = r {
+            self.slots.release(&bead.id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn spawn_sandboxed(&mut self, slot: usize, launch: Launch) -> Result<()> {
+        self.sandbox.prepare(slot, &launch)?;
+        let cmd = agent::command(self.backend.as_ref(), &launch, self.cfg.kache, Some(slot));
+        let cmd = self.sandbox.wrap(slot, &launch, cmd)?;
+        self.insert_agent(cmd, launch.id)
+    }
+
+    fn take_agent(&mut self, id: &str) -> Option<usize> {
+        if let Some(mut a) = self.agents.remove(id) {
+            a.kill();
+        }
+        self.slots.release(id)
+    }
+
+    fn finish(&mut self, slot: Option<usize>, id: &str, outcome: Outcome) {
+        if let Some(slot) = slot {
+            let r = self.sandbox.finished(slot, id, outcome);
+            self.report(r);
+        }
+    }
+
+    fn remove_agent(&mut self, id: &str, outcome: Outcome) {
+        let slot = self.take_agent(id);
+        self.finish(slot, id, outcome);
     }
 
     fn start_chat(&mut self, resume: bool) -> Result<()> {
@@ -375,14 +425,16 @@ impl App {
             _ => agent::chat_session(&self.repo),
         };
         self.chat_session = Some(session.clone());
-        self.spawn(Launch {
+        let launch = Launch {
             id: CHAT_ID.to_string(),
             session,
             bead: false,
             worktree: self.repo.clone(),
             resume,
             prompt: (!resume).then(|| agent::chat_prompt(&self.base, self.cfg.max_agents)),
-        })
+        };
+        let cmd = agent::command(self.backend.as_ref(), &launch, self.cfg.kache, None);
+        self.insert_agent(cmd, launch.id)
     }
 
     fn open_chat(&mut self, fresh: bool) {
@@ -404,17 +456,10 @@ impl App {
         self.enter_insert(CHAT_ID);
     }
 
-    fn spawn(&mut self, launch: Launch) -> Result<()> {
+    fn insert_agent(&mut self, cmd: portable_pty::CommandBuilder, id: String) -> Result<()> {
         let (r, c) = self.pty_size();
-        let agent = Agent::spawn(
-            self.backend.as_ref(),
-            &launch,
-            self.cfg.kache,
-            r,
-            c,
-            self.tx.clone(),
-        )?;
-        self.agents.insert(launch.id, agent);
+        let agent = Agent::spawn(cmd, &id, r, c, self.tx.clone())?;
+        self.agents.insert(id, agent);
         Ok(())
     }
 
@@ -698,9 +743,7 @@ impl App {
     }
 
     fn kill(&mut self, id: &str) {
-        if let Some(mut a) = self.agents.remove(id) {
-            a.kill();
-        }
+        self.remove_agent(id, Outcome::Killed);
         if id == CHAT_ID {
             self.chat_session = None;
             self.status = "conversation ended".into();
@@ -758,9 +801,7 @@ impl App {
     }
 
     fn discard(&mut self, id: &str) {
-        if let Some(mut a) = self.agents.remove(id) {
-            a.kill();
-        }
+        self.remove_agent(id, Outcome::Discarded);
         let r = self
             .git
             .remove(id)
@@ -775,27 +816,31 @@ impl App {
 
     fn merge(&mut self, id: &str) {
         let title = self.bead(id).map(|b| b.title.clone()).unwrap_or_default();
-        if let Some(mut a) = self.agents.remove(id) {
-            a.kill();
-        }
+        let slot = self.take_agent(id);
         let msg = format!("{id}: {title}");
         let r = self
             .git
             .merge(id, &self.base, &msg)
             .and_then(|_| self.beads.close(id, "merged by sulla"));
-        if let Err(e) = &r {
-            if e.downcast_ref::<RebaseConflict>().is_some() {
-                self.mode = Mode::Confirm {
-                    msg: format!(
-                        "Merge of {id} hit conflicts with {}. Have the agent resolve them automatically? y/n",
-                        self.base
-                    ),
-                    action: Action::ResolveConflicts(id.to_string()),
-                };
-                self.status = format!("merge conflicts in {id}");
-                self.mutated();
-                return;
-            }
+        let outcome = if r.is_ok() {
+            Outcome::Merged
+        } else {
+            Outcome::Killed
+        };
+        self.finish(slot, id, outcome);
+        if let Err(e) = &r
+            && e.downcast_ref::<RebaseConflict>().is_some()
+        {
+            self.mode = Mode::Confirm {
+                msg: format!(
+                    "Merge of {id} hit conflicts with {}. Have the agent resolve them automatically? y/n",
+                    self.base
+                ),
+                action: Action::ResolveConflicts(id.to_string()),
+            };
+            self.status = format!("merge conflicts in {id}");
+            self.mutated();
+            return;
         }
         if self.report(r).is_some() {
             self.status = format!("merged {id} into {}", self.base);
@@ -821,7 +866,7 @@ impl App {
                 a.submit(text);
             }
             _ => {
-                self.agents.remove(id);
+                self.remove_agent(id, Outcome::Exited);
                 if let Some(b) = self.bead(id).cloned() {
                     let r = self.start_agent(&b, true, Some(text.to_string()));
                     self.report(r);
@@ -838,7 +883,7 @@ impl App {
         if self.agents.get(id).is_some_and(|a| a.alive) {
             return;
         }
-        self.agents.remove(id);
+        self.remove_agent(id, Outcome::Exited);
         if id == CHAT_ID {
             let r = self.start_chat(true);
             if self.report(r).is_some() {
@@ -1168,5 +1213,7 @@ impl App {
         for a in self.agents.values_mut() {
             a.kill();
         }
+        self.slots.clear();
+        self.sandbox.shutdown();
     }
 }

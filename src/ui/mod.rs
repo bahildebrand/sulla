@@ -92,8 +92,9 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     let right = format!(
-        "{} {}/{}  base:{}  ? help ",
+        "{}/{} {}/{}  base:{}  ? help ",
         app.backend_name(),
+        app.sandbox_name(),
         app.running_count(),
         app.cfg.max_agents,
         app.base
