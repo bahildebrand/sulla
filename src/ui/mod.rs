@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
 
@@ -138,7 +138,11 @@ fn help(f: &mut Frame, _app: &App) {
 }
 
 fn new_bead(f: &mut Frame, form: &NewBeadForm) {
-    let [area] = Layout::vertical([Constraint::Length(11)])
+    let inner_width = 62usize;
+    let wrapped = |text: &str| (13 + text.chars().count() + 1).div_ceil(inner_width).max(1);
+    let rows = wrapped(&form.title) + wrapped(&form.description) + 7;
+    let height = (rows as u16 + 2).min(f.area().height);
+    let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(f.area());
     let [area] = Layout::horizontal([Constraint::Length(64)])
@@ -198,6 +202,7 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
             .block(Block::bordered().title(" new bead (only title required) ")),
         area,
     );
