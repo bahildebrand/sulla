@@ -18,6 +18,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
         Span::raw(format!(" {id} ")).bold(),
         Span::raw(format!("{title} ")),
     ];
+    if app.parked_review.as_ref().is_some_and(|d| d.id == id) {
+        spans.push(Span::styled(
+            "[r back to review] ",
+            Style::new().fg(Color::Cyan),
+        ));
+    }
     let Some(agent) = app.agents.get(id) else {
         let block = Block::bordered().title(Line::from(spans));
         f.render_widget(

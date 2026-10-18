@@ -85,6 +85,7 @@ pub struct App {
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
     pub view: View,
+    pub parked_review: Option<Diff>,
     pub mode: Mode,
     pub col: usize,
     pub rows: [usize; Column::ALL.len()],
@@ -133,6 +134,7 @@ impl App {
             agents: HashMap::new(),
             failed: HashSet::new(),
             view: View::Board,
+            parked_review: None,
             mode: Mode::Normal,
             col: 0,
             rows: [0; Column::ALL.len()],
@@ -730,6 +732,7 @@ impl App {
             }
         }
         self.status = format!("feedback sent to {id}");
+        self.parked_review = None;
         self.view = View::Progress(id.to_string());
         self.mutated();
     }
@@ -760,6 +763,43 @@ impl App {
             a.scroll_reset();
         }
         self.view = View::Progress(id);
+    }
+
+    fn swap_to_agent(&mut self, insert: bool) {
+        let view = std::mem::replace(&mut self.view, View::Board);
+        let View::Review(d) = view else {
+            self.view = view;
+            return;
+        };
+        let id = d.id.clone();
+        self.parked_review = Some(d);
+        self.open_progress(id.clone());
+        if insert {
+            self.enter_insert(&id);
+        }
+    }
+
+    fn back_to_review(&mut self, id: String) -> bool {
+        match self.parked_review.take() {
+            Some(d) if d.id == id => {
+                self.view = View::Review(d);
+                self.status = format!("back to review of {id} (R reloads diff)");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn enter_insert(&mut self, id: &str) {
+        if !self.agents.get(id).is_some_and(|a| a.alive) {
+            self.relaunch(id);
+        }
+        if let Some(a) = self.agents.get_mut(id)
+            && a.alive
+        {
+            a.scroll_reset();
+            self.mode = Mode::Insert;
+        }
     }
 
     fn open_review(&mut self, id: String) {
@@ -819,6 +859,7 @@ impl App {
 
     fn board_bead_key(&mut self, k: KeyEvent) {
         let Some(b) = self.selected() else { return };
+        self.parked_review = None;
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
                 Column::Review | Column::Done => self.open_review(b.id),
@@ -852,14 +893,14 @@ impl App {
         let Some(id) = self.focused_id() else { return };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pty_size().0 / 2) as isize;
-        let alive = self.agents.get(&id).is_some_and(|a| a.alive);
         let agent = self.agents.get_mut(&id);
         match (k.code, agent) {
-            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => self.view = View::Board,
-            (KeyCode::Char('i') | KeyCode::Char('a'), Some(a)) if alive => {
-                a.scroll_reset();
-                self.mode = Mode::Insert;
+            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
+                if !self.back_to_review(id) {
+                    self.view = View::Board;
+                }
             }
+            (KeyCode::Char('i') | KeyCode::Char('a'), _) => self.enter_insert(&id),
             (KeyCode::Char('u'), Some(a)) if ctrl => a.scroll(half),
             (KeyCode::Char('d'), Some(a)) if ctrl => a.scroll(-half),
             (KeyCode::Char('k') | KeyCode::Up, Some(a)) => a.scroll(1),
@@ -869,7 +910,11 @@ impl App {
             (KeyCode::Char('G'), Some(a)) => a.scroll_reset(),
             (KeyCode::Char('X'), _) => self.confirm_kill(id),
             (KeyCode::Char('R'), _) => self.mark_review(&id),
-            (KeyCode::Char('r'), _) => self.open_review(id),
+            (KeyCode::Char('r'), _) => {
+                if !self.back_to_review(id.clone()) {
+                    self.open_review(id);
+                }
+            }
             (KeyCode::Char('A'), _) => self.relaunch(&id),
             _ => {}
         }
@@ -922,7 +967,8 @@ impl App {
                 };
             }
             KeyCode::Char('D') => self.confirm_discard(id),
-            KeyCode::Char('p') => self.open_progress(id),
+            KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
+            KeyCode::Char('i') => self.swap_to_agent(true),
             KeyCode::Char('R') => self.open_review(id),
             _ => {}
         }

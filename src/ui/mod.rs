@@ -101,10 +101,11 @@ const HELP: &[(&str, &str)] = &[
     ("A", "launch / resume agent"),
     ("q", "quit"),
     ("Progress", ""),
-    ("i / a", "insert mode (type into agent)"),
+    ("i / a", "insert mode (type into agent, resumes if exited)"),
     ("Esc Esc / Ctrl-]", "leave insert mode"),
     ("j k / Ctrl-u Ctrl-d / gg G", "scroll"),
     ("X R r A", "kill / mark review / review / relaunch"),
+    ("q / Esc", "back to review if opened from it, else board"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
     ("Tab J / S-Tab K / ]f [f", "next / prev file"),
@@ -113,7 +114,9 @@ const HELP: &[(&str, &str)] = &[
     ("m", "rebase + fast-forward merge"),
     ("s", "send feedback to agent"),
     ("D", "discard worktree + branch, hold bead"),
-    ("p / R", "progress / reload diff"),
+    ("p / a", "swap to agent view (keeps comments, r to return)"),
+    ("i", "swap to agent view in insert mode"),
+    ("R", "reload diff"),
 ];
 
 fn help(f: &mut Frame, _app: &App) {
