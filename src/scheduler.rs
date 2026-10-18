@@ -47,7 +47,7 @@ pub fn pick<'a>(
 ) -> Vec<&'a Bead> {
     let mut candidates: Vec<&Bead> = ready
         .iter()
-        .filter(|b| b.state() != Some(State::Held))
+        .filter(|b| !matches!(b.state(), Some(State::Held | State::Backlog)))
         .filter(|b| !busy.contains(&b.id) && !skip.contains(&b.id))
         .collect();
     candidates.sort_by(|a, b| {
@@ -92,6 +92,7 @@ mod tests {
             bead("old-p1", 1, "2026-01-02T00:00:00Z", &[]),
             bead("held", 0, "2026-01-01T00:00:00Z", &["sulla:held"]),
             bead("busy", 0, "2026-01-01T00:00:00Z", &[]),
+            bead("backlog", 0, "2026-01-01T00:00:00Z", &["sulla:backlog"]),
         ];
         let busy = HashSet::from(["busy".to_string()]);
         let ids: Vec<_> = pick(&ready, &busy, &HashSet::new(), 2)

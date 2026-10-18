@@ -39,6 +39,7 @@ pub struct NewBeadForm {
     pub title: String,
     pub description: String,
     pub priority: u8,
+    pub backlog: bool,
     pub field: usize,
 }
 
@@ -48,6 +49,7 @@ impl Default for NewBeadForm {
             title: String::new(),
             description: String::new(),
             priority: 2,
+            backlog: false,
             field: 0,
         }
     }
@@ -148,9 +150,9 @@ impl App {
         self.backend.name()
     }
 
-    pub fn columns(&self) -> [Vec<&Bead>; 4] {
+    pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
         let now = Utc::now();
-        let mut cols: [Vec<&Bead>; 4] = Default::default();
+        let mut cols: [Vec<&Bead>; Column::ALL.len()] = Default::default();
         for b in &self.all {
             if let Some(c) = b.column(now, self.cfg.done_retention_days) {
                 cols[Column::ALL.iter().position(|x| *x == c).unwrap()].push(b);
@@ -471,19 +473,19 @@ impl App {
                 self.status = "cancelled".into();
                 return;
             }
-            KeyCode::Enter if ctrl || shift || form.field == 2 || form.field == 0 => {
+            KeyCode::Enter if ctrl || shift || form.field >= 2 || form.field == 0 => {
                 let title = form.title.trim().to_string();
                 if title.is_empty() {
                     self.status = "title required".into();
                     form.field = 0;
                 } else {
-                    self.create_bead(&title, form.description.trim(), form.priority);
+                    self.create_bead(&title, form.description.trim(), form.priority, form.backlog);
                     return;
                 }
             }
             KeyCode::Enter => form.field = 2,
-            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 3,
-            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 2) % 3,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 4,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 3) % 4,
             KeyCode::Right | KeyCode::Char('-') if form.field == 2 => {
                 form.priority = (form.priority + 1).min(4)
             }
@@ -491,6 +493,11 @@ impl App {
                 form.priority = form.priority.saturating_sub(1)
             }
             KeyCode::Char(c @ '0'..='4') if form.field == 2 => form.priority = c as u8 - b'0',
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => {
+                form.backlog = !form.backlog
+            }
+            KeyCode::Char('b') if form.field == 3 => form.backlog = true,
+            KeyCode::Char('p') if form.field == 3 => form.backlog = false,
             KeyCode::Backspace => {
                 match form.field {
                     0 => form.title.pop(),
@@ -538,7 +545,7 @@ impl App {
         match name {
             "q" | "quit" => self.request_quit(),
             "q!" | "quit!" => self.quit = true,
-            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2),
+            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2, false),
             "max" => match rest.parse() {
                 Ok(n) => {
                     self.cfg.max_agents = n;
@@ -556,8 +563,8 @@ impl App {
         }
     }
 
-    fn create_bead(&mut self, title: &str, description: &str, priority: u8) {
-        let r = self.beads.create(title, description, priority);
+    fn create_bead(&mut self, title: &str, description: &str, priority: u8, backlog: bool) {
+        let r = self.beads.create(title, description, priority, backlog);
         if let Some(id) = self.report(r) {
             self.status = format!("created {id}");
             self.mutated();
@@ -613,13 +620,24 @@ impl App {
 
     fn release(&mut self, bead: &Bead) {
         self.failed.remove(&bead.id);
-        if bead.state() == Some(State::Held) {
+        if matches!(bead.state(), Some(State::Held | State::Backlog)) {
             let r = self.beads.clear_state(bead);
             if self.report(r).is_some() {
                 self.status = format!("released {}", bead.id);
             }
             self.mutated();
         }
+    }
+
+    fn move_to_backlog(&mut self, bead: &Bead) {
+        if self.agents.contains_key(&bead.id) || bead.status == "closed" {
+            return;
+        }
+        let r = self.beads.set_state(&bead.id, State::Backlog);
+        if self.report(r).is_some() {
+            self.status = format!("{} moved to backlog (s to release)", bead.id);
+        }
+        self.mutated();
     }
 
     fn mark_review(&mut self, id: &str) {
@@ -758,7 +776,7 @@ impl App {
         let row = &mut self.rows[self.col];
         match k.code {
             KeyCode::Char('h') | KeyCode::Left => self.col = self.col.saturating_sub(1),
-            KeyCode::Char('l') | KeyCode::Right => self.col = (self.col + 1).min(3),
+            KeyCode::Char('l') | KeyCode::Right => self.col = (self.col + 1).min(Column::ALL.len() - 1),
             KeyCode::Char('j') | KeyCode::Down => *row = (*row + 1).min(len.saturating_sub(1)),
             KeyCode::Char('k') | KeyCode::Up => *row = row.saturating_sub(1),
             KeyCode::Char('g') if pending == Some('g') => *row = 0,
@@ -787,6 +805,7 @@ impl App {
             }
             KeyCode::Char('R') => self.mark_review(&b.id),
             KeyCode::Char('s') => self.release(&b),
+            KeyCode::Char('B') => self.move_to_backlog(&b),
             KeyCode::Char('A') => self.relaunch(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 let r = self.beads.set_priority(&b.id, b.priority.saturating_sub(1));

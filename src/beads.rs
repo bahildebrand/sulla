@@ -27,6 +27,7 @@ pub struct Bead {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
+    Backlog,
     Pending,
     InProgress,
     Review,
@@ -34,7 +35,8 @@ pub enum Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 4] = [
+    pub const ALL: [Column; 5] = [
+        Column::Backlog,
         Column::Pending,
         Column::InProgress,
         Column::Review,
@@ -43,6 +45,7 @@ impl Column {
 
     pub fn title(self) -> &'static str {
         match self {
+            Column::Backlog => "Backlog",
             Column::Pending => "Pending",
             Column::InProgress => "In Progress",
             Column::Review => "Ready for Review",
@@ -53,6 +56,7 @@ impl Column {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
+    Backlog,
     Running,
     Review,
     Held,
@@ -61,6 +65,7 @@ pub enum State {
 impl State {
     fn as_str(self) -> &'static str {
         match self {
+            State::Backlog => "backlog",
             State::Running => "running",
             State::Review => "review",
             State::Held => "held",
@@ -73,6 +78,7 @@ impl Bead {
         self.labels
             .iter()
             .find_map(|l| match l.strip_prefix("sulla:")? {
+                "backlog" => Some(State::Backlog),
                 "running" => Some(State::Running),
                 "review" => Some(State::Review),
                 "held" => Some(State::Held),
@@ -95,6 +101,7 @@ impl Bead {
             return recent.then_some(Column::Done);
         }
         match self.state() {
+            Some(State::Backlog) => Some(Column::Backlog),
             Some(State::Review) => Some(Column::Review),
             Some(State::Running) => Some(Column::InProgress),
             _ if self.status == "in_progress" => Some(Column::InProgress),
@@ -155,6 +162,8 @@ impl Beads {
                 "0",
                 "--exclude-label",
                 "sulla:held",
+                "--exclude-label",
+                "sulla:backlog",
             ])?
             .into_iter()
             .filter(|b| b.is_work() && b.issue_type != "epic")
@@ -211,11 +220,20 @@ impl Beads {
             .map(drop)
     }
 
-    pub fn create(&self, title: &str, description: &str, priority: u8) -> Result<String> {
+    pub fn create(
+        &self,
+        title: &str,
+        description: &str,
+        priority: u8,
+        backlog: bool,
+    ) -> Result<String> {
         let p = priority.to_string();
         let mut args = vec!["create", title, "-p", &p, "--silent"];
         if !description.is_empty() {
             args.extend(["-d", description]);
+        }
+        if backlog {
+            args.extend(["-l", "sulla:backlog"]);
         }
         Ok(self.run(&args)?.trim().to_string())
     }
@@ -254,6 +272,12 @@ mod tests {
         assert_eq!(recent.column(now, 3), Some(Column::Done));
         assert_eq!(old.column(now, 3), None);
         assert_eq!(event.column(now, 3), None);
+    }
+
+    #[test]
+    fn backlog_bead_has_own_column() {
+        let b = bead(r#"{"id":"a","title":"t","status":"open","labels":["sulla:backlog"]}"#);
+        assert_eq!(b.column(Utc::now(), 3), Some(Column::Backlog));
     }
 
     #[test]

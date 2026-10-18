@@ -17,7 +17,8 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Ready beads are claimed in priority order until `max_agents` agents are in progress.
 - Each agent runs `copilot --yolo` (or `claude --dangerously-skip-permissions` with `agent = "claude"`) in a PTY inside `.sulla/worktrees/<bead>` on branch
   `sulla/<bead>`, with `RUSTC_WRAPPER=kache`.
-- Board state lives in beads labels: `sulla:running`, `sulla:review`, `sulla:held`.
+- Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:review`, `sulla:held`.
+- Beads in Backlog are never auto scheduled. Pick Backlog or Pending in the new bead popup, `B` moves a bead to Backlog and `s` releases it to Pending.
 - Agents are told to run `bd set-state <bead> sulla=review` when done.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.

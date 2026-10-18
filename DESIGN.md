@@ -22,6 +22,7 @@ When an agent is done I want to be able to view the diff of the change.
 
 Agents should move through a kanban board with their status. Status are as follows:
 
+- Backlog -- Parked, never auto scheduled. New beads can start here
 - Pending -- Not currently running, waiting for resources
 - In progress -- Currently itearating and building
 - Ready for Review -- Ready to take a peep

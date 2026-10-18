@@ -88,11 +88,12 @@ const HELP: &[(&str, &str)] = &[
     ("Board", ""),
     ("h j k l / gg G", "move"),
     ("Enter / p / r", "open / progress / review"),
-    ("n", "new bead popup (title, description, priority)"),
+    ("n", "new bead popup (title, description, priority, start state)"),
     ("+ -", "raise / lower priority"),
     ("X", "kill agent, hold bead"),
     ("D", "discard worktree + branch, hold bead"),
-    ("s", "release held bead"),
+    ("s", "release held or backlog bead to pending"),
+    ("B", "move bead to backlog (not auto scheduled)"),
     ("R", "mark ready for review"),
     ("A", "launch / resume agent"),
     ("q", "quit"),
@@ -137,7 +138,7 @@ fn help(f: &mut Frame, _app: &App) {
 }
 
 fn new_bead(f: &mut Frame, form: &NewBeadForm) {
-    let [area] = Layout::vertical([Constraint::Length(9)])
+    let [area] = Layout::vertical([Constraint::Length(11)])
         .flex(Flex::Center)
         .areas(f.area());
     let [area] = Layout::horizontal([Constraint::Length(64)])
@@ -164,6 +165,19 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         .collect::<Vec<_>>();
     let mut prio_line = vec![label(2, "Priority")];
     prio_line.extend(prio);
+    let start = [("Pending", false), ("Backlog", true)]
+        .into_iter()
+        .map(|(n, v)| {
+            let s = Span::raw(format!(" {n} "));
+            if v == form.backlog {
+                s.black().on_cyan()
+            } else {
+                s.dim()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut start_line = vec![label(3, "Start in")];
+    start_line.extend(start);
     let lines = vec![
         Line::from(vec![
             label(0, "Title"),
@@ -177,12 +191,14 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         Line::raw(""),
         Line::from(prio_line),
         Line::raw(""),
-        Line::from("Tab/S-Tab field  Left/Right or 0-4 priority  Enter create  Esc cancel").dim(),
+        Line::from(start_line),
+        Line::raw(""),
+        Line::from("Tab/S-Tab field  Left/Right or 0-4 priority  Left/Right start  Enter create  Esc cancel").dim(),
     ];
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(" new bead (description and priority optional) ")),
+            .block(Block::bordered().title(" new bead (only title required) ")),
         area,
     );
 }

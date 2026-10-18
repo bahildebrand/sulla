@@ -21,7 +21,7 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let cols = app.columns();
-    let areas = Layout::horizontal([Constraint::Fill(1); 4]).split(area);
+    let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
     for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
         let active = i == app.col;
         let items: Vec<ListItem> = beads
