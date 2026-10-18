@@ -842,13 +842,27 @@ impl App {
     }
 
     fn merge(&mut self, id: &str) {
+        let blockers = self.beads.open_blockers(id);
+        let Some(blockers) = self.report(blockers) else {
+            return self.mutated();
+        };
+        if !blockers.is_empty() {
+            self.status = format!("cannot merge {id}: blocked by open {}", blockers.join(", "));
+            return;
+        }
+        if self.git.was_merged(id) {
+            self.remove_agent(id, Outcome::Merged);
+            self.status = match self.close_merged(id) {
+                Ok(()) => format!("{id} was already merged, closed bead"),
+                Err(e) => format!("{id} was already merged but bd close failed: {e}"),
+            };
+            self.view = View::Board;
+            return self.mutated();
+        }
         let title = self.bead(id).map(|b| b.title.clone()).unwrap_or_default();
         let slot = self.take_agent(id);
         let msg = format!("{id}: {title}");
-        let r = self
-            .git
-            .merge(id, &self.base, &msg)
-            .and_then(|_| self.beads.close(id, "merged by sulla"));
+        let r = self.git.merge(id, &self.base, &msg);
         let outcome = if r.is_ok() {
             Outcome::Merged
         } else {
@@ -870,10 +884,21 @@ impl App {
             return;
         }
         if self.report(r).is_some() {
-            self.status = format!("merged {id} into {}", self.base);
+            self.status = match self.close_merged(id) {
+                Ok(()) => format!("merged {id} into {}", self.base),
+                Err(e) => format!("merged {id} into {} but bd close failed: {e}", self.base),
+            };
             self.view = View::Board;
         }
         self.mutated();
+    }
+
+    fn close_merged(&self, id: &str) -> Result<()> {
+        let reason = "merged by sulla";
+        self.beads.close(id, reason).or_else(|e| {
+            tracing::warn!("bd close {id} failed, retrying with --force: {e:#}");
+            self.beads.force_close(id, reason)
+        })
     }
 
     fn resolve_conflicts(&mut self, id: &str) {

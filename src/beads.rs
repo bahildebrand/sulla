@@ -24,6 +24,17 @@ pub struct Bead {
     pub description: String,
     pub created_at: Option<DateTime<Utc>>,
     pub closed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dependency {
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub dependency_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +103,14 @@ impl Bead {
                 "held" => Some(State::Held),
                 _ => None,
             })
+    }
+
+    pub fn open_blockers(&self) -> Vec<&str> {
+        self.dependencies
+            .iter()
+            .filter(|d| d.dependency_type == "blocks" && d.status != "closed")
+            .map(|d| d.id.as_str())
+            .collect()
     }
 
     pub fn is_work(&self) -> bool {
@@ -241,6 +260,20 @@ impl Beads {
             .map(drop)
     }
 
+    pub fn force_close(&self, id: &str, reason: &str) -> Result<()> {
+        self.run(&["close", id, "-r", reason, "--force", "--actor", ACTOR])
+            .map(drop)
+    }
+
+    pub fn open_blockers(&self, id: &str) -> Result<Vec<String>> {
+        Ok(self
+            .show(id)?
+            .open_blockers()
+            .into_iter()
+            .map(String::from)
+            .collect())
+    }
+
     pub fn create(
         &self,
         title: &str,
@@ -308,6 +341,21 @@ mod tests {
     fn backlog_bead_has_own_column() {
         let b = bead(r#"{"id":"a","title":"t","status":"open","labels":["sulla:backlog"]}"#);
         assert_eq!(b.column(Utc::now(), 3), Some(Column::Backlog));
+    }
+
+    #[test]
+    fn open_blockers_ignores_closed_and_non_blocking_deps() {
+        let b = bead(
+            r#"{"id":"a","title":"t","status":"in_progress","dependencies":[
+                {"id":"x","status":"open","dependency_type":"blocks"},
+                {"id":"y","status":"closed","dependency_type":"blocks"},
+                {"id":"z","status":"in_progress","dependency_type":"blocks"},
+                {"id":"p","status":"open","dependency_type":"parent-child"}
+            ]}"#,
+        );
+        assert_eq!(b.open_blockers(), vec!["x", "z"]);
+        let free = bead(r#"{"id":"a","title":"t","status":"open"}"#);
+        assert!(free.open_blockers().is_empty());
     }
 
     #[test]

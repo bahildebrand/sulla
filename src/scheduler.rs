@@ -83,6 +83,7 @@ mod tests {
             description: String::new(),
             created_at: Some(created.parse().unwrap()),
             closed_at: None,
+            dependencies: Vec::new(),
         }
     }
 
