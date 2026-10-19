@@ -30,7 +30,7 @@ pub enum Event {
     Input(CEvent),
     Tick,
     AgentOutput,
-    AgentExited(String),
+    AgentExited(String, u64),
     AgentBell(String),
     Snapshot(Result<Snapshot, String>),
     CheckDone(checks::Done),
@@ -489,8 +489,10 @@ impl App {
                 self.check_rate_limits();
             }
             Event::AgentBell(id) => self.on_bell(&id),
-            Event::AgentExited(id) => {
-                if let Some(a) = self.agents.get_mut(&id) {
+            Event::AgentExited(id, generation) => {
+                if let Some(a) = self.agents.get_mut(&id)
+                    && a.generation == generation
+                {
                     a.alive = false;
                     self.status = format!("agent {id} exited");
                     if matches!(self.view, View::Progress(ref v) if *v == id)

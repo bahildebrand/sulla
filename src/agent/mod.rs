@@ -4,6 +4,7 @@ mod copilot;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -363,10 +364,13 @@ pub fn render_log(bytes: &[u8], rows: u16, cols: u16) -> String {
     lines[start..].join("\n")
 }
 
+static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
+
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
     activity: Arc<Mutex<Activity>>,
+    pub generation: u64,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -424,6 +428,7 @@ impl Agent {
         let mut reader = pair.master.try_clone_reader().map_err(|e| eyre!(e))?;
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
         let id = id.to_string();
+        let generation = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
         let p = parser.clone();
         let activity = Arc::new(Mutex::new(Activity {
             last_output: Instant::now(),
@@ -456,13 +461,14 @@ impl Agent {
                     }
                 }
             }
-            let _ = tx.send(Event::AgentExited(id));
+            let _ = tx.send(Event::AgentExited(id, generation));
         });
 
         Ok(Self {
             parser,
             alive: true,
             activity,
+            generation,
             writer,
             master: pair.master,
             child,
@@ -575,6 +581,32 @@ impl Drop for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exit_generation(rx: &std::sync::mpsc::Receiver<Event>) -> u64 {
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(Event::AgentExited(_, g)) => return g,
+                Ok(_) => {}
+                Err(e) => panic!("no exit event: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn exit_events_carry_the_spawned_generation() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawn = || {
+            let mut cmd = CommandBuilder::new("sh");
+            cmd.args(["-c", "exit 0"]);
+            Agent::spawn(cmd, "x-1", 10, 40, None, tx.clone()).unwrap()
+        };
+        let old = spawn();
+        let old_gen = exit_generation(&rx);
+        let new = spawn();
+        assert_eq!(old_gen, old.generation);
+        assert_ne!(old.generation, new.generation);
+        assert_eq!(exit_generation(&rx), new.generation);
+    }
 
     #[test]
     fn session_id_is_stable_uuid() {
