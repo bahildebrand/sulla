@@ -20,7 +20,7 @@ use crate::conflicts::Conflict;
 use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::notify::Notifier;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
-use crate::scheduler::{self, Snapshot};
+use crate::scheduler::{self, Backoff, Snapshot, fmt_duration};
 use crate::ui::keys;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
 
@@ -96,6 +96,7 @@ pub enum Mode {
 }
 
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
+const RATE_SCAN_EVERY: Duration = Duration::from_secs(1);
 
 pub struct App {
     pub cfg: Config,
@@ -115,6 +116,9 @@ pub struct App {
     pub conflicts: HashMap<String, Conflict>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
+    pub backoff: Backoff,
+    rate_seen: HashMap<String, (String, usize)>,
+    rate_scanned: Instant,
     notifier: Notifier,
     states: Option<HashMap<String, Option<State>>>,
     pub view: View,
@@ -183,6 +187,9 @@ impl App {
             conflicts: HashMap::new(),
             agents: HashMap::new(),
             failed: HashSet::new(),
+            backoff: Backoff::default(),
+            rate_seen: HashMap::new(),
+            rate_scanned: Instant::now(),
             view: View::Board,
             parked_review: None,
             ai_reviews: HashMap::new(),
@@ -365,6 +372,7 @@ impl App {
                     self.esc_at = None;
                     self.write_focused(&[0x1b]);
                 }
+                self.check_rate_limits();
             }
             Event::AgentBell(id) => self.on_bell(&id),
             Event::AgentExited(id) => {
@@ -506,6 +514,9 @@ impl App {
                 continue;
             }
             if has_worktree {
+                if self.backoff.remaining(Instant::now()).is_some() {
+                    continue;
+                }
                 tracing::info!("resuming orphaned agent {}", b.id);
                 let r = self.start_agent(&b, true, None);
                 if self.report(r).is_none() {
@@ -528,13 +539,48 @@ impl App {
         if paused {
             self.status = "scheduling paused".into();
         } else {
+            self.backoff.resume();
             self.status = "scheduling resumed".into();
             self.schedule();
         }
     }
 
+    fn check_rate_limits(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.rate_scanned) < RATE_SCAN_EVERY {
+            return;
+        }
+        self.rate_scanned = now;
+        let mut seen = HashMap::new();
+        let mut fresh = None;
+        for (id, a) in &self.agents {
+            if !a.alive {
+                continue;
+            }
+            if let Some(hit) = a.rate_limit() {
+                if self.rate_seen.get(id) != Some(&hit) && fresh.is_none() {
+                    fresh = Some(id.clone());
+                }
+                seen.insert(id.clone(), hit);
+            }
+        }
+        self.rate_seen = seen;
+        if let Some(id) = fresh {
+            if let Some(d) = self.backoff.hit(now) {
+                tracing::warn!("rate limit from {id}, pausing scheduler for {d:?}");
+                self.status = format!(
+                    "rate limit from {id}, pausing scheduler for {} (:resume to override)",
+                    fmt_duration(d)
+                );
+            }
+        } else if self.backoff.expired(now) {
+            self.status = "rate limit backoff over, scheduler resumed".into();
+            self.mutated();
+        }
+    }
+
     fn schedule(&mut self) {
-        if self.paused {
+        if self.paused || self.backoff.remaining(Instant::now()).is_some() {
             return;
         }
         let free = self

@@ -63,6 +63,9 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   the Review file list. Uncommitted worktree changes are not checked.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
 - Killing an agent holds its bead in Pending until released with `s`.
+- When an agent's recent output shows a 429, rate limit, or quota error, sulla stops launching
+  new agents for 1 minute, doubling on repeat hits up to 30 minutes. Running agents are left
+  alone. The status bar shows `RATE LIMITED` with the time left, and `:resume` lifts it early.
 - `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the bead's worktree. Agents keep
   running meanwhile, so edits may conflict with a live agent.
 - Agents still marked running or in review when sulla restarts are resumed via their agent

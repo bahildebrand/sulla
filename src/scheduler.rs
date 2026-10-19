@@ -77,6 +77,57 @@ pub fn spawn_poller(
     refresh_tx
 }
 
+pub const BACKOFF_BASE: Duration = Duration::from_secs(60);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Default)]
+pub struct Backoff {
+    until: Option<Instant>,
+    delay: Duration,
+    last_hit: Option<Instant>,
+}
+
+impl Backoff {
+    pub fn hit(&mut self, now: Instant) -> Option<Duration> {
+        if self.remaining(now).is_some() {
+            return None;
+        }
+        self.delay = match self.last_hit {
+            Some(t) if now.duration_since(t) < self.delay * 2 => (self.delay * 2).min(BACKOFF_MAX),
+            _ => BACKOFF_BASE,
+        };
+        self.last_hit = Some(now);
+        self.until = Some(now + self.delay);
+        Some(self.delay)
+    }
+
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.until
+            .and_then(|u| u.checked_duration_since(now))
+            .filter(|d| !d.is_zero())
+    }
+
+    pub fn expired(&mut self, now: Instant) -> bool {
+        let done = self.until.is_some() && self.remaining(now).is_none();
+        if done {
+            self.until = None;
+        }
+        done
+    }
+
+    pub fn resume(&mut self) -> bool {
+        self.until.take().is_some()
+    }
+}
+
+pub fn fmt_duration(d: Duration) -> String {
+    let s = d.as_secs_f64().ceil() as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        _ => format!("{}m{:02}s", s / 60, s % 60),
+    }
+}
+
 pub fn pick<'a>(
     ready: &'a [Bead],
     busy: &HashSet<String>,
@@ -147,6 +198,30 @@ mod tests {
             .collect();
         assert_eq!(ids, ["old-p1", "new-p1"]);
         assert!(pick(&ready, &busy, &HashSet::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn backoff_doubles_on_quick_repeat_and_resets_later() {
+        let t0 = Instant::now();
+        let mut b = Backoff::default();
+        assert_eq!(b.hit(t0), Some(BACKOFF_BASE));
+        assert_eq!(b.hit(t0 + Duration::from_secs(5)), None);
+        assert!(b.remaining(t0 + Duration::from_secs(30)).is_some());
+        assert!(!b.expired(t0 + Duration::from_secs(30)));
+        let t1 = t0 + BACKOFF_BASE;
+        assert!(b.remaining(t1).is_none());
+        assert!(b.expired(t1));
+        assert!(!b.expired(t1));
+        assert_eq!(b.hit(t1 + Duration::from_secs(10)), Some(BACKOFF_BASE * 2));
+        let mut t = t1 + Duration::from_secs(10);
+        for _ in 0..10 {
+            t += b.remaining(t).unwrap();
+            b.hit(t);
+        }
+        assert_eq!(b.remaining(t), Some(BACKOFF_MAX));
+        assert!(b.resume());
+        assert!(!b.resume());
+        assert_eq!(b.hit(t + BACKOFF_MAX * 3), Some(BACKOFF_BASE));
     }
 
     #[test]

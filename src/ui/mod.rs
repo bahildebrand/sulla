@@ -119,6 +119,13 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         spans.push(tag("PAUSED", Color::Yellow));
         spans.push(Span::raw(" "));
     }
+    if let Some(d) = app.backoff.remaining(std::time::Instant::now()) {
+        spans.push(tag(
+            &format!("RATE LIMITED {}", crate::scheduler::fmt_duration(d)),
+            Color::Red,
+        ));
+        spans.push(Span::raw(" "));
+    }
     spans.push(Span::raw(right).dim());
     let width: usize = spans.iter().map(|s| s.width()).sum();
     let [l, r] =

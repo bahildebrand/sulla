@@ -175,8 +175,7 @@ fn is_chrome(l: &str) -> bool {
         || (!t.is_empty() && t.chars().all(|c| is_box_char(c) || c == '-'))
 }
 
-pub fn last_line(text: &str) -> Option<String> {
-    let lines: Vec<&str> = text.lines().collect();
+fn output_end(lines: &[&str]) -> usize {
     let mut end = lines.len();
     if let Some(bottom) = lines.iter().rposition(|l| is_chrome(l))
         && lines.len() - bottom <= 12
@@ -195,12 +194,61 @@ pub fn last_line(text: &str) -> Option<String> {
             }
         }
     }
-    lines[..end]
-        .iter()
+    end
+}
+
+fn output_lines(text: &str) -> impl Iterator<Item = &str> {
+    let lines: Vec<&str> = text.lines().collect();
+    let end = output_end(&lines);
+    lines
+        .into_iter()
+        .take(end)
         .rev()
         .map(|l| l.trim_matches(|c: char| c.is_whitespace() || is_box_char(c)))
-        .find(|l| !l.is_empty())
-        .map(String::from)
+        .filter(|l| !l.is_empty())
+}
+
+pub fn last_line(text: &str) -> Option<String> {
+    output_lines(text).next().map(String::from)
+}
+
+const RATE_LIMIT_TAIL: usize = 8;
+const RATE_LIMIT_PHRASES: &[&str] = &[
+    "too many requests",
+    "rate limit exceeded",
+    "rate limit reached",
+    "rate limited",
+    "rate-limited",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "hit a rate limit",
+    "hit your rate limit",
+    "hit the rate limit",
+    "usage limit reached",
+    "usage limit exceeded",
+    "limit reached|",
+    "quota exceeded",
+    "exceeded your quota",
+    "exceeded your current quota",
+    "insufficient_quota",
+    "resource_exhausted",
+    "error: 429",
+    "error 429",
+    "status 429",
+    "status: 429",
+    "(429)",
+    "429 too many",
+];
+
+pub fn rate_limit(text: &str) -> Option<(String, usize)> {
+    let hits: Vec<&str> = output_lines(text)
+        .take(RATE_LIMIT_TAIL)
+        .filter(|l| {
+            let l = l.to_lowercase();
+            RATE_LIMIT_PHRASES.iter().any(|p| l.contains(p))
+        })
+        .collect();
+    hits.first().map(|l| (l.to_string(), hits.len()))
 }
 
 pub struct Agent {
@@ -355,6 +403,10 @@ impl Agent {
         last_line(&self.parser.lock().unwrap().screen().contents())
     }
 
+    pub fn rate_limit(&self) -> Option<(String, usize)> {
+        rate_limit(&self.parser.lock().unwrap().screen().contents())
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -403,6 +455,23 @@ mod tests {
         assert_eq!(last_line(ruled).as_deref(), Some("● Done editing"));
         assert_eq!(last_line("plain\noutput  \n\n").as_deref(), Some("output"));
         assert_eq!(last_line("\n \n"), None);
+    }
+
+    #[test]
+    fn rate_limit_only_matches_recent_output() {
+        let hit = "● Working\n\n  API Error: 429 {\"type\":\"rate_limit_error\"}\n\n╭──────╮\n│ >    │\n╰──────╯\n";
+        assert_eq!(
+            rate_limit(hit),
+            Some(("API Error: 429 {\"type\":\"rate_limit_error\"}".into(), 1))
+        );
+        let twice = "✗ Too Many Requests\nretrying\n✗ Too Many Requests\n";
+        assert_eq!(rate_limit(twice), Some(("✗ Too Many Requests".into(), 2)));
+        let old = format!("rate limit exceeded\n{}", "line\n".repeat(RATE_LIMIT_TAIL));
+        assert_eq!(rate_limit(&old), None);
+        assert_eq!(
+            rate_limit("fixed line 429 in parser\nquota handling\n"),
+            None
+        );
     }
 
     #[test]
