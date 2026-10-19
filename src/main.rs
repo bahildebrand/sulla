@@ -7,6 +7,7 @@ mod config;
 mod conflicts;
 mod filter;
 mod git;
+mod graphite;
 mod health;
 mod init;
 mod notify;

@@ -36,6 +36,9 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 described above. `workflow = "pr"` opts a repo into landing work through GitHub pull requests via
 the `gh` CLI, configured by the `[pr]` table:
 
+- `tool` (default `"gh"`): `"gh"` publishes with `gh`, `"graphite"` publishes with the Graphite `gt`
+  CLI (see [Publishing](#publishing)). Watching and revising still use `gh`, so both must be
+  installed, and the repo must have run `gt init`.
 - `remote` (default `"origin"`): remote that sulla branches are pushed to.
 - `draft` (default `false`): open pull requests as drafts.
 - `poll_secs` (default `120`): how often open pull requests are polled.

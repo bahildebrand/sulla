@@ -4,7 +4,7 @@ use std::path::Path;
 use color_eyre::{Result, eyre::WrapErr};
 
 use crate::beads::Beads;
-use crate::config::{AgentKind, Config, SandboxKind, Workflow};
+use crate::config::{AgentKind, Config, PrTool, SandboxKind, Workflow};
 use crate::git::{self, Git};
 
 pub struct Prompter<R, W> {
@@ -96,6 +96,13 @@ fn workflow_name(w: Workflow) -> &'static str {
     }
 }
 
+fn pr_tool_name(t: PrTool) -> &'static str {
+    match t {
+        PrTool::Gh => "gh",
+        PrTool::Graphite => "graphite",
+    }
+}
+
 fn sandbox_name(s: SandboxKind) -> &'static str {
     match s {
         SandboxKind::Worktree => "worktree",
@@ -180,6 +187,12 @@ fn configure<R: BufRead, W: Write>(
     let workflow = p.choice("Workflow", &["local", "pr"], workflow_name(cfg.workflow))?;
     w.set(&["workflow"], Some(workflow.as_str().into()));
     if workflow == "pr" {
+        let tool = p.choice(
+            "Pull request tool",
+            &["gh", "graphite"],
+            pr_tool_name(cfg.pr.tool),
+        )?;
+        w.set(&["pr", "tool"], Some(tool.as_str().into()));
         let remote = p.text("Pull request remote", &cfg.pr.remote)?;
         w.set(&["pr", "remote"], Some(remote.into()));
         let draft = p.yes("Open pull requests as drafts", cfg.pr.draft)?;
@@ -276,7 +289,7 @@ mod tests {
 
     #[test]
     fn answers_are_written_and_invalid_input_reprompts() {
-        let input = "Claude\nopus\nlots\n5\n-\npr\nupstream\ny\nincus\n\ncargo test\n";
+        let input = "Claude\nopus\nlots\n5\n-\npr\ngraphite\nupstream\ny\nincus\n\ncargo test\n";
         let (t, out) = answers(input, "poll_secs = 9\n[claude]\nbin = \"/x\"");
         let cfg: Config = toml::Value::Table(t.clone()).try_into().unwrap();
         assert!(out.contains("enter a whole number"));
@@ -286,6 +299,7 @@ mod tests {
         assert_eq!(cfg.max_agents, 5);
         assert_eq!(cfg.base_branch, None);
         assert_eq!(cfg.workflow, Workflow::Pr);
+        assert_eq!(cfg.pr.tool, PrTool::Graphite);
         assert_eq!(cfg.pr.remote, "upstream");
         assert!(cfg.pr.draft);
         assert_eq!(cfg.sandbox, SandboxKind::Incus);

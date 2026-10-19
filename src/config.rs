@@ -41,9 +41,18 @@ pub enum Workflow {
     Pr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrTool {
+    #[default]
+    Gh,
+    Graphite,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrConfig {
+    pub tool: PrTool,
     pub remote: String,
     pub draft: bool,
     pub poll_secs: u64,
@@ -55,6 +64,7 @@ pub struct PrConfig {
 impl Default for PrConfig {
     fn default() -> Self {
         Self {
+            tool: PrTool::Gh,
             remote: "origin".into(),
             draft: false,
             poll_secs: 120,
@@ -387,6 +397,7 @@ mod tests {
         let cfg: Config = toml::from_str("max_agents = 2").unwrap();
         assert_eq!(cfg.workflow, Workflow::Local);
         assert_eq!(cfg.pr, PrConfig::default());
+        assert_eq!(cfg.pr.tool, PrTool::Gh);
         assert_eq!(cfg.pr.remote, "origin");
         assert!(!cfg.pr.draft);
         assert_eq!(cfg.pr.poll_secs, 120);
@@ -398,13 +409,14 @@ mod tests {
     #[test]
     fn workflow_pr_parses_pr_table() {
         let cfg: Config = toml::from_str(
-            "workflow = \"pr\"\n[pr]\nremote = \"upstream\"\ndraft = true\npoll_secs = 30\nbackup_sessions = false\nauto_revise = false\nreply = true",
+            "workflow = \"pr\"\n[pr]\ntool = \"graphite\"\nremote = \"upstream\"\ndraft = true\npoll_secs = 30\nbackup_sessions = false\nauto_revise = false\nreply = true",
         )
         .unwrap();
         assert_eq!(cfg.workflow, Workflow::Pr);
         assert_eq!(
             cfg.pr,
             PrConfig {
+                tool: PrTool::Graphite,
                 remote: "upstream".into(),
                 draft: true,
                 poll_secs: 30,

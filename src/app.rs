@@ -16,10 +16,11 @@ use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall
 use crate::beads::{Bead, Beads, Column, State};
 use crate::budget::{self, Budget};
 use crate::checks::{self, Check};
-use crate::config::{AgentKind, Config, SandboxKind, Trigger, Workflow};
+use crate::config::{AgentKind, Config, PrTool, SandboxKind, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{self, DiffStat, Git, RebaseConflict};
+use crate::graphite;
 use crate::health::{self, Probe, Tool};
 use crate::notify::Notifier;
 use crate::pr::{self, PrState, PrStatus};
@@ -966,6 +967,9 @@ impl App {
         ]);
         if self.cfg.workflow == Workflow::Pr {
             probes.push(pr::probe());
+            if self.cfg.pr.tool == PrTool::Graphite {
+                probes.push(graphite::probe());
+            }
         }
         health::spawn(probes, self.tx.clone());
         self.mode = Mode::Health;
