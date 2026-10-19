@@ -19,6 +19,24 @@ pub enum Outcome {
     Exited,
 }
 
+impl Outcome {
+    fn rank(self) -> u8 {
+        match self {
+            Outcome::Exited => 0,
+            Outcome::Merged | Outcome::Killed => 1,
+            Outcome::Discarded => 2,
+        }
+    }
+
+    pub fn worst(self, other: Outcome) -> Outcome {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 pub trait Sandbox: Send {
     fn name(&self) -> &str;
     fn prepare(&mut self, slot: usize, launch: &Launch) -> Result<()>;
@@ -77,6 +95,20 @@ impl Slots {
         Some(slot)
     }
 
+    pub fn acquire_with(&mut self, id: &str, partner: &str, cap: usize) -> Option<usize> {
+        if !self.taken.contains_key(id)
+            && let Some(s) = self.get(partner)
+        {
+            self.taken.insert(id.to_string(), s);
+            return Some(s);
+        }
+        self.acquire(id, cap)
+    }
+
+    pub fn held(&self, slot: usize) -> bool {
+        self.taken.values().any(|t| *t == slot)
+    }
+
     pub fn get(&self, id: &str) -> Option<usize> {
         self.taken.get(id).copied()
     }
@@ -116,6 +148,30 @@ mod tests {
         assert_eq!(s.acquire("e", 3), Some(1));
         assert_eq!(s.acquire("f", 3), None);
         assert_eq!(s.release("zzz"), None);
+    }
+
+    #[test]
+    fn partner_shares_slot_until_both_release() {
+        let mut s = Slots::default();
+        assert_eq!(s.acquire("a", 2), Some(0));
+        assert_eq!(s.acquire("b", 2), Some(1));
+        assert_eq!(s.acquire("a~review", 2), None);
+        assert_eq!(s.acquire_with("a~review", "a", 2), Some(0));
+        assert_eq!(s.free(2), 0);
+        assert_eq!(s.release("a"), Some(0));
+        assert!(s.held(0));
+        assert_eq!(s.release("a~review"), Some(0));
+        assert!(!s.held(0));
+        assert_eq!(s.acquire_with("c", "missing", 2), Some(0));
+    }
+
+    #[test]
+    fn worst_outcome_prefers_harsher_reset() {
+        use Outcome::*;
+        assert_eq!(Exited.worst(Killed), Killed);
+        assert_eq!(Killed.worst(Exited), Killed);
+        assert_eq!(Merged.worst(Discarded), Discarded);
+        assert_eq!(Exited.worst(Exited), Exited);
     }
 
     #[test]

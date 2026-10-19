@@ -104,6 +104,7 @@ pub struct App {
     backend: Box<dyn Backend>,
     sandbox: Box<dyn Sandbox>,
     slots: Slots,
+    deferred: HashMap<usize, Outcome>,
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
     pub blocked: HashMap<String, Vec<String>>,
@@ -164,6 +165,7 @@ impl App {
             backend,
             sandbox,
             slots: Slots::default(),
+            deferred: HashMap::new(),
             all: Vec::new(),
             ready: Vec::new(),
             blocked: HashMap::new(),
@@ -529,7 +531,7 @@ impl App {
         let prompt = prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead)));
         let slot = self
             .slots
-            .acquire(&bead.id, self.cfg.max_agents)
+            .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {}", bead.id))?;
         let launch = Launch {
             session: agent::session_id(&self.repo, &bead.id),
@@ -563,7 +565,7 @@ impl App {
             self.status = format!("{id} is not in review");
             return;
         }
-        if self.running_count() >= self.cfg.max_agents {
+        if self.slots.get(id).is_none() && self.running_count() >= self.cfg.max_agents {
             self.status = format!("all {} agent slots are busy", self.cfg.max_agents);
             return;
         }
@@ -586,7 +588,7 @@ impl App {
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
         let slot = self
             .slots
-            .acquire(&rid, self.cfg.max_agents)
+            .acquire_with(&rid, &bead.id, self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {rid}"))?;
         let launch = Launch {
             session: agent::session_id(&self.repo, &rid),
@@ -717,10 +719,20 @@ impl App {
     }
 
     fn finish(&mut self, slot: Option<usize>, id: &str, outcome: Outcome) {
-        if let Some(slot) = slot {
-            let r = self.sandbox.finished(slot, id, outcome);
-            self.report(r);
+        let Some(slot) = slot else {
+            return;
+        };
+        if self.slots.held(slot) {
+            let d = self.deferred.entry(slot).or_insert(outcome);
+            *d = d.worst(outcome);
+            return;
         }
+        let outcome = self
+            .deferred
+            .remove(&slot)
+            .map_or(outcome, |d| d.worst(outcome));
+        let r = self.sandbox.finished(slot, id, outcome);
+        self.report(r);
     }
 
     fn remove_agent(&mut self, id: &str, outcome: Outcome) {
@@ -1642,6 +1654,7 @@ impl App {
             a.kill();
         }
         self.slots.clear();
+        self.deferred.clear();
         self.sandbox.shutdown();
         self.notifier.shutdown();
     }

@@ -26,7 +26,9 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - `V` on a bead in Review starts an AI reviewer agent in the same worktree with a fresh session.
   The bead is labeled `sulla:reviewing` and shown in In Progress with `◎` while it runs. The
   reviewer posts line-anchored comments as a JSON bead comment and moves the bead back to
-  Review. It uses its own slot and counts toward `max_agents`. `p` watches it, `X` stops it and
+  Review. It shares the implementer's slot when the implementer still holds one, so it can start
+  even when every slot is busy. Otherwise it takes its own slot and counts toward `max_agents`.
+  Resets of a shared slot wait until both agents are gone. `p` watches it, `X` stops it and
   returns the bead to Review. Reviewing beads without a live reviewer on restart go back to Review.
 - When a reviewer moves its bead back to Review, sulla reads the newest bead comment
   (`bd comments <bead> --json`) and parses the review JSON (a code fence around it is fine). Each
