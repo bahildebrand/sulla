@@ -290,8 +290,12 @@ impl Beads {
     }
 
     pub fn set_state(&self, id: &str, state: State) -> Result<()> {
+        self.set_state_because(id, state, "sulla")
+    }
+
+    pub fn set_state_because(&self, id: &str, state: State, reason: &str) -> Result<()> {
         let kv = format!("{STATE_DIM}={}", state.as_str());
-        self.run(&["set-state", id, &kv, "--reason", "sulla", "--actor", ACTOR])
+        self.run(&["set-state", id, &kv, "--reason", reason, "--actor", ACTOR])
             .map(drop)
     }
 

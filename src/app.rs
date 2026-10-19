@@ -14,6 +14,7 @@ use crossterm::event::{
 
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall};
 use crate::beads::{Bead, Beads, Column, State};
+use crate::budget::{self, Budget};
 use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, Trigger};
 use crate::conflicts::Conflict;
@@ -158,6 +159,9 @@ pub struct App {
     notifier: Notifier,
     pub stalls: HashMap<String, Stall>,
     stall_checked: Option<Instant>,
+    budget_runs: HashMap<String, budget::Run>,
+    budget_checked: Option<Instant>,
+    pub over_budget: HashMap<String, String>,
     states: Option<HashMap<String, Option<State>>>,
     pub view: View,
     pub parked_review: Option<Diff>,
@@ -165,6 +169,7 @@ pub struct App {
     pub checks: HashMap<String, Check>,
     check_runs: u64,
     pub usage: HashMap<String, Usage>,
+    usage_seen: bool,
     pub run_usage: Usage,
     usage_watch: Sender<Watch>,
     pub mode: Mode,
@@ -218,6 +223,9 @@ impl App {
             notifier: Notifier::new(cfg.notify.clone()),
             stalls: HashMap::new(),
             stall_checked: None,
+            budget_runs: HashMap::new(),
+            budget_checked: None,
+            over_budget: HashMap::new(),
             states: None,
             cfg,
             base,
@@ -247,6 +255,7 @@ impl App {
             checks: HashMap::new(),
             check_runs: 0,
             usage: HashMap::new(),
+            usage_seen: false,
             run_usage: Usage::default(),
             usage_watch,
             mode: Mode::Normal,
@@ -378,6 +387,7 @@ impl App {
     pub fn handle(&mut self, ev: Event) {
         self.dispatch(ev);
         self.check_stalls();
+        self.check_budgets();
         if let Some(id) = self.viewing() {
             self.notifier.clear(&id);
         }
@@ -438,7 +448,7 @@ impl App {
         for id in prev.keys().filter(|id| !self.stalls.contains_key(*id)) {
             let bid = agent::reviewed_bead(id).unwrap_or(id);
             self.notifier
-                .retain(|i, t| i != bid || t == Trigger::Review);
+                .retain(|i, t| i != bid || matches!(t, Trigger::Review | Trigger::Budget));
         }
         let fresh: Vec<(String, Stall)> = self
             .stalls
@@ -458,6 +468,81 @@ impl App {
             tracing::info!("agent {id} {s:?}");
             self.notify(trigger, &bid, &title);
         }
+    }
+
+    pub fn budget_status(&self, id: &str) -> Option<String> {
+        let run = self.budget_runs.get(id)?;
+        let budget = Budget::for_bead(&self.cfg.budget, self.bead(id)?);
+        if budget.is_unlimited() {
+            return None;
+        }
+        let used = run.used(self.usage.get(id).copied().unwrap_or_default());
+        Some(budget.progress(run.elapsed(Instant::now()), used))
+    }
+
+    fn check_budgets(&mut self) {
+        let now = Instant::now();
+        if self
+            .budget_checked
+            .is_some_and(|t| now.duration_since(t) < STALL_POLL)
+        {
+            return;
+        }
+        self.budget_checked = Some(now);
+        let running: Vec<(String, Budget)> = self
+            .all
+            .iter()
+            .filter(|b| b.status != "closed" && b.state() == Some(State::Running))
+            .filter(|b| self.agents.get(&b.id).is_some_and(|a| a.alive))
+            .map(|b| (b.id.clone(), Budget::for_bead(&self.cfg.budget, b)))
+            .collect();
+        self.budget_runs
+            .retain(|id, _| running.iter().any(|(r, _)| r == id));
+        let mut over = Vec::new();
+        for (id, budget) in running {
+            let current = self
+                .usage_seen
+                .then(|| self.usage.get(&id).copied().unwrap_or_default());
+            let run = self
+                .budget_runs
+                .entry(id.clone())
+                .or_insert_with(|| budget::Run::new(now, current));
+            if let Some(c) = current {
+                run.observe(c);
+            }
+            let used = run.used(current.unwrap_or_default());
+            if let Some(msg) = budget.exceeded(run.elapsed(now), used) {
+                over.push((id, msg));
+            }
+        }
+        for (id, msg) in over {
+            self.hold_over_budget(&id, &msg);
+        }
+    }
+
+    fn hold_over_budget(&mut self, id: &str, msg: &str) {
+        tracing::info!("{id}: {msg}");
+        self.stop_check(id);
+        self.remove_agent(id, Outcome::Killed);
+        self.budget_runs.remove(id);
+        let r = self
+            .beads
+            .set_state_because(id, State::Held, msg)
+            .and_then(|_| self.beads.unclaim(id));
+        if self.report(r).is_some() {
+            self.status = format!("{id} {msg}, held in Pending (s to release)");
+        }
+        self.over_budget.insert(id.to_string(), msg.to_string());
+        if matches!(&self.view, View::Progress(v) if v == id) {
+            if matches!(self.mode, Mode::Insert) {
+                self.mode = Mode::Normal;
+            }
+            self.view = View::Board;
+        }
+        if let Some(title) = self.bead(id).map(|b| b.title.clone()) {
+            self.notify(Trigger::Budget, id, &title);
+        }
+        self.mutated();
     }
 
     fn entered_review(&mut self) -> Vec<String> {
@@ -539,6 +624,11 @@ impl App {
                                 && (t != Trigger::Review || b.state() == Some(State::Review))
                         })
                 });
+                self.over_budget.retain(|id, _| {
+                    all.iter().any(|b| {
+                        b.id == *id && b.status != "closed" && b.state() == Some(State::Held)
+                    })
+                });
                 let entered = self.entered_review();
                 self.clamp();
                 self.watch_usage();
@@ -562,6 +652,7 @@ impl App {
             Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
             Event::CheckDone(d) => self.check_done(d),
             Event::Usage(r) => {
+                self.usage_seen = true;
                 self.usage = r.per_key;
                 self.run_usage = r.run;
             }
@@ -1896,6 +1987,7 @@ impl App {
     }
 
     fn deliver(&mut self, id: &str, text: &str) {
+        self.budget_runs.remove(id);
         let r = self.beads.set_state(id, State::Running);
         self.report(r);
         match self.agents.get_mut(id) {
@@ -2119,6 +2211,12 @@ impl App {
         if let Some(mut text) = self.report(r) {
             if let Some(u) = self.usage.get(&id) {
                 text = format!("{}\n\nUSAGE\n  {}\n", text.trim_end(), u.detail());
+            }
+            if let Some(b) = self.budget_status(&id) {
+                text = format!("{}\n\nBUDGET\n  {b}\n", text.trim_end());
+            }
+            if let Some(m) = self.over_budget.get(&id) {
+                text = format!("{}\n\nHELD\n  {m}\n", text.trim_end());
             }
             self.mode = Mode::Inspect {
                 id,

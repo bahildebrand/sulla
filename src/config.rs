@@ -20,6 +20,14 @@ pub struct Config {
     pub incus: IncusConfig,
     pub notify: NotifyConfig,
     pub stall: StallConfig,
+    pub budget: BudgetConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    pub minutes: u64,
+    pub tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +60,7 @@ pub enum Trigger {
     Review,
     Stalled,
     Waiting,
+    Budget,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,7 +77,12 @@ impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
             methods: vec![NotifyMethod::Bell],
-            on: vec![Trigger::Review, Trigger::Stalled, Trigger::Waiting],
+            on: vec![
+                Trigger::Review,
+                Trigger::Stalled,
+                Trigger::Waiting,
+                Trigger::Budget,
+            ],
             cooldown_secs: 60,
             notify_send: "notify-send".into(),
             tmux_option: "@sulla".into(),
@@ -160,6 +174,7 @@ impl Default for Config {
             incus: IncusConfig::default(),
             notify: NotifyConfig::default(),
             stall: StallConfig::default(),
+            budget: BudgetConfig::default(),
         }
     }
 }

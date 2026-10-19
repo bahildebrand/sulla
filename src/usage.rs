@@ -73,7 +73,7 @@ impl Usage {
     }
 }
 
-fn tokens(n: u64) -> String {
+pub fn tokens(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
         1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),

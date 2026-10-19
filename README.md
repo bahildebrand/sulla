@@ -75,6 +75,13 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   the Review file list. Uncommitted worktree changes are not checked.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
 - Killing an agent holds its bead in Pending until released with `s`.
+- `[budget]` caps each agent run in minutes and/or tokens (input + output, as on the card). A
+  bead overrides it with labels `budget:minutes=45` or `budget:tokens=500k` (`k`/`M` suffixes,
+  `0` = unlimited). The clock and token count start when the bead enters running and restart
+  each time it goes back to running (feedback, release, relaunch). When a run goes over, sulla
+  kills the agent and holds the bead with the reason as its state change reason. The card shows
+  a red `⏸` and the reason, a `budget` notification fires, and `s` releases it for a fresh run.
+  Running beads show `budget 12/30m 150.0k/500.0k tok` on the zoomed card and in `i` inspect.
 - When an agent's recent output shows a 429, rate limit, or quota error, sulla stops launching
   new agents for 1 minute, doubling on repeat hits up to 30 minutes. Running agents are left
   alone. The status bar shows `RATE LIMITED` with the time left, and `:resume` lifts it early.
@@ -147,7 +154,7 @@ env = {}                  # extra env passed to agents in containers
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
-on = ["review", "stalled", "waiting"]
+on = ["review", "stalled", "waiting", "budget"]
 cooldown_secs = 60        # min gap between repeat notifications for one bead
 notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
@@ -155,14 +162,18 @@ tmux_option = "@sulla"    # tmux user option set while beads need attention
 [stall]
 minutes = 5               # no agent output for this long marks it stalled, 0 = never
 prompts = ["Do you want to", "No, and tell"] # screen text meaning a permission/input prompt
+
+[budget]
+minutes = 0               # max minutes per agent run, 0 = unlimited
+tokens = 0                # max input + output tokens per agent run, 0 = unlimited
 ```
 
 Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
 
 ## Notifications
 
-Sulla notifies when a bead moves to Ready for Review, an agent stalls, or an agent rings the
-terminal bell (waiting on input). Opening the bead's progress or review view clears its flag.
+Sulla notifies when a bead moves to Ready for Review, an agent stalls, an agent goes over its
+budget, or an agent rings the terminal bell (waiting on input). Opening the bead's progress or review view clears its flag.
 Notifications are skipped for the bead you are currently viewing.
 
 - `bell` rings the terminal bell in the terminal running sulla.

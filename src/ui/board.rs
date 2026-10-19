@@ -62,7 +62,12 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
         Some(a) if a.alive => Span::styled("● ", Style::new().fg(Color::Green)),
         Some(_) => Span::styled("✗ ", Style::new().fg(Color::Red)),
         None if b.state() == Some(State::Held) => {
-            Span::styled("⏸ ", Style::new().fg(Color::Yellow))
+            let color = if app.over_budget.contains_key(&b.id) {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
+            Span::styled("⏸ ", Style::new().fg(color))
         }
         None if b.status == "blocked" || app.blocked.contains_key(&b.id) => {
             Span::styled("⊘ ", Style::new().fg(Color::Red))
@@ -264,6 +269,12 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     }
     if let Some(u) = app.usage.get(&b.id) {
         meta.push(u.short());
+    }
+    if let Some(budget) = app.budget_status(&b.id) {
+        meta.push(budget);
+    }
+    if let Some(m) = app.over_budget.get(&b.id) {
+        meta.push(m.clone());
     }
     if let Some((id, s)) = stall_of(app, b) {
         meta.push(match s {
