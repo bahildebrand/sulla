@@ -5,7 +5,7 @@ See [README.md](README.md) for setup, keys and config.
 ## Bead lifecycle
 
 Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`,
-`sulla:review`, `sulla:held`.
+`sulla:review`, `sulla:held`, `sulla:pr`.
 
 - **Backlog** beads are never auto scheduled. The `n` popup creates beads in Backlog or Pending,
   `B` moves a bead to Backlog, `s` releases it to Pending, `S` releases the whole Backlog.
@@ -17,6 +17,10 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Review**: you read the diff, comment, run checks, request an AI review, and merge.
 - **Merge** rebases the branch onto base and fast-forwards (no merge commits), removes the
   worktree and branch, and closes the bead.
+- **Publish** (`P` in review, `workflow = "pr"` only) pushes the branch and opens a GitHub PR
+  instead of merging. The bead stays open in **Awaiting PR** (`sulla:pr`, plus `pr:<number>`) with
+  its worktree and agent session intact, while the agent is stopped. Awaiting PR beads never count
+  toward `max_agents`, are never scheduled and are not resumed on restart.
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
@@ -107,6 +111,18 @@ the file header, or `COMMIT_MSG` if the file is not in the diff.
 Cards and the Review header show `✓ai` or `✎ai`. AI comments appear inline in cyan as `ai:` (or
 `ai (sent):`) and can be edited (`C`), deleted (`x`) or sent (`S`) with yours. They are cleared on
 a new AI review, when you send feedback, or when the bead goes back to running.
+
+### Publishing
+
+With `workflow = "pr"`, `P` publishes the reviewed bead instead of `m`. Pending changes are
+committed and rejected hunks dropped as on merge, then `sulla/<bead>` is pushed to the `[pr]`
+remote with `--set-upstream` and `gh pr create --head sulla/<bead> --base <base>` opens a PR (a
+draft when `draft = true`) titled after the bead with its description as the body. If an open PR
+already exists for the branch it is reused. A bead stacked on a parent that is itself Awaiting PR
+targets the parent's branch instead of base. The bead gets `pr:<number>`, moves to Awaiting PR and
+its agent and reviewer stop, leaving the worktree and session for later rounds. Publishing again
+force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`. With
+`workflow = "local"`, `P` only shows a status message.
 
 ### Rejecting hunks
 

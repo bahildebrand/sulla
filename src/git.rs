@@ -434,6 +434,25 @@ impl Git {
         self.remove(id)
     }
 
+    pub fn push(&self, id: &str, remote: &str, force: bool) -> Result<()> {
+        let br = branch(id);
+        let refspec = format!("{br}:{br}");
+        let mut args = vec!["push", "--set-upstream"];
+        if force {
+            args.push("--force-with-lease");
+        }
+        args.extend([remote, refspec.as_str()]);
+        run(&self.repo, &args).map(drop)
+    }
+
+    pub fn commit_pending(&self, id: &str, message: &str) -> Result<()> {
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            return Ok(());
+        }
+        Self::commit_all(&wt, message)
+    }
+
     pub fn merged_diff(&self, id: &str) -> Result<String> {
         let (b, h) = (merged_ref(id, "base"), merged_ref(id, "head"));
         if !self.ref_exists(&b) || !self.ref_exists(&h) {
@@ -592,6 +611,39 @@ mod tests {
         let g = Git::new(dir.clone());
         g.ensure_ignored().unwrap();
         (dir, g)
+    }
+
+    #[test]
+    fn push_sets_upstream_and_force_pushes_with_lease() {
+        let (dir, g) = scratch("push");
+        let remote = dir.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        git(&dir, &["init", "-q", "--bare", &remote.to_string_lossy()]);
+        git(
+            &dir,
+            &["remote", "add", "origin", &remote.to_string_lossy()],
+        );
+        let wt = g.ensure_worktree("p-1", "main").unwrap();
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        g.commit_pending("p-1", "p-1: work").unwrap();
+        g.push("p-1", "origin", false).unwrap();
+        let up = run(&wt, &["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
+        assert_eq!(up.trim(), "origin/sulla/p-1");
+        let pushed = || {
+            run(&dir, &["ls-remote", "origin", "refs/heads/sulla/p-1"])
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .map(String::from)
+        };
+        assert_eq!(pushed(), g.head("p-1").ok());
+
+        git(&wt, &["commit", "-q", "--amend", "-m", "p-1: amended"]);
+        assert!(g.push("p-1", "origin", false).is_err());
+        g.push("p-1", "origin", true).unwrap();
+        assert_eq!(pushed(), g.head("p-1").ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&remote).unwrap();
     }
 
     #[test]

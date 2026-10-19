@@ -227,6 +227,10 @@ const HELP: &[(&str, &str)] = &[
         "rebase + fast-forward merge (blocked unless checks pass)",
     ),
     ("M", "force merge despite failing, stale or running checks"),
+    (
+        "P",
+        "publish: push branch and open a GitHub PR (workflow = \"pr\")",
+    ),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),

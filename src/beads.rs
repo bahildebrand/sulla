@@ -104,15 +104,17 @@ pub enum Column {
     Pending,
     InProgress,
     Review,
+    AwaitingPr,
     Done,
 }
 
 impl Column {
-    pub const ALL: [Column; 5] = [
+    pub const ALL: [Column; 6] = [
         Column::Backlog,
         Column::Pending,
         Column::InProgress,
         Column::Review,
+        Column::AwaitingPr,
         Column::Done,
     ];
 
@@ -122,6 +124,7 @@ impl Column {
             Column::Pending => "Pending",
             Column::InProgress => "In Progress",
             Column::Review => "Ready for Review",
+            Column::AwaitingPr => "Awaiting PR",
             Column::Done => "Done",
         }
     }
@@ -134,6 +137,7 @@ pub enum State {
     Reviewing,
     Review,
     Held,
+    Pr,
 }
 
 impl State {
@@ -144,6 +148,7 @@ impl State {
             State::Reviewing => "reviewing",
             State::Review => "review",
             State::Held => "held",
+            State::Pr => "pr",
         }
     }
 }
@@ -165,6 +170,7 @@ impl Bead {
                 "reviewing" => Some(State::Reviewing),
                 "review" => Some(State::Review),
                 "held" => Some(State::Held),
+                "pr" => Some(State::Pr),
                 _ => None,
             })
     }
@@ -204,6 +210,7 @@ impl Bead {
         match self.state() {
             Some(State::Backlog) => Some(Column::Backlog),
             Some(State::Review) => Some(Column::Review),
+            Some(State::Pr) => Some(Column::AwaitingPr),
             Some(State::Running | State::Reviewing) => Some(Column::InProgress),
             _ if self.status == "in_progress" => Some(Column::InProgress),
             _ => Some(Column::Pending),
@@ -263,6 +270,8 @@ impl Beads {
                 "sulla:held",
                 "--exclude-label",
                 "sulla:backlog",
+                "--exclude-label",
+                "sulla:pr",
             ])?
             .into_iter()
             .filter(|b| b.is_work() && b.issue_type != "epic")
@@ -340,6 +349,14 @@ impl Beads {
             args.extend(["--remove-label", l]);
         }
         self.run(&args).map(drop)
+    }
+
+    pub fn add_label(&self, id: &str, label: &str) -> Result<()> {
+        self.run(&["update", id, "--add-label", label]).map(drop)
+    }
+
+    pub fn remove_label(&self, id: &str, label: &str) -> Result<()> {
+        self.run(&["update", id, "--remove-label", label]).map(drop)
     }
 
     pub fn append_notes(&self, id: &str, text: &str) -> Result<()> {
@@ -512,6 +529,15 @@ mod tests {
         let at = |s: &str| s.parse::<DateTime<Utc>>().ok();
         assert_eq!(all[0].state_since(), at("2026-10-19T03:00:00Z"));
         assert_eq!(all[4].state_since(), at("2026-10-19T04:00:00Z"));
+    }
+
+    #[test]
+    fn pr_bead_awaits_pr() {
+        let b =
+            bead(r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:pr","pr:42"]}"#);
+        assert_eq!(b.state(), Some(State::Pr));
+        assert_eq!(b.label("pr"), Some("42"));
+        assert_eq!(b.column(Utc::now(), 3), Some(Column::AwaitingPr));
     }
 
     #[test]

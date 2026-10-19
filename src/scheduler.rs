@@ -136,7 +136,7 @@ pub fn pick<'a>(
 ) -> Vec<&'a Bead> {
     let mut candidates: Vec<&Bead> = ready
         .iter()
-        .filter(|b| !matches!(b.state(), Some(State::Held | State::Backlog)))
+        .filter(|b| !matches!(b.state(), Some(State::Held | State::Backlog | State::Pr)))
         .filter(|b| !busy.contains(&b.id) && !skip.contains(&b.id))
         .collect();
     candidates.sort_by(|a, b| {
@@ -312,6 +312,7 @@ mod tests {
             bead("held", 0, "2026-01-01T00:00:00Z", &["sulla:held"]),
             bead("busy", 0, "2026-01-01T00:00:00Z", &[]),
             bead("backlog", 0, "2026-01-01T00:00:00Z", &["sulla:backlog"]),
+            bead("pr", 0, "2026-01-01T00:00:00Z", &["sulla:pr", "pr:7"]),
         ];
         let busy = HashSet::from(["busy".to_string()]);
         let ids: Vec<_> = pick(&ready, &busy, &HashSet::new(), 2)
@@ -362,8 +363,9 @@ mod tests {
         let bl = bead("bl", 1, "2026-01-01T00:00:00Z", &["sulla:backlog"]);
         let held = bead("h", 1, "2026-01-01T00:00:00Z", &["sulla:held"]);
         let run = bead("r", 1, "2026-01-01T00:00:00Z", &["sulla:running"]);
+        let pr = bead("pr", 1, "2026-01-01T00:00:00Z", &["sulla:pr"]);
 
-        let base = vec![epic, done, run];
+        let base = vec![epic, done, run, pr];
         let with = |extra: &[&Bead]| {
             let mut v = base.clone();
             v.extend(extra.iter().map(|b| (*b).clone()));
@@ -436,6 +438,7 @@ mod tests {
             bead("live", 1, "2026-01-01T00:00:00Z", &["sulla:reviewing"]),
             bead("done", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
             bead("idle", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
+            bead("pr", 1, "2026-01-01T00:00:00Z", &["sulla:pr"]),
         ];
         let known = HashSet::from([
             "rev".to_string(),

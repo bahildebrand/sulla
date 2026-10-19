@@ -93,6 +93,9 @@ fn headline(app: &App, b: &Bead, base: Style) -> Line<'static> {
         check_badge(app, b),
         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
     ];
+    if let Some(n) = b.label("pr") {
+        spans.push(Span::styled(format!("#{n} "), Style::new().fg(Color::Blue)));
+    }
     spans.extend(highlighted(
         &b.title,
         &app.filter.highlights(&b.title),

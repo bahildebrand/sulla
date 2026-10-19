@@ -19,7 +19,7 @@ use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, SandboxKind, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
-use crate::git::{DiffStat, Git, RebaseConflict};
+use crate::git::{self, DiffStat, Git, RebaseConflict};
 use crate::health::{self, Probe, Tool};
 use crate::notify::Notifier;
 use crate::pr;
@@ -124,6 +124,7 @@ impl NewBeadForm {
 pub enum Action {
     Kill(String),
     Merge(String),
+    Publish(String),
     ResolveConflicts(String),
     Discard(String),
     Quit,
@@ -413,7 +414,7 @@ impl App {
                         b.state() != Some(State::Reviewing)
                             && !matches!(
                                 b.column(now, i64::MAX),
-                                Some(Column::Review | Column::Done)
+                                Some(Column::Review | Column::AwaitingPr | Column::Done)
                             )
                     })
             })
@@ -1416,6 +1417,106 @@ impl App {
         };
     }
 
+    fn pr_base(&self, id: &str) -> String {
+        self.git
+            .stack_parent(id)
+            .filter(|p| {
+                self.bead(p)
+                    .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
+            })
+            .map(|p| git::branch(&p))
+            .unwrap_or_else(|| self.base.clone())
+    }
+
+    fn request_publish(&mut self, id: String) {
+        if self.cfg.workflow != Workflow::Pr {
+            self.status = "publishing needs workflow = \"pr\", m merges locally".into();
+            return;
+        }
+        if !self.git.has_branch(&id) {
+            self.status = format!("{id} has no branch to publish");
+            return;
+        }
+        if self.review_of(&id).is_some_and(Diff::all_rejected) {
+            self.status = format!("every change in {id} is rejected, D discards it");
+            return;
+        }
+        let base = self.pr_base(&id);
+        if base == self.base {
+            let blockers = self.beads.open_blockers(&id);
+            let Some(blockers) = self.report(blockers) else {
+                return;
+            };
+            if !blockers.is_empty() {
+                self.status = format!(
+                    "cannot publish {id}: blocked by open {}",
+                    blockers.join(", ")
+                );
+                return;
+            }
+        }
+        let remote = &self.cfg.pr.remote;
+        let br = git::branch(&id);
+        let msg = match self.bead(&id).and_then(|b| b.label("pr")) {
+            Some(n) => format!("Force push {br} to {remote} and update PR #{n}? y/n"),
+            None => format!("Push {br} to {remote} and open a PR against {base}? y/n"),
+        };
+        let n = self.review_of(&id).map_or(0, Diff::rejected_hunks);
+        let msg = if n > 0 {
+            format!("{n} rejected hunk(s) will be dropped. {msg}")
+        } else {
+            msg
+        };
+        self.mode = Mode::Confirm {
+            msg,
+            action: Action::Publish(id),
+        };
+    }
+
+    fn publish(&mut self, id: &str) {
+        let r = self.beads.show(id);
+        let Some(bead) = self.report(r) else {
+            return self.mutated();
+        };
+        let base = self.pr_base(id);
+        let msg = format!("{id}: {}", bead.title);
+        let rejection = self.review_of(id).map(Diff::rejection).unwrap_or_default();
+        let old = bead.label("pr").map(String::from);
+        let r = self
+            .git
+            .commit_pending(id, &msg)
+            .and_then(|_| self.git.drop_rejected(id, &self.base, &msg, &rejection))
+            .and_then(|_| self.git.push(id, &self.cfg.pr.remote, old.is_some()))
+            .and_then(|_| {
+                pr::create(
+                    &self.repo,
+                    &git::branch(id),
+                    &base,
+                    &bead.title,
+                    &pr::body(id, &bead.description),
+                    self.cfg.pr.draft,
+                )
+            });
+        let Some(created) = self.report(r) else {
+            return self.mutated();
+        };
+        let label = format!("pr:{}", created.number);
+        let r = old
+            .filter(|n| *n != created.number.to_string())
+            .map_or(Ok(()), |n| self.beads.remove_label(id, &format!("pr:{n}")))
+            .and_then(|_| self.beads.add_label(id, &label))
+            .and_then(|_| self.beads.set_state(id, State::Pr));
+        if self.report(r).is_some() {
+            self.stop_check(id);
+            self.remove_agent(&agent::review_id(id), Outcome::Killed);
+            self.remove_agent(id, Outcome::Killed);
+            self.parked_review = None;
+            self.view = View::Board;
+            self.status = format!("published {id} as PR #{} {}", created.number, created.url);
+        }
+        self.mutated();
+    }
+
     fn reviewing(&self, id: &str) -> bool {
         self.bead(id).and_then(Bead::state) == Some(State::Reviewing)
     }
@@ -1922,6 +2023,7 @@ impl App {
             Action::Quit => self.quit = true,
             Action::Kill(id) => self.kill(&id),
             Action::Merge(id) => self.merge(&id),
+            Action::Publish(id) => self.publish(&id),
             Action::ResolveConflicts(id) => self.resolve_conflicts(&id),
             Action::Discard(id) => self.discard(&id),
         }
@@ -2270,7 +2372,7 @@ impl App {
         let r = self.start_agent(&b, resume, None);
         if self.report(r).is_some() {
             self.failed.remove(id);
-            if b.state() != Some(State::Review) {
+            if !matches!(b.state(), Some(State::Review | State::Pr)) {
                 let r = self.beads.set_state(id, State::Running);
                 self.report(r);
             }
@@ -2517,7 +2619,7 @@ impl App {
         self.parked_review = None;
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
-                Column::Review | Column::Done => self.open_review(b.id),
+                Column::Review | Column::AwaitingPr | Column::Done => self.open_review(b.id),
                 _ => self.open_progress(self.agent_key(&b.id)),
             },
             KeyCode::Char('i') => self.inspect(b.id),
@@ -2641,6 +2743,7 @@ impl App {
             },
             KeyCode::Char('m') => self.request_merge(id, false),
             KeyCode::Char('M') => self.request_merge(id, true),
+            KeyCode::Char('P') => self.request_publish(id),
             KeyCode::Char('t') => self.show_check(id),
             KeyCode::Char('T') => self.rerun_check(&id),
             KeyCode::Char('s') => {
