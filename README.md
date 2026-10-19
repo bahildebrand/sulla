@@ -31,8 +31,8 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   cannot be merged until the blocker is closed. When the blocker is merged (or closed outside
   sulla after landing in base) its stacked children are rebased onto base, and their children
   onto the new branches, down the chain. Children with a live agent or AI reviewer are rebased
-  once it stops. A child with uncommitted changes or conflicts is left stacked and is rebased
-  onto base when it is merged. Discarding a bead, or closing it without merging, unstacks its
+  once it stops. A child with uncommitted changes or conflicts is left stacked and retried once
+  its HEAD or working tree changes, or rebased onto base when it is merged. Discarding a bead, or closing it without merging, unstacks its
   children so they keep its commits in their diff.
 - `A` on a blocked bead without a worktree does not launch it unless it can be stacked. It is
   released to Pending and the scheduler starts it once its blockers close.

@@ -484,10 +484,21 @@ impl Git {
             .collect())
     }
 
-    pub fn remove(&self, id: &str) -> Result<()> {
+    pub fn discard(&self, id: &str) -> Result<()> {
         for c in self.children(id) {
             self.unstack(&c);
         }
+        self.remove(id)
+    }
+
+    pub fn fingerprint(&self, id: &str) -> Option<String> {
+        let wt = self.worktree_path(id);
+        let head = run(&wt, &["rev-parse", "HEAD"]).ok()?;
+        let status = run(&wt, &["status", "--porcelain"]).ok()?;
+        Some(format!("{head}{status}"))
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
         self.unstack(id);
         let wt = self.worktree_path(id);
         if wt.exists() {
@@ -599,7 +610,10 @@ mod tests {
         commit(&p, "p2.txt");
         commit(&dir, "main.txt");
         g.merge("p", "main", "p").unwrap();
+        assert_eq!(g.children("p"), ["c"]);
         g.restack("c", "main").unwrap();
+        run(&c, &["merge-base", "--is-ancestor", "main", "HEAD"]).unwrap();
+        assert!(c.join("p2.txt").exists() && c.join("main.txt").exists());
         assert_eq!(g.stack_parent("c"), None);
         assert_eq!(g.upstream("c", "main"), "main");
         assert_eq!(g.children("c"), ["gc"]);
@@ -609,6 +623,8 @@ mod tests {
         std::fs::remove_file(gc.join("wip.txt")).unwrap();
         g.restack("gc", "main").unwrap();
         assert_eq!(g.stack_parent("gc").as_deref(), Some("c"));
+        run(&gc, &["merge-base", "--is-ancestor", "sulla/c", "HEAD"]).unwrap();
+        assert!(gc.join("main.txt").exists());
         std::fs::write(gc.join("wip.txt"), "wip").unwrap();
         let diff = g.diff("gc", "main").unwrap();
         assert!(
@@ -638,7 +654,7 @@ mod tests {
         git(&c, &["add", "c.txt"]);
         git(&c, &["commit", "-qm", "c"]);
 
-        g.remove("p").unwrap();
+        g.discard("p").unwrap();
         assert_eq!(g.stack_parent("c"), None);
         assert_eq!(g.upstream("c", "main"), "main");
         let diff = g.diff("c", "main").unwrap();

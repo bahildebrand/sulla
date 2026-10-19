@@ -148,7 +148,7 @@ pub struct App {
     pub backoff: Backoff,
     rate_seen: HashMap<String, (String, usize)>,
     rate_scanned: Instant,
-    restack_stuck: HashSet<String>,
+    restack_stuck: HashMap<String, Option<String>>,
     notifier: Notifier,
     states: Option<HashMap<String, Option<State>>>,
     pub view: View,
@@ -220,7 +220,7 @@ impl App {
             backoff: Backoff::default(),
             rate_seen: HashMap::new(),
             rate_scanned: Instant::now(),
-            restack_stuck: HashSet::new(),
+            restack_stuck: HashMap::new(),
             view: View::Board,
             parked_review: None,
             ai_reviews: HashMap::new(),
@@ -1565,7 +1565,7 @@ impl App {
         self.remove_agent(id, Outcome::Discarded);
         let r = self
             .git
-            .remove(id)
+            .discard(id)
             .and_then(|_| self.beads.set_state(id, State::Held))
             .and_then(|_| self.beads.unclaim(id));
         if self.report(r).is_some() {
@@ -1641,9 +1641,11 @@ impl App {
     fn restack_from(&mut self, mut queue: Vec<String>) -> Restacked {
         let mut r = Restacked::default();
         while let Some(c) = queue.pop() {
-            if self.restack_stuck.contains(&c) {
+            let fp = self.git.fingerprint(&c);
+            if self.restack_stuck.get(&c) == Some(&fp) {
                 continue;
             }
+            self.restack_stuck.remove(&c);
             if self.live(&c) {
                 r.deferred.push(c);
                 continue;
@@ -1655,7 +1657,7 @@ impl App {
                 }
                 Err(e) => {
                     tracing::warn!("restack of {c} failed: {e:#}");
-                    self.restack_stuck.insert(c.clone());
+                    self.restack_stuck.insert(c.clone(), fp);
                     r.stuck.push(c);
                 }
             }
@@ -1664,8 +1666,11 @@ impl App {
     }
 
     fn sweep_stacks(&mut self) {
+        let stacks = self.git.stacks();
+        self.restack_stuck
+            .retain(|id, _| stacks.iter().any(|(c, _)| c == id));
         let mut seeds = Vec::new();
-        for (child, parent) in self.git.stacks() {
+        for (child, parent) in stacks {
             if self.bead(&parent).is_none_or(|b| b.status != "closed") {
                 continue;
             }
