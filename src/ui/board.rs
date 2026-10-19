@@ -168,6 +168,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|b| ListItem::new(vec![headline(app, b, Style::new()), activity(app, b, now)]))
             .collect();
+        let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
         let border = if active {
             Style::new().fg(Color::Cyan)
         } else {
@@ -186,6 +187,57 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let mut state =
             ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
         f.render_stateful_widget(list, areas[i], &mut state);
+        scroll_hints(f, areas[i], &heights, state.offset(), border, true);
+    }
+}
+
+fn overflow(heights: &[usize], offset: usize, rows: usize) -> (usize, usize) {
+    let mut used = 0;
+    let mut shown = 0;
+    for h in &heights[offset.min(heights.len())..] {
+        if used + h > rows {
+            break;
+        }
+        used += h;
+        shown += 1;
+    }
+    let offset = offset.min(heights.len());
+    let shown = shown.max(usize::from(offset < heights.len()));
+    (offset, heights.len() - offset - shown)
+}
+
+fn scroll_hints(
+    f: &mut Frame,
+    area: Rect,
+    heights: &[usize],
+    offset: usize,
+    style: Style,
+    split: bool,
+) {
+    if area.height < 3 || area.width < 4 {
+        return;
+    }
+    let (above, below) = overflow(heights, offset, area.height as usize - 2);
+    let top = Rect::new(area.x + 1, area.y, area.width - 2, 1);
+    let bottom = Rect {
+        y: area.y + area.height - 1,
+        ..top
+    };
+    let up = (above > 0).then(|| format!("▲ {above} more"));
+    let down = (below > 0).then(|| format!("▼ {below} more"));
+    let hint = |s: String| Line::styled(format!(" {s} "), style).right_aligned();
+    if split {
+        if let Some(u) = up {
+            f.render_widget(hint(u), top);
+        }
+        if let Some(d) = down {
+            f.render_widget(hint(d), bottom);
+        }
+    } else {
+        let parts: Vec<String> = up.into_iter().chain(down).collect();
+        if !parts.is_empty() {
+            f.render_widget(hint(parts.join(" · ")), bottom);
+        }
     }
 }
 
@@ -262,6 +314,7 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
     let beads = &cols[i];
     let width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = beads.iter().map(|b| card(app, b, width)).collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let nav: Vec<Span> = Column::ALL
         .iter()
         .enumerate()
@@ -293,11 +346,28 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .highlight_style(Style::new().bg(Color::DarkGray));
     let mut state = ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
     f.render_stateful_widget(list, area, &mut state);
+    scroll_hints(
+        f,
+        area,
+        &heights,
+        state.offset(),
+        Style::new().fg(Color::Cyan),
+        false,
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::elapsed;
+    use super::{elapsed, overflow};
+
+    #[test]
+    fn overflow_counts_hidden_items() {
+        assert_eq!(overflow(&[2, 2, 2], 0, 6), (0, 0));
+        assert_eq!(overflow(&[2, 2, 2], 0, 5), (0, 1));
+        assert_eq!(overflow(&[2, 2, 2, 2], 1, 4), (1, 1));
+        assert_eq!(overflow(&[], 0, 4), (0, 0));
+        assert_eq!(overflow(&[9, 2], 0, 4), (0, 1));
+    }
 
     #[test]
     fn elapsed_is_compact() {
