@@ -192,6 +192,10 @@ impl Bead {
             })
     }
 
+    pub fn has_open_pr(&self) -> bool {
+        self.status != "closed" && (self.state() == Some(State::Pr) || self.label("pr").is_some())
+    }
+
     pub fn set_state_label(&mut self, state: Option<State>) {
         self.labels.retain(|l| !l.starts_with("sulla:"));
         if let Some(s) = state {

@@ -258,14 +258,10 @@ impl App {
             .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
     }
 
-    fn has_pr(&self, id: &str) -> bool {
-        self.bead(id).is_some_and(|b| {
-            b.status != "closed" && (b.state() == Some(State::Pr) || b.label("pr").is_some())
-        })
-    }
-
     fn pr_parent(&self, id: &str) -> Option<String> {
-        self.git.stack_parent(id).filter(|p| self.has_pr(p))
+        self.git
+            .stack_parent(id)
+            .filter(|p| self.bead(p).is_some_and(Bead::has_open_pr))
     }
 
     pub(super) fn pr_base(&self, id: &str) -> String {
