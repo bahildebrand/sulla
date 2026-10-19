@@ -74,6 +74,7 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   and the Review header name what they conflict with, and conflicting files are marked `⚠` in
   the Review file list. Uncommitted worktree changes are not checked.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
+- Retrying (`F`) discards the same way but asks why the last attempt failed, appends that to the bead's notes, and returns the bead to Pending. The agent prompt includes the bead's notes, so the next attempt sees every retry note.
 - Killing an agent holds its bead in Pending until released with `s`.
 - `[budget]` caps each agent run in minutes and/or tokens (input + output, as on the card). A
   bead overrides it with labels `budget:minutes=45` or `budget:tokens=500k` (`k`/`M` suffixes,
@@ -104,9 +105,9 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
+| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
-| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
+| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:chat [new]` |
 
 ## Config

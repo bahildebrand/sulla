@@ -49,6 +49,15 @@ pub fn task_prompt(bead: &Bead, parent: Option<&str>) -> String {
     } else {
         format!("\n\n{}", bead.description.trim())
     };
+    let notes = if bead.notes.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nNotes (earlier attempts may have been discarded, start fresh and avoid \
+             repeating their mistakes):\n{}",
+            bead.notes.trim()
+        )
+    };
     if let Some(p) = parent {
         desc.push_str(&format!(
             "\n\nThis bead depends on {p}, which is not merged yet. Your branch is stacked on \
@@ -56,7 +65,7 @@ pub fn task_prompt(bead: &Bead, parent: Option<&str>) -> String {
         ));
     }
     format!(
-        "You are working on bead {id}: {title}{desc}\n\n\
+        "You are working on bead {id}: {title}{desc}{notes}\n\n\
          You are in a dedicated git worktree on branch sulla/{id}. Commit your work to this \
          branch. Do not switch branches, rebase, or touch other worktrees. Rust builds are cached \
          with kache through RUSTC_WRAPPER, leave that alone.\n\n\
@@ -730,5 +739,16 @@ mod tests {
         assert_eq!(r, "x-1~review");
         assert_eq!(reviewed_bead(&r), Some("x-1"));
         assert_eq!(reviewed_bead("x-1"), None);
+    }
+
+    #[test]
+    fn task_prompt_includes_notes_only_when_present() {
+        let mut b: Bead =
+            serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
+        assert!(!task_prompt(&b, None).contains("Notes"));
+        b.notes = "Retry after discarded attempt: broke the build".into();
+        let p = task_prompt(&b, None);
+        assert!(p.contains("Notes"));
+        assert!(p.contains("broke the build"));
     }
 }

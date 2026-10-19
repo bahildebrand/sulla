@@ -195,6 +195,7 @@ mod tests {
             issue_type: "task".into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             description: String::new(),
+            notes: String::new(),
             created_at: Some(created.parse().unwrap()),
             closed_at: None,
             updated_at: None,

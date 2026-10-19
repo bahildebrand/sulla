@@ -90,6 +90,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 InputKind::Command => ":".to_string(),
                 InputKind::Search(_) => "/".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
+                InputKind::Retry(id) => format!("retry {id}, why did it fail: "),
                 InputKind::Comment | InputKind::EditComment(_) => String::new(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
@@ -176,6 +177,7 @@ const HELP: &[(&str, &str)] = &[
     ("+ -", "raise / lower priority"),
     ("X", "kill agent and hold bead, or stop ai reviewer"),
     ("D", "discard worktree + branch, hold bead"),
+    ("F", "retry from scratch with a note for the agent"),
     ("s", "release held or backlog bead to pending"),
     ("S", "release every backlog bead to pending"),
     ("B", "move bead to backlog (not auto scheduled)"),
@@ -210,6 +212,7 @@ const HELP: &[(&str, &str)] = &[
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),
     ("D", "discard worktree + branch, hold bead"),
+    ("F", "retry from scratch with a note for the agent"),
     ("p / a", "swap to agent view (keeps comments, r to return)"),
     ("i", "swap to agent view in insert mode"),
     ("R", "reload diff"),

@@ -48,6 +48,7 @@ pub enum InputKind {
     Command,
     Search(String),
     Feedback(String),
+    Retry(String),
     Comment,
     EditComment(usize),
 }
@@ -1626,6 +1627,7 @@ impl App {
         }
         match kind {
             InputKind::Feedback(id) => self.feedback(&id, &text),
+            InputKind::Retry(id) => self.retry(&id, &text),
             InputKind::Command => self.command(&text),
             InputKind::Search(_) => self.set_filter(&text),
             InputKind::Comment => {
@@ -1834,6 +1836,34 @@ impl App {
             .and_then(|_| self.beads.unclaim(id));
         if self.report(r).is_some() {
             self.status = format!("discarded {id}, held in Pending (s to release)");
+        }
+        self.view = View::Board;
+        self.mutated();
+    }
+
+    fn request_retry(&mut self, id: String) {
+        if agent::reviewed_bead(&id).is_some() || id == CHAT_ID {
+            return;
+        }
+        self.mode = Mode::Input {
+            kind: InputKind::Retry(id),
+            buf: String::new(),
+        };
+    }
+
+    fn retry(&mut self, id: &str, note: &str) {
+        self.remove_agent(id, Outcome::Discarded);
+        self.failed.remove(id);
+        let entry = format!("Retry after discarded attempt: {note}");
+        let r = self
+            .git
+            .remove(id)
+            .and_then(|_| self.beads.append_notes(id, &entry))
+            .and_then(|_| self.beads.show(id))
+            .and_then(|b| self.beads.clear_state(&b))
+            .and_then(|_| self.beads.unclaim(id));
+        if self.report(r).is_some() {
+            self.status = format!("retrying {id} from scratch with note");
         }
         self.view = View::Board;
         self.mutated();
@@ -2269,6 +2299,7 @@ impl App {
             KeyCode::Char('D') if Column::ALL[self.col] != Column::Done => {
                 self.confirm_discard(b.id)
             }
+            KeyCode::Char('F') if Column::ALL[self.col] != Column::Done => self.request_retry(b.id),
             KeyCode::Char('R') => self.mark_review(&b.id),
             KeyCode::Char('s') => self.release(&b),
             KeyCode::Char('S') => self.release_backlog(),
@@ -2388,6 +2419,7 @@ impl App {
                 };
             }
             KeyCode::Char('D') => self.confirm_discard(id),
+            KeyCode::Char('F') => self.request_retry(id),
             KeyCode::Char('V') => self.start_review(&id),
             KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
             KeyCode::Char('i') => self.swap_to_agent(true),

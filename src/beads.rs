@@ -22,6 +22,8 @@ pub struct Bead {
     pub labels: Vec<String>,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub notes: String,
     pub created_at: Option<DateTime<Utc>>,
     pub closed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -314,6 +316,10 @@ impl Beads {
             args.extend(["--remove-label", l]);
         }
         self.run(&args).map(drop)
+    }
+
+    pub fn append_notes(&self, id: &str, text: &str) -> Result<()> {
+        self.run(&["update", id, "--append-notes", text]).map(drop)
     }
 
     pub fn set_priority(&self, id: &str, priority: u8) -> Result<()> {
