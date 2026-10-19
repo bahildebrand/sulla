@@ -306,17 +306,35 @@ it which one a repo uses.
   already listens on that port, sulla reuses it. No config is needed. `bd serve` output goes to
   `.sulla/bd-serve.log`.
 
-Over HTTP sulla reads the board (`bd list`, `bd ready`, and `bd blocked` when the bd build
-advertises `blocked.list`; bd 1.3.1 does not, so `bd blocked` still runs as a CLI call), bead
-details for `i` and `H`, comments and events, and writes claims, releases, label and note
-updates, priority, close and delete. `bd set-state` and `bd create` have no HTTP equivalent and
-stay CLI calls, as does anything a `bd serve` build does not list in `GET /v0/beads/context`. In
-server mode the CLI talks to the same server, so those calls take about 0.07s.
+Over HTTP sulla reads the board (`bd list`, `bd ready` and the blocked beads), bead details for
+`i` and `H`, comments and events, and writes claims, releases, label and note updates, priority,
+close, delete and new beads. A board refresh makes no `bd` subprocess call.
+
+- Blocked beads come from `GET /v0/beads/blocked` when the build advertises `blocked.list`.
+  bd 1.3.1 does not, so sulla asks `GET /v0/beads/dependencies/blocking` about every open bead
+  instead and keeps the ones with an open blocker. That covers `blocks` edges, which is what the
+  board shows. Unlike `bd blocked` it does not mark a child blocked because its parent is, and it
+  does not count `waits-for` or `conditional-blocks` edges. Scheduling is unaffected: what
+  starts comes from `bd ready`, which is served over HTTP with bd's own rules.
+- New beads are created over HTTP as `task`s with the git `user.email` as owner, like `bd create`.
+  The API does not let a client set `created_by`, so beads sulla creates in server mode have none.
+- `bd set-state` has no HTTP equivalent and stays a CLI call, as does anything a `bd serve` build
+  does not list in `GET /v0/beads/context`. In server mode the CLI talks to the same server, so
+  those calls take about 0.07s.
 
 HTTP writes do not run bd's mutation hooks. When `.beads/hooks/on_create`, `on_update` or
 `on_close` exists and is executable, sulla sends its writes through the CLI so the hooks keep
-firing. Agents always use the CLI. If `bd serve` cannot start or stops answering, sulla falls back
-to the CLI for every call and says why in the health panel.
+firing. Agents always use the CLI.
+
+If `bd serve` cannot start, refuses connections, or answers 503 (its database is unavailable),
+sulla runs that call through the CLI instead. A `bd serve` that sulla started is then restarted,
+at most every 30 seconds. One known cause of a lasting 503: `bd serve` reaches Dolt through a
+`bd db-proxy-child` (pid in `.beads/dolt/proxy.pid`) that outlives it and stays pinned to the port
+Dolt had when it started, so after `bd dolt stop` and `bd dolt start` move Dolt to a new port
+every request fails, and a new `bd serve` refuses to start while that proxy runs. When a start
+fails that way, sulla stops the proxy (only after checking it is a `db-proxy-child` for this
+repo's `.beads/dolt`) and starts `bd serve` again. A `bd serve` sulla did not start is left alone,
+and the health panel names the proxy to stop.
 
 On exit sulla stops the `bd serve` it started (one it reused keeps running) and leaves the Dolt
 server running, since agents in other terminals and other tools may still use it. Stop it with
@@ -364,7 +382,8 @@ everything is there.
 - `!` (or `:health`) opens a health panel: probes `bd`, the agent CLI, `kache` and `incus`
   (including `incus query /1.0`), plus `gh` (including `gh auth status`) when `workflow = "pr"`.
   In a server-mode repo it also checks the `dolt` binary, whether the Dolt server answers on its
-  port, and whether `bd serve` is up (started by sulla or reused, or why sulla fell back to the
-  CLI). It shows the last bd poll error, and explains why nothing is
+  port, and whether `bd serve` is ready: it asks `GET /v0/beads/ready?limit=1`, since `/healthz`
+  stays green while the database is unreachable. It says whether sulla started or reused it, or
+  why sulla fell back to the CLI. It shows the last bd poll error, and explains why nothing is
   starting (paused, rate limited, slots full, failed starts, all blocked, backlog only, or nothing
   open). `r` rechecks.

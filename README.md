@@ -209,8 +209,9 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
   `127.0.0.1`, so `bd` in the container uses the port in `.beads/dolt-server.port` unchanged.
   The server stays bound to the host's loopback, so it is not reachable on the Incus bridge or
   beyond. sulla also sets `BEADS_DOLT_AUTO_START=0` in the container, so `bd` there never starts
-  a second server over the shared data directory. The device is checked before every bead and
-  updated if the server's port changed.
+  a second server over the shared data directory. Before every bead sulla starts the host Dolt
+  server if it is down (and fails the slot if it cannot), then checks the device and updates it
+  if the server's port changed.
 - Each slot keeps a persistent Docker volume at `/var/lib/docker`, so pulled images and build
   cache survive resets.
 - Light reset after every merged, discarded or killed bead: remove all Docker containers and

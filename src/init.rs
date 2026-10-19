@@ -250,18 +250,17 @@ fn has_dolt() -> bool {
 }
 
 fn setup_beads<R: BufRead, W: Write>(p: &mut Prompter<R, W>, repo: &Path) -> Result<()> {
-    let metadata = repo.join(".beads").join("metadata.json");
-    if metadata.exists() {
-        if beads::server_mode(repo) {
-            p.say("Beads database: Dolt SQL server, read through `bd serve`.")?;
-        } else {
-            let prefix = std::fs::read_to_string(&metadata)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v["dolt_database"].as_str().map(String::from))
-                .unwrap_or_else(|| "beads".into());
-            p.say(&migration(&prefix))?;
-            p.say("")?;
+    if repo.join(".beads").exists() {
+        match beads::metadata(repo) {
+            Some(m) if m["dolt_mode"] == "server" => {
+                p.say("Beads database: Dolt SQL server, read through `bd serve`.")?;
+            }
+            Some(m) if m["dolt_mode"] == "embedded" || m["dolt_mode"].is_null() => {
+                let prefix = m["dolt_database"].as_str().unwrap_or("beads");
+                p.say(&migration(prefix))?;
+                p.say("")?;
+            }
+            _ => {}
         }
         return Ok(());
     }
@@ -398,6 +397,33 @@ mod tests {
         assert!(out.contains("`dolt` is not on PATH"));
         assert!(out.contains("[embedded]: "));
         assert!(pick("server\n", false).0);
+    }
+
+    #[test]
+    fn existing_beads_dir_is_never_initialised() {
+        let dir = std::env::temp_dir().join(format!("sulla-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".beads")).unwrap();
+        std::fs::write(dir.join(".beads/redirect"), "../elsewhere/.beads\n").unwrap();
+        let mut out = Vec::new();
+        let mut p = Prompter::new("server\n".as_bytes(), &mut out);
+        setup_beads(&mut p, &dir).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        std::fs::write(
+            dir.join(".beads/metadata.json"),
+            r#"{"dolt_mode":"embedded","dolt_database":"x"}"#,
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join(".beads/redirect")).unwrap();
+        let mut out = Vec::new();
+        let mut p = Prompter::new("".as_bytes(), &mut out);
+        setup_beads(&mut p, &dir).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("bd init --server -p x")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -166,10 +166,11 @@ impl BdCache {
 }
 
 fn fetch(beads: &Beads) -> color_eyre::Result<BdData> {
+    let all = beads.list_all()?;
     Ok(BdData {
-        all: beads.list_all()?,
         ready: beads.ready()?,
-        blocked: beads.blocked()?,
+        blocked: beads.blocked(&all)?,
+        all,
     })
 }
 

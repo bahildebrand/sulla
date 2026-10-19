@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::health::{Status as Health, Tool};
-use serve::{Fail, Http, Server, Status as ServeStatus};
-pub use serve::{NO_TELEMETRY, dolt_port, server_mode};
+use serve::{Fail, Http, Readiness, Server, Status as ServeStatus};
+pub use serve::{NO_TELEMETRY, beads_dir, dolt_port, metadata, server_mode, start_dolt};
 
 pub const ACTOR: &str = "sulla";
 const STATE_DIM: &str = "sulla";
@@ -255,7 +255,7 @@ impl Beads {
     pub fn new(repo: &Path) -> Self {
         Self {
             repo: repo.to_path_buf(),
-            server: Arc::new(Server::new(server_mode(repo))),
+            server: Arc::new(Server::new(repo)),
         }
     }
 
@@ -268,7 +268,7 @@ impl Beads {
             return;
         }
         let me = self.clone();
-        std::thread::spawn(move || me.server.start(&me.repo));
+        std::thread::spawn(move || me.server.start());
     }
 
     pub fn shutdown(&self) {
@@ -291,11 +291,14 @@ impl Beads {
             )),
             None => Health::Failed("not running, start it with `bd dolt start`".into()),
         };
-        let serve = match self.server.status() {
-            ServeStatus::Ready { url, .. } if !self.server.live() => {
+        let serve = match (self.server.status(), self.server.readiness()) {
+            (ServeStatus::Ready { url, ours }, Some(Readiness::NotReady(e))) => {
+                Health::Failed(self.not_ready(&url, ours, &e))
+            }
+            (ServeStatus::Ready { url, .. }, Some(Readiness::Down(_))) => {
                 Health::Failed(format!("{url} stopped answering, using the bd CLI"))
             }
-            ServeStatus::Ready { url, ours } => Health::Ok(format!(
+            (ServeStatus::Ready { url, ours }, _) => Health::Ok(format!(
                 "{url} ({})",
                 if ours {
                     "started by sulla"
@@ -303,14 +306,30 @@ impl Beads {
                     "already running"
                 }
             )),
-            ServeStatus::Starting => Health::Off("starting".into()),
-            ServeStatus::Failed(e) => Health::Failed(format!(
+            (ServeStatus::Starting, _) => Health::Off("starting".into()),
+            (ServeStatus::Failed(e), _) => Health::Failed(format!(
                 "{e}, using the bd CLI (log: {})",
                 serve::log_path(&self.repo).display()
             )),
-            ServeStatus::Embedded => Health::Off("not used (embedded database)".into()),
+            (ServeStatus::Embedded, _) => Health::Off("not used (embedded database)".into()),
         };
         vec![tool("dolt sql", "dolt", sql), tool("bd serve", "bd", serve)]
+    }
+
+    fn not_ready(&self, url: &str, ours: bool, e: &str) -> String {
+        let mut msg = format!("{url} is up but not ready ({e}), using the bd CLI");
+        if ours {
+            msg.push_str(", sulla restarts it");
+        }
+        if let Some(pid) = serve::proxy_pid(&self.repo) {
+            msg.push_str(&format!(
+                ". If the Dolt server moved to a new port, `bd db-proxy-child` {pid} (.beads/dolt/proxy.pid) still points at the old one"
+            ));
+            if !ours {
+                msg.push_str(": stop that bd serve and the proxy");
+            }
+        }
+        msg
     }
 
     fn http(&self, cap: &str) -> Option<&Http> {
@@ -323,7 +342,7 @@ impl Beads {
 
     fn has_mutation_hooks(&self) -> bool {
         use std::os::unix::fs::PermissionsExt;
-        let dir = self.repo.join(".beads").join("hooks");
+        let dir = beads_dir(&self.repo).join("hooks");
         MUTATION_HOOKS.iter().any(|h| {
             std::fs::metadata(dir.join(h))
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -340,7 +359,7 @@ impl Beads {
             match call(h) {
                 Ok(v) => return Ok(v),
                 Err(Fail::Err(e)) => return Err(e),
-                Err(Fail::Down(e)) => self.server.down(&e),
+                Err(Fail::Down(e) | Fail::Unready(e)) => self.server.down(&e),
             }
         }
         cli()
@@ -417,10 +436,26 @@ impl Beads {
             .collect())
     }
 
-    pub fn blocked(&self) -> Result<HashMap<String, Vec<String>>> {
+    pub fn blocked(&self, all: &[Bead]) -> Result<HashMap<String, Vec<String>>> {
+        let open: Vec<&str> = all
+            .iter()
+            .filter(|b| !matches!(b.status.as_str(), "closed" | "pinned"))
+            .map(|b| b.id.as_str())
+            .collect();
+        let http = self
+            .http("blocked.list")
+            .or_else(|| self.http("dependencies.blocking"));
         let list = self.via(
-            self.http("blocked.list"),
-            |h| h.blocked(),
+            http,
+            |h| {
+                if h.can("blocked.list") {
+                    h.blocked()
+                } else if open.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    h.blocking(&open)
+                }
+            },
             || {
                 let out = self.run(&["blocked", "--json"])?;
                 if out.trim().is_empty() {
@@ -610,18 +645,26 @@ impl Beads {
         backlog: bool,
         labels: &[String],
     ) -> Result<String> {
-        let p = priority.to_string();
-        let mut args = vec!["create", title, "-p", &p, "--silent"];
-        if !description.is_empty() {
-            args.extend(["-d", description]);
-        }
+        let mut all: Vec<&str> = Vec::new();
         if backlog {
-            args.extend(["-l", "sulla:backlog"]);
+            all.push("sulla:backlog");
         }
-        for l in labels {
-            args.extend(["-l", l.as_str()]);
-        }
-        Ok(self.run(&args)?.trim().to_string())
+        all.extend(labels.iter().map(String::as_str));
+        self.via(
+            self.http_write("issues.create"),
+            |h| h.create(title, description, priority, &all),
+            || {
+                let p = priority.to_string();
+                let mut args = vec!["create", title, "-p", &p, "--silent"];
+                if !description.is_empty() {
+                    args.extend(["-d", description]);
+                }
+                for l in &all {
+                    args.extend(["-l", l]);
+                }
+                Ok(self.run(&args)?.trim().to_string())
+            },
+        )
     }
 }
 

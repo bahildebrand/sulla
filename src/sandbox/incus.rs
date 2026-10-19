@@ -256,9 +256,12 @@ impl Incus {
         if !beads::server_mode(&self.repo) {
             return Ok(());
         }
+        beads::start_dolt(&self.repo)
+            .map_err(|e| eyre!("incus: {name} needs the host Dolt server: {e:#}"))?;
         let Some(port) = beads::dolt_port(&self.repo) else {
-            tracing::warn!("incus: no Dolt server port for {name}, run `bd dolt start`");
-            return Ok(());
+            return Err(eyre!(
+                "incus: {name} needs the host Dolt server, but .beads/dolt-server.port is missing after `bd dolt start`"
+            ));
         };
         let addr = format!("tcp:127.0.0.1:{port}");
         let inst = self.cli.query(&format!("/1.0/instances/{name}"))?;
