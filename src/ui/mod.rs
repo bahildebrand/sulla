@@ -114,10 +114,17 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         app.cfg.max_agents,
         app.base
     );
-    let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right.len() as u16)])
-        .areas(area);
+    let mut spans = Vec::new();
+    if app.paused {
+        spans.push(tag("PAUSED", Color::Yellow));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::raw(right).dim());
+    let width: usize = spans.iter().map(|s| s.width()).sum();
+    let [l, r] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(width as u16)]).areas(area);
     f.render_widget(Line::from(left), l);
-    f.render_widget(Line::from(right).dim(), r);
+    f.render_widget(Line::from(spans), r);
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -125,7 +132,7 @@ const HELP: &[(&str, &str)] = &[
     ("?", "help"),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :refresh :kill <id> :chat [new])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :chat [new])",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
@@ -147,6 +154,7 @@ const HELP: &[(&str, &str)] = &[
     ("s", "release held or backlog bead to pending"),
     ("S", "release every backlog bead to pending"),
     ("B", "move bead to backlog (not auto scheduled)"),
+    ("P", "pause / resume auto scheduling of new beads"),
     ("R", "mark ready for review"),
     ("V", "start ai reviewer on a bead in review"),
     (

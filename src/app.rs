@@ -134,6 +134,7 @@ pub struct App {
     refresh: Sender<()>,
     term: (u16, u16),
     pub pending_edit: Option<PathBuf>,
+    pub paused: bool,
     pub quit: bool,
 }
 
@@ -199,6 +200,7 @@ impl App {
             refresh,
             term: (80, 24),
             pending_edit: None,
+            paused: false,
             quit: false,
         })
     }
@@ -521,7 +523,20 @@ impl App {
         }
     }
 
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            self.status = "scheduling paused".into();
+        } else {
+            self.status = "scheduling resumed".into();
+            self.schedule();
+        }
+    }
+
     fn schedule(&mut self) {
+        if self.paused {
+            return;
+        }
         let free = self
             .cfg
             .max_agents
@@ -1255,6 +1270,8 @@ impl App {
                 }
                 Err(_) => self.status = format!("max agents = {}", self.cfg.max_agents),
             },
+            "pause" => self.set_paused(true),
+            "resume" => self.set_paused(false),
             "refresh" | "r" => {
                 self.failed.clear();
                 self.mutated();
@@ -1707,6 +1724,7 @@ impl App {
             }
             KeyCode::Char('c') => self.open_chat(false),
             KeyCode::Char('C') => self.open_chat(true),
+            KeyCode::Char('P') => self.set_paused(!self.paused),
             _ => self.board_bead_key(k),
         }
     }
