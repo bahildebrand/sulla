@@ -45,7 +45,7 @@ use config::Config;
     about = "Keyboard-first TUI for scheduling, steering and merging coding agents"
 )]
 struct Args {
-    #[arg(short = 'C', long, default_value = ".")]
+    #[arg(short = 'C', long, default_value = ".", global = true)]
     repo: PathBuf,
     #[arg(long)]
     max_agents: Option<usize>,
