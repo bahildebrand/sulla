@@ -445,6 +445,15 @@ impl App {
                 next.insert(id.clone(), s);
             }
         }
+        for id in &self.failed {
+            let orphaned = !self.agents.contains_key(id)
+                && self
+                    .bead(id)
+                    .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Running));
+            if orphaned {
+                next.insert(id.clone(), Stall::Dead);
+            }
+        }
         let prev = std::mem::replace(&mut self.stalls, next);
         for id in prev.keys().filter(|id| !self.stalls.contains_key(*id)) {
             let bid = agent::reviewed_bead(id).unwrap_or(id);
@@ -464,7 +473,7 @@ impl App {
             };
             let trigger = match s {
                 Stall::Waiting => Trigger::Waiting,
-                Stall::Stalled => Trigger::Stalled,
+                Stall::Stalled | Stall::Dead => Trigger::Stalled,
             };
             tracing::info!("agent {id} {s:?}");
             self.notify(trigger, &bid, &title);
@@ -579,7 +588,7 @@ impl App {
                 if let Some(a) = self.agents.get_mut(&id)
                     && a.generation == generation
                 {
-                    a.alive = false;
+                    a.exited();
                     self.status = format!("agent {id} exited");
                     if matches!(self.view, View::Progress(ref v) if *v == id)
                         && matches!(self.mode, Mode::Insert)

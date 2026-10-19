@@ -27,6 +27,7 @@ const LINES_PER_WHEEL: usize = 3;
 const PROMPT_QUIET: Duration = Duration::from_secs(3);
 const BELL_GRACE: Duration = Duration::from_secs(2);
 const PROMPT_ROWS: usize = 15;
+const EXIT_GRACE: Duration = Duration::from_secs(30);
 
 pub struct Launch {
     pub id: String,
@@ -191,11 +192,14 @@ impl vt100::Callbacks for Bell {
 pub enum Stall {
     Waiting,
     Stalled,
+    Dead,
 }
 
 struct Activity {
     last_output: Instant,
     bell: Option<Instant>,
+    screen: u64,
+    last_progress: Instant,
 }
 
 impl Activity {
@@ -210,12 +214,35 @@ impl Activity {
         }
         self.last_output = now;
     }
+
+    fn observe(&mut self, now: Instant, screen: u64) {
+        if screen != self.screen {
+            self.screen = screen;
+            self.last_progress = now;
+        }
+    }
 }
 
-pub fn classify(idle: Duration, bell: bool, prompt: bool, cfg: &StallConfig) -> Option<Stall> {
-    if idle >= PROMPT_QUIET && (bell || prompt) {
+fn fingerprint(contents: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    contents
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_ascii_punctuation())
+        .for_each(|c| c.hash(&mut h));
+    h.finish()
+}
+
+pub fn classify(
+    quiet: Duration,
+    stuck: Duration,
+    bell: bool,
+    prompt: bool,
+    cfg: &StallConfig,
+) -> Option<Stall> {
+    if quiet >= PROMPT_QUIET && (bell || prompt) {
         Some(Stall::Waiting)
-    } else if cfg.minutes > 0 && idle >= Duration::from_secs(cfg.minutes * 60) {
+    } else if cfg.minutes > 0 && stuck >= Duration::from_secs(cfg.minutes * 60) {
         Some(Stall::Stalled)
     } else {
         None
@@ -378,6 +405,7 @@ static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
+    exited: Option<Instant>,
     activity: Arc<Mutex<Activity>>,
     pub generation: u64,
     writer: Box<dyn Write + Send>,
@@ -439,9 +467,12 @@ impl Agent {
         let id = id.to_string();
         let generation = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
         let p = parser.clone();
+        let now = Instant::now();
         let activity = Arc::new(Mutex::new(Activity {
-            last_output: Instant::now(),
+            last_output: now,
             bell: None,
+            screen: 0,
+            last_progress: now,
         }));
         let act = activity.clone();
         std::thread::spawn(move || {
@@ -476,6 +507,7 @@ impl Agent {
         Ok(Self {
             parser,
             alive: true,
+            exited: None,
             activity,
             generation,
             writer,
@@ -485,27 +517,33 @@ impl Agent {
     }
 
     pub fn idle(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.activity.lock().unwrap().last_output)
+        now.saturating_duration_since(self.activity.lock().unwrap().last_progress)
+    }
+
+    pub fn exited(&mut self) {
+        self.alive = false;
+        self.exited.get_or_insert_with(Instant::now);
     }
 
     pub fn stall(&self, now: Instant, cfg: &StallConfig) -> Option<Stall> {
         if !self.alive {
-            return None;
+            return self
+                .exited
+                .is_some_and(|t| now.saturating_duration_since(t) >= EXIT_GRACE)
+                .then_some(Stall::Dead);
         }
-        let (idle, bell) = {
-            let a = self.activity.lock().unwrap();
+        let contents = self.parser.lock().unwrap().screen().contents();
+        let (quiet, stuck, bell) = {
+            let mut a = self.activity.lock().unwrap();
+            a.observe(now, fingerprint(&contents));
             (
                 now.saturating_duration_since(a.last_output),
+                now.saturating_duration_since(a.last_progress),
                 a.bell.is_some(),
             )
         };
-        let prompt = idle >= PROMPT_QUIET
-            && !bell
-            && shows_prompt(
-                &self.parser.lock().unwrap().screen().contents(),
-                &cfg.prompts,
-            );
-        classify(idle, bell, prompt, cfg)
+        let prompt = quiet >= PROMPT_QUIET && !bell && shows_prompt(&contents, &cfg.prompts);
+        classify(quiet, stuck, bell, prompt, cfg)
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -575,7 +613,7 @@ impl Agent {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.alive = false;
+        self.exited();
     }
 }
 
@@ -642,14 +680,30 @@ mod tests {
     fn classify_prefers_waiting_and_respects_threshold() {
         let cfg = StallConfig::default();
         let s = Duration::from_secs;
-        assert_eq!(classify(s(1), true, true, &cfg), None);
-        assert_eq!(classify(s(4), true, false, &cfg), Some(Stall::Waiting));
-        assert_eq!(classify(s(4), false, true, &cfg), Some(Stall::Waiting));
-        assert_eq!(classify(s(299), false, false, &cfg), None);
-        assert_eq!(classify(s(300), false, false, &cfg), Some(Stall::Stalled));
-        assert_eq!(classify(s(900), false, true, &cfg), Some(Stall::Waiting));
+        assert_eq!(classify(s(1), s(1), true, true, &cfg), None);
+        assert_eq!(
+            classify(s(4), s(4), true, false, &cfg),
+            Some(Stall::Waiting)
+        );
+        assert_eq!(
+            classify(s(4), s(4), false, true, &cfg),
+            Some(Stall::Waiting)
+        );
+        assert_eq!(classify(s(299), s(299), false, false, &cfg), None);
+        assert_eq!(
+            classify(s(300), s(300), false, false, &cfg),
+            Some(Stall::Stalled)
+        );
+        assert_eq!(
+            classify(s(0), s(300), false, false, &cfg),
+            Some(Stall::Stalled)
+        );
+        assert_eq!(
+            classify(s(900), s(900), false, true, &cfg),
+            Some(Stall::Waiting)
+        );
         let off = StallConfig { minutes: 0, ..cfg };
-        assert_eq!(classify(s(9000), false, false, &off), None);
+        assert_eq!(classify(s(9000), s(9000), false, false, &off), None);
     }
 
     #[test]
@@ -658,12 +712,51 @@ mod tests {
         let mut a = Activity {
             last_output: t0,
             bell: None,
+            screen: 0,
+            last_progress: t0,
         };
         a.output(t0, true);
         a.output(t0 + Duration::from_secs(1), false);
         assert!(a.bell.is_some());
         a.output(t0 + Duration::from_secs(3), false);
         assert!(a.bell.is_none());
+    }
+
+    #[test]
+    fn spinner_and_timers_are_not_progress() {
+        let t0 = Instant::now();
+        let mut a = Activity {
+            last_output: t0,
+            bell: None,
+            screen: 0,
+            last_progress: t0,
+        };
+        let later = t0 + Duration::from_secs(60);
+        a.observe(
+            t0,
+            fingerprint("● Reading src/app.rs\n ◎ Thinking (Esc to cancel · 1m 4s)"),
+        );
+        a.observe(
+            later,
+            fingerprint("● Reading src/app.rs\n ◉ Thinking (Esc to cancel · 2m 9s)"),
+        );
+        assert_eq!(a.last_progress, t0);
+        a.observe(
+            later,
+            fingerprint("● Reading src/app.rs\n● Editing src/ui/board.rs"),
+        );
+        assert_eq!(a.last_progress, later);
+    }
+
+    #[test]
+    fn exited_agent_is_dead_after_grace() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut a = Agent::spawn(CommandBuilder::new("true"), "x", 24, 80, None, tx).unwrap();
+        let cfg = StallConfig::default();
+        a.kill();
+        let now = Instant::now();
+        assert_eq!(a.stall(now, &cfg), None);
+        assert_eq!(a.stall(now + EXIT_GRACE, &cfg), Some(Stall::Dead));
     }
 
     #[test]

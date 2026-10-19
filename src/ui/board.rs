@@ -23,6 +23,7 @@ fn stall_marker(s: Stall) -> Span<'static> {
     match s {
         Stall::Waiting => Span::styled("? ", Style::new().fg(Color::Yellow).bold()),
         Stall::Stalled => Span::styled("⧗ ", Style::new().fg(Color::Yellow)),
+        Stall::Dead => Span::styled("✗ ", Style::new().fg(Color::Red).bold()),
     }
 }
 
@@ -284,8 +285,9 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
                     .agents
                     .get(&id)
                     .map_or(0, |a| a.idle(Instant::now()).as_secs() / 60);
-                format!("stalled, no output for {mins}m")
+                format!("stalled, no progress for {mins}m")
             }
+            Stall::Dead => "in progress but no agent running".into(),
         });
     }
     meta.retain(|m| !m.is_empty());

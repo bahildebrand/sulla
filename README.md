@@ -169,7 +169,7 @@ notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
 
 [stall]
-minutes = 5               # no agent output for this long marks it stalled, 0 = never
+minutes = 5               # no screen progress for this long marks it stalled, 0 = never
 prompts = ["Do you want to", "No, and tell"] # screen text meaning a permission/input prompt
 
 [budget]
@@ -192,9 +192,12 @@ Notifications are skipped for the bead you are currently viewing.
 
 Running agents (and AI reviewers) are watched for trouble. A card shows `?` when the agent is
 waiting on input: it rang the bell, or one of the `[stall] prompts` strings is in the bottom rows
-of its screen, and it has been quiet for a few seconds. A card shows `⧗` when the agent has
-produced no output for `[stall] minutes`. Both fire notifications (`waiting` and `stalled`), and
-the flag clears once the agent produces output again.
+of its screen, and it has been quiet for a few seconds. A card shows `⧗` when the agent's screen
+text has not meaningfully changed for `[stall] minutes`. Spinners, elapsed timers and counters are
+ignored, so an agent stuck spinning on a hung request is still caught. A card shows a bold `✗` when
+the bead is in progress but its agent exited (for over 30 seconds) or failed to start. These fire
+notifications (`waiting` for the first, `stalled` for the others), and the flag clears once the
+agent makes progress again.
 
 Bell-based waiting detection relies on the agent ringing the bell. For Claude Code, run
 `claude config set --global preferredNotifChannel terminal_bell`.
