@@ -40,7 +40,7 @@ the `gh` CLI, configured by the `[pr]` table:
 - `draft` (default `false`): open pull requests as drafts.
 - `poll_secs` (default `120`): how often open pull requests are polled.
 - `backup_sessions` (default `true`): back up agent sessions so agents can resume on review
-  comments.
+  comments (see [Session backups](#session-backups)).
 - `auto_revise` (default `true`): queue a revision when a PR gets new comments or failing checks.
   When `false`, sulla only notifies and `U` on the board queues it.
 - `reply` (default `false`): when a revised bead is published again, comment on the PR with the
@@ -181,6 +181,31 @@ hidden `<!-- sulla -->` marker so the watcher ignores it.
 Apart from that opt-in reply, sulla only reads from GitHub. Agent and AI reviewer prompts tell
 agents never to post comments, reviews or replies to GitHub or change PRs through `gh`. PR
 feedback reaches them only through the bead notes and the revise prompt.
+
+### Session backups
+
+Awaiting PR beads can wait days or weeks, and agent session files live outside the repo
+(`~/.copilot/session-state/<session>/` or `~/.claude/projects/*/<session>.jsonl`, honoring
+`COPILOT_HOME` and `CLAUDE_CONFIG_DIR`), where they may be pruned. With `workflow = "pr"` and
+`[pr] backup_sessions = true`, every publish copies the implementer's session files to
+`.sulla/sessions/<bead>/` (git-ignored with the rest of `.sulla/`), replacing the previous backup.
+The backup is removed when the bead closes.
+
+Whenever a bead's agent is resumed with `workflow = "pr"` (revising, sending feedback, `A`, or a
+restart):
+
+- If the live session files exist, the session resumes as usual.
+- If they are missing but a backup exists, the backup is copied back to its original location and
+  the session resumes.
+- If neither exists, sulla starts a fresh session with the original bead prompt, the PR URL, the
+  `git log base..HEAD` summary of the branch and the feedback being sent, and the status bar says
+  the session was rebuilt.
+
+With `sandbox = "incus"`, agents run with the host `HOME` and the default `[incus] mounts` share
+`~/.copilot` and `~/.claude` with the host, so sessions are backed up and restored on the host. If
+`[incus] env` points `COPILOT_HOME` or `CLAUDE_CONFIG_DIR` elsewhere, that path is used instead.
+When the session directory is not under any mount, sulla cannot see it from the host and skips
+backup, restore and rebuild for that agent. With `workflow = "local"` none of this runs.
 
 ### Rejecting hunks
 

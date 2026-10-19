@@ -11,7 +11,8 @@ use portable_pty::CommandBuilder;
 
 use super::{Outcome, Sandbox};
 use crate::agent::Launch;
-use crate::config::IncusConfig;
+use crate::config::{AgentKind, IncusConfig};
+use crate::sessions;
 
 const MAX_NAME: usize = 63;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -471,6 +472,10 @@ impl Sandbox for Incus {
         true
     }
 
+    fn session_root(&self, kind: AgentKind, _host: &Path) -> Option<PathBuf> {
+        session_root(&self.cfg, &self.host.home, kind)
+    }
+
     fn command(
         &self,
         slot: usize,
@@ -555,6 +560,17 @@ pub fn container_name(prefix: &str, repo: &Path, slot: usize) -> String {
     name.push('-');
     name.push_str(&tail);
     name
+}
+
+fn session_root(cfg: &IncusConfig, home: &str, kind: AgentKind) -> Option<PathBuf> {
+    let root = match cfg.env.get(sessions::env_var(kind)) {
+        Some(v) => PathBuf::from(expand_home(v, home)),
+        None => sessions::default_root(kind, Path::new(home)),
+    };
+    cfg.mounts
+        .iter()
+        .any(|m| root.starts_with(expand_home(m, home)))
+        .then_some(root)
 }
 
 fn expand_home(path: &str, home: &str) -> String {
@@ -676,6 +692,26 @@ mod tests {
         let c = container_name(&"p".repeat(80), Path::new("/r"), 1);
         assert!(valid(&c), "{c}");
         assert!(c.ends_with("-1"));
+    }
+
+    #[test]
+    fn session_root_requires_a_host_mount() {
+        let mut cfg = IncusConfig::default();
+        assert_eq!(
+            session_root(&cfg, "/h", AgentKind::Copilot),
+            Some(PathBuf::from("/h/.copilot"))
+        );
+        cfg.env
+            .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude/alt".into());
+        assert_eq!(
+            session_root(&cfg, "/h", AgentKind::Claude),
+            Some(PathBuf::from("/h/.claude/alt"))
+        );
+        cfg.env
+            .insert("CLAUDE_CONFIG_DIR".into(), "/opt/claude".into());
+        assert_eq!(session_root(&cfg, "/h", AgentKind::Claude), None);
+        cfg.mounts.clear();
+        assert_eq!(session_root(&cfg, "/h", AgentKind::Copilot), None);
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod pr;
 mod presets;
 mod sandbox;
 mod scheduler;
+mod sessions;
 mod timeline;
 mod ui;
 mod usage;

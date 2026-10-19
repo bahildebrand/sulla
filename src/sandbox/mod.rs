@@ -2,7 +2,7 @@ mod incus;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use color_eyre::Result;
@@ -11,7 +11,7 @@ use portable_pty::CommandBuilder;
 pub use incus::Incus;
 
 use crate::agent::Launch;
-use crate::config::{Config, SandboxKind};
+use crate::config::{AgentKind, Config, SandboxKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -53,6 +53,9 @@ pub trait Sandbox: Send {
     }
     fn isolated(&self) -> bool {
         false
+    }
+    fn session_root(&self, _kind: AgentKind, host: &Path) -> Option<PathBuf> {
+        Some(host.to_path_buf())
     }
     fn command(
         &self,

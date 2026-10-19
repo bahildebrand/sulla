@@ -26,6 +26,7 @@ use crate::pr::{self, PrState, PrStatus};
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Idle, Snapshot, fmt_duration};
+use crate::sessions::{self, Resume};
 use crate::timeline;
 use crate::ui::keys;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
@@ -232,6 +233,7 @@ pub struct App {
     pub filter: Filter,
     pub rows: [usize; Column::ALL.len()],
     pub status: String,
+    rebuilt: Option<String>,
     pending: Option<char>,
     esc_at: Option<Instant>,
     last_mutation: Instant,
@@ -332,6 +334,7 @@ impl App {
             filter: Filter::default(),
             rows: [0; Column::ALL.len()],
             status: String::new(),
+            rebuilt: None,
             pending: None,
             esc_at: None,
             last_mutation: Instant::now(),
@@ -833,6 +836,7 @@ impl App {
                 if self.report(r).is_none() {
                     self.failed.insert(b.id.clone());
                 }
+                self.rebuilt_status();
             } else {
                 tracing::info!("resetting orphaned bead {}", b.id);
                 let r = self
@@ -1004,6 +1008,7 @@ impl App {
         if self.report(r).is_some() {
             self.failed.remove(&id);
             self.status = format!("revising {id} from PR feedback");
+            self.rebuilt_status();
         } else {
             self.failed.insert(id.clone());
             let r = self.beads.set_state(&id, State::Revise);
@@ -1133,6 +1138,11 @@ impl App {
             .slots
             .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {}", bead.id))?;
+        let (resume, prompt) = if resume && self.cfg.workflow == Workflow::Pr {
+            self.recover_session(&bead, kind, parent.as_deref(), prompt)
+        } else {
+            (resume, prompt)
+        };
         let launch = Launch {
             session: agent::session_id(&self.repo, &bead.id),
             id: bead.id.clone(),
@@ -1145,9 +1155,87 @@ impl App {
         let r = self.spawn_sandboxed(slot, launch, kind);
         if let Err(e) = r {
             self.slots.release(&bead.id);
+            self.rebuilt = None;
             return Err(e);
         }
         Ok(())
+    }
+
+    fn session_root(&self, kind: AgentKind) -> Option<PathBuf> {
+        let host = sessions::Roots::from_env();
+        self.sandbox.session_root(kind, host.get(kind))
+    }
+
+    fn backup_session(&self, bead: &Bead) {
+        let (kind, _) = agent::selection(bead, self.cfg.agent);
+        let Some(root) = self.session_root(kind) else {
+            return;
+        };
+        let session = agent::session_id(&self.repo, &bead.id);
+        let dest = sessions::backup_dir(&self.repo, &bead.id);
+        match sessions::backup(&root, kind, &session, &dest) {
+            Ok(true) => tracing::info!("backed up session of {} to {}", bead.id, dest.display()),
+            Ok(false) => tracing::warn!(
+                "no {} session {session} to back up for {}",
+                kind.name(),
+                bead.id
+            ),
+            Err(e) => tracing::warn!("backing up session of {}: {e:#}", bead.id),
+        }
+    }
+
+    fn recover_session(
+        &mut self,
+        bead: &Bead,
+        kind: AgentKind,
+        parent: Option<&str>,
+        prompt: Option<String>,
+    ) -> (bool, Option<String>) {
+        let Some(root) = self.session_root(kind) else {
+            return (true, prompt);
+        };
+        let id = &bead.id;
+        let session = agent::session_id(&self.repo, id);
+        let dest = sessions::backup_dir(&self.repo, id);
+        match sessions::ensure(&root, kind, &session, &dest) {
+            Ok(Resume::Live) => return (true, prompt),
+            Ok(Resume::Restored) => {
+                tracing::info!("restored session of {id} from {}", dest.display());
+                return (true, prompt);
+            }
+            Ok(Resume::Lost) => {}
+            Err(e) => {
+                tracing::warn!("restoring session of {id}: {e:#}");
+                return (true, prompt);
+            }
+        }
+        tracing::warn!("session of {id} is gone and has no backup, rebuilding it");
+        let preset = presets::for_bead(&self.cfg.presets, bead);
+        let task = agent::task_prompt(bead, parent, preset);
+        let pr = bead.label("pr").map(|n| {
+            n.parse()
+                .ok()
+                .and_then(|n| pr::url(&self.repo, n).ok())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| format!("PR #{n}"))
+        });
+        let log = self.git.summary(id, &self.pr_base(id)).unwrap_or_else(|e| {
+            tracing::warn!("git log for {id}: {e:#}");
+            String::new()
+        });
+        let text = sessions::rebuild_prompt(&task, pr.as_deref(), &log, prompt.as_deref());
+        let msg = format!(
+            "{id}: agent session was lost, rebuilt a fresh one from the bead, PR and git log"
+        );
+        self.status = msg.clone();
+        self.rebuilt = Some(msg);
+        (false, Some(text))
+    }
+
+    fn rebuilt_status(&mut self) {
+        if let Some(m) = self.rebuilt.take() {
+            self.status = m;
+        }
     }
 
     fn start_review(&mut self, id: &str) {
@@ -1651,6 +1739,9 @@ impl App {
             self.stop_check(id);
             self.remove_agent(&agent::review_id(id), Outcome::Killed);
             self.remove_agent(id, Outcome::Killed);
+            if self.cfg.pr.backup_sessions {
+                self.backup_session(&bead);
+            }
             self.parked_review = None;
             self.view = View::Board;
             self.status = format!("published {id} as PR #{} {}", created.number, created.url);
@@ -2573,7 +2664,11 @@ impl App {
         self.beads.close(id, reason).or_else(|e| {
             tracing::warn!("bd close {id} failed, retrying with --force: {e:#}");
             self.beads.force_close(id, reason)
-        })
+        })?;
+        if let Err(e) = sessions::remove(&sessions::backup_dir(&self.repo, id)) {
+            tracing::warn!("removing session backup of {id}: {e:#}");
+        }
+        Ok(())
     }
 
     fn resolve_conflicts(&mut self, id: &str) {
@@ -2595,6 +2690,7 @@ impl App {
         self.ai_reviews.remove(id);
         self.deliver(id, text);
         self.status = format!("feedback sent to {id}");
+        self.rebuilt_status();
         self.parked_review = None;
         self.view = View::Progress(id.to_string());
         self.mutated();
@@ -2659,6 +2755,7 @@ impl App {
                 self.report(r);
             }
             self.status = format!("launched {id}");
+            self.rebuilt_status();
             self.mutated();
         }
     }

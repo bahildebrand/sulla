@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::app::Event;
 use crate::config::AgentKind;
+use crate::sessions::Roots;
 
 const RESOLVE_EVERY: Duration = Duration::from_secs(15);
 
@@ -220,16 +221,11 @@ struct Locator {
 
 impl Locator {
     fn from_env() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let copilot = std::env::var_os("COPILOT_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".copilot"));
-        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".claude"));
-        Self { copilot, claude }
+        let r = Roots::from_env();
+        Self {
+            copilot: r.copilot,
+            claude: r.claude,
+        }
     }
 
     fn find(&self, kind: AgentKind, session: &str) -> Option<PathBuf> {

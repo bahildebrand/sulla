@@ -70,6 +70,15 @@ pub fn find(repo: &Path, branch: &str) -> Result<Option<Pr>> {
     )?)
 }
 
+pub fn url(repo: &Path, number: u64) -> Result<String> {
+    let n = number.to_string();
+    Ok(
+        gh(repo, &["pr", "view", &n, "--json", "url", "-q", ".url"])?
+            .trim()
+            .to_string(),
+    )
+}
+
 pub fn create(
     repo: &Path,
     branch: &str,

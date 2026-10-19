@@ -372,6 +372,19 @@ impl Git {
         }
     }
 
+    pub fn summary(&self, id: &str, base: &str) -> Result<String> {
+        let up = self.upstream(id, base);
+        run(
+            &self.worktree_path(id),
+            &[
+                "log",
+                "--no-color",
+                "--format=%h %s",
+                &format!("{up}..HEAD"),
+            ],
+        )
+    }
+
     pub fn merged_log(&self, id: &str) -> Result<String> {
         let (b, h) = (merged_ref(id, "base"), merged_ref(id, "head"));
         Self::log_range(&self.repo, &format!("{b}..{h}"))
