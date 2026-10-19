@@ -55,6 +55,10 @@ pub fn selection(bead: &Bead, default: AgentKind) -> (AgentKind, Option<String>)
     (kind, bead.label("model").map(String::from))
 }
 
+const NO_GITHUB: &str = "Never post comments, reviews or replies to GitHub, and never \
+     use gh or the GitHub API to change pull requests. PR feedback in the notes is for you to \
+     address in code only.";
+
 pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str)>) -> String {
     let id = &bead.id;
     let mut desc = if bead.description.trim().is_empty() {
@@ -84,7 +88,7 @@ pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str
         "You are working on bead {id}: {title}{desc}{notes}\n\n\
          You are in a dedicated git worktree on branch sulla/{id}. Commit your work to this \
          branch. Do not switch branches, rebase, or touch other worktrees. Rust builds are cached \
-         with kache through RUSTC_WRAPPER, leave that alone.\n\n\
+         with kache through RUSTC_WRAPPER, leave that alone. {NO_GITHUB}\n\n\
          When the task is complete and committed, run \
          `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait. \
          A human will review the diff and may send feedback.",
@@ -113,7 +117,8 @@ pub fn review_prompt(bead: &Bead, base: &str) -> String {
          worktree. Inspect `git diff {base}...HEAD` and `git log {base}..HEAD`. Check \
          correctness, bugs, edge cases, and whether the acceptance criteria above are met. Run \
          the build and tests. Do NOT edit tracked files, commit, rebase, or change branches. \
-         Rust builds are cached with kache through RUSTC_WRAPPER, leave that alone.\n\n\
+         Rust builds are cached with kache through RUSTC_WRAPPER, leave that alone. \
+         {NO_GITHUB}\n\n\
          Leave line-anchored review comments the way a human reviewer does in sulla. Write a \
          JSON file outside the worktree at /tmp/sulla-review-{id}.json with exactly this \
          shape:\n\
@@ -858,6 +863,13 @@ mod tests {
         let p = task_prompt(&b, None, None);
         assert!(p.contains("Notes"));
         assert!(p.contains("broke the build"));
+    }
+
+    #[test]
+    fn prompts_forbid_posting_to_github() {
+        let b: Bead = serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
+        assert!(task_prompt(&b, None, None).contains(NO_GITHUB));
+        assert!(review_prompt(&b, "main").contains(NO_GITHUB));
     }
 
     #[test]

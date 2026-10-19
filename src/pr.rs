@@ -144,7 +144,6 @@ pub enum Checks {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStatus {
     pub state: PrState,
-    pub head: String,
     pub comments: Vec<PrComment>,
     pub checks: Checks,
 }
@@ -156,34 +155,25 @@ struct Author {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawComment {
-    id: String,
-    author: Option<Author>,
-    #[serde(default)]
-    body: String,
-    created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawReview {
-    id: String,
+struct RawItem {
+    id: serde_json::Value,
+    #[serde(alias = "user")]
     author: Option<Author>,
     #[serde(default)]
     body: String,
     #[serde(default)]
     state: String,
-    submitted_at: Option<DateTime<Utc>>,
+    path: Option<String>,
+    line: Option<u64>,
+    original_line: Option<u64>,
+    #[serde(alias = "createdAt", alias = "submittedAt")]
+    created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
 struct RawCheck {
-    #[serde(rename = "__typename", default)]
-    kind: String,
     name: Option<String>,
     context: Option<String>,
-    status: Option<String>,
     conclusion: Option<String>,
     state: Option<String>,
 }
@@ -193,49 +183,35 @@ struct RawCheck {
 struct RawView {
     state: String,
     #[serde(default)]
-    head_ref_oid: String,
+    comments: Vec<RawItem>,
     #[serde(default)]
-    comments: Vec<RawComment>,
-    #[serde(default)]
-    reviews: Vec<RawReview>,
+    reviews: Vec<RawItem>,
     #[serde(default)]
     status_check_rollup: Option<Vec<RawCheck>>,
 }
 
-#[derive(Deserialize)]
-struct RawUser {
-    #[serde(default)]
-    login: String,
-}
-
-#[derive(Deserialize)]
-struct RawInline {
-    id: u64,
-    user: Option<RawUser>,
-    #[serde(default)]
-    body: String,
-    path: Option<String>,
-    line: Option<u64>,
-    original_line: Option<u64>,
-    created_at: Option<DateTime<Utc>>,
-}
-
-fn author(a: Option<Author>) -> String {
-    a.map(|a| a.login)
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(|| "ghost".into())
-}
-
-fn review_body(r: &RawReview) -> Option<String> {
-    let body = r.body.trim();
-    if !body.is_empty() {
-        return Some(body.to_string());
-    }
-    match r.state.as_str() {
-        "APPROVED" => Some("approved".into()),
-        "CHANGES_REQUESTED" => Some("changes requested".into()),
-        _ => None,
-    }
+fn comment(r: RawItem) -> Option<PrComment> {
+    let body = match (r.body.trim(), r.state.as_str()) {
+        ("", "APPROVED") => "approved".to_string(),
+        ("", "CHANGES_REQUESTED") => "changes requested".to_string(),
+        ("", _) => return None,
+        (b, _) => b.to_string(),
+    };
+    Some(PrComment {
+        id: match r.id {
+            serde_json::Value::String(s) => s,
+            v => v.to_string(),
+        },
+        author: r
+            .author
+            .map(|a| a.login)
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| "ghost".into()),
+        body,
+        path: r.path,
+        line: r.line.or(r.original_line),
+        created_at: r.created_at,
+    })
 }
 
 fn checks(rollup: &[RawCheck]) -> Checks {
@@ -245,28 +221,21 @@ fn checks(rollup: &[RawCheck]) -> Checks {
     let mut failing = Vec::new();
     let mut pending = false;
     for c in rollup {
-        let name = c
-            .name
-            .clone()
-            .or_else(|| c.context.clone())
-            .unwrap_or_else(|| "check".into());
-        if c.kind == "StatusContext" || (c.state.is_some() && c.status.is_none()) {
-            match c.state.as_deref().unwrap_or("") {
-                "FAILURE" | "ERROR" => failing.push(name),
-                "SUCCESS" => {}
-                _ => pending = true,
-            }
-            continue;
-        }
-        if c.status.as_deref() != Some("COMPLETED") {
-            pending = true;
-            continue;
-        }
-        if matches!(
-            c.conclusion.as_deref().unwrap_or(""),
-            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
-        ) {
-            failing.push(name);
+        let result = c
+            .conclusion
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(c.state.as_deref())
+            .unwrap_or("");
+        match result {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
+            "" | "PENDING" | "EXPECTED" => pending = true,
+            _ => failing.push(
+                c.name
+                    .clone()
+                    .or_else(|| c.context.clone())
+                    .unwrap_or_else(|| "check".into()),
+            ),
         }
     }
     if !failing.is_empty() {
@@ -282,21 +251,8 @@ fn checks(rollup: &[RawCheck]) -> Checks {
 
 fn parse_inline(json: &str) -> Result<Vec<PrComment>> {
     let mut out = Vec::new();
-    for page in serde_json::Deserializer::from_str(json).into_iter::<Vec<RawInline>>() {
-        out.extend(page?.into_iter().map(|c| {
-            PrComment {
-                id: format!("rc{}", c.id),
-                author: c
-                    .user
-                    .map(|u| u.login)
-                    .filter(|l| !l.is_empty())
-                    .unwrap_or_else(|| "ghost".into()),
-                body: c.body,
-                path: c.path,
-                line: c.line.or(c.original_line),
-                created_at: c.created_at,
-            }
-        }));
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Vec<RawItem>>() {
+        out.extend(page?.into_iter().filter_map(comment));
     }
     Ok(out)
 }
@@ -312,32 +268,13 @@ fn parse_view(json: &str, inline: Vec<PrComment>) -> Result<PrStatus> {
     let mut comments: Vec<PrComment> = v
         .comments
         .into_iter()
-        .map(|c| PrComment {
-            id: c.id,
-            author: author(c.author),
-            body: c.body,
-            path: None,
-            line: None,
-            created_at: c.created_at,
-        })
+        .chain(v.reviews)
+        .filter_map(comment)
+        .chain(inline)
         .collect();
-    for r in v.reviews {
-        if let Some(body) = review_body(&r) {
-            comments.push(PrComment {
-                id: r.id,
-                author: author(r.author),
-                body,
-                path: None,
-                line: None,
-                created_at: r.submitted_at,
-            });
-        }
-    }
-    comments.extend(inline);
     comments.sort_by_key(|c| c.created_at);
     Ok(PrStatus {
         state,
-        head: v.head_ref_oid,
         comments,
         checks: checks(v.status_check_rollup.as_deref().unwrap_or(&[])),
     })
@@ -352,7 +289,7 @@ pub fn status(repo: &Path, number: u64) -> Result<PrStatus> {
             "view",
             &n,
             "--json",
-            "state,mergedAt,comments,reviews,statusCheckRollup,headRefOid",
+            "state,comments,reviews,statusCheckRollup",
         ],
     )?;
     let inline = gh(
@@ -442,7 +379,9 @@ impl Watch {
 pub fn notes(number: u64, a: &Activity) -> String {
     let mut lines = Vec::new();
     if !a.comments.is_empty() {
-        lines.push(format!("PR #{number} review activity:"));
+        lines.push(format!(
+            "PR #{number} review activity (address in code, never reply on GitHub):"
+        ));
         lines.extend(a.comments.iter().map(|c| format!("- {}", c.describe())));
     }
     if let Some(names) = &a.failing {
@@ -499,9 +438,8 @@ mod tests {
     fn parses_view_into_status() {
         let s = status_of(VIEW);
         assert_eq!(s.state, PrState::Open);
-        assert_eq!(s.head, "abc123");
         let ids: Vec<_> = s.comments.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["IC_1", "rc7", "PRR_2", "rc8"]);
+        assert_eq!(ids, ["IC_1", "7", "PRR_2", "8"]);
         assert_eq!(s.comments[1].describe(), "carol on src/a.rs:12: rename");
         assert_eq!(s.comments[2].body, "changes requested");
         assert_eq!(s.comments[3].author, "ghost");

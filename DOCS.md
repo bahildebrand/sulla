@@ -127,7 +127,7 @@ force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`.
 ### Watching PRs
 
 With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR every
-`[pr] poll_secs` (default 120) with `gh pr view <n> --json state,mergedAt,comments,reviews,statusCheckRollup,headRefOid`
+`[pr] poll_secs` (default 120) with `gh pr view <n> --json state,comments,reviews,statusCheckRollup`
 plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments.
 
 - **Merged**: the bead is closed with reason `merged via PR #<n>`, its agent and reviewer stop,
@@ -144,6 +144,10 @@ Seen comment and review ids, the last checks result and the closed flag are kept
 `.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the number of PR
 comments seen, `⟳ci`, `✓ci` or `✗ci` for the checks result and `closed` when the PR was closed.
 Publishing triggers an immediate poll.
+
+The watcher only reads from GitHub. Agent and AI reviewer prompts tell agents never to post
+comments, reviews or replies to GitHub or change PRs through `gh`. PR feedback reaches them only
+through the bead notes.
 
 ### Rejecting hunks
 
