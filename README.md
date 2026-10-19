@@ -151,6 +151,10 @@ on = ["review", "stalled", "waiting"]
 cooldown_secs = 60        # min gap between repeat notifications for one bead
 notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
+
+[stall]
+minutes = 5               # no agent output for this long marks it stalled, 0 = never
+prompts = ["Do you want to", "No, and tell"] # screen text meaning a permission/input prompt
 ```
 
 Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
@@ -166,7 +170,13 @@ Notifications are skipped for the bead you are currently viewing.
 - `tmux` sets the `@sulla` user option to `sulla:<n>` while beads need attention, and unsets it
   when none do. Show it with e.g. `set -g status-right '#{@sulla} ...'`.
 
-Waiting detection relies on the agent ringing the bell. For Claude Code, run
+Running agents (and AI reviewers) are watched for trouble. A card shows `?` when the agent is
+waiting on input: it rang the bell, or one of the `[stall] prompts` strings is in the bottom rows
+of its screen, and it has been quiet for a few seconds. A card shows `⧗` when the agent has
+produced no output for `[stall] minutes`. Both fire notifications (`waiting` and `stalled`), and
+the flag clears once the agent produces output again.
+
+Bell-based waiting detection relies on the agent ringing the bell. For Claude Code, run
 `claude config set --global preferredNotifChannel terminal_bell`.
 
 ## Sandboxes

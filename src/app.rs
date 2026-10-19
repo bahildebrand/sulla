@@ -12,7 +12,7 @@ use crossterm::event::{
     Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 
-use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
+use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, Trigger};
@@ -100,6 +100,7 @@ pub enum Mode {
 }
 
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
+const STALL_POLL: Duration = Duration::from_secs(1);
 const RATE_SCAN_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
@@ -155,6 +156,8 @@ pub struct App {
     rate_scanned: Instant,
     restack_stuck: HashMap<String, Option<String>>,
     notifier: Notifier,
+    pub stalls: HashMap<String, Stall>,
+    stall_checked: Option<Instant>,
     states: Option<HashMap<String, Option<State>>>,
     pub view: View,
     pub parked_review: Option<Diff>,
@@ -213,6 +216,8 @@ impl App {
         };
         Ok(Self {
             notifier: Notifier::new(cfg.notify.clone()),
+            stalls: HashMap::new(),
+            stall_checked: None,
             states: None,
             cfg,
             base,
@@ -372,6 +377,7 @@ impl App {
 
     pub fn handle(&mut self, ev: Event) {
         self.dispatch(ev);
+        self.check_stalls();
         if let Some(id) = self.viewing() {
             self.notifier.clear(&id);
         }
@@ -404,6 +410,54 @@ impl App {
         }
         let (bid, title) = (b.id.clone(), b.title.clone());
         self.notify(Trigger::Waiting, &bid, &title);
+    }
+
+    fn check_stalls(&mut self) {
+        let now = Instant::now();
+        if self
+            .stall_checked
+            .is_some_and(|t| now.duration_since(t) < STALL_POLL)
+        {
+            return;
+        }
+        self.stall_checked = Some(now);
+        let mut next = HashMap::new();
+        for (id, a) in &self.agents {
+            let (bid, want) = match agent::reviewed_bead(id) {
+                Some(b) => (b, State::Reviewing),
+                None => (id.as_str(), State::Running),
+            };
+            let watched = self
+                .bead(bid)
+                .is_some_and(|b| b.status != "closed" && b.state() == Some(want));
+            if let Some(s) = watched.then(|| a.stall(now, &self.cfg.stall)).flatten() {
+                next.insert(id.clone(), s);
+            }
+        }
+        let prev = std::mem::replace(&mut self.stalls, next);
+        for id in prev.keys().filter(|id| !self.stalls.contains_key(*id)) {
+            let bid = agent::reviewed_bead(id).unwrap_or(id);
+            self.notifier
+                .retain(|i, t| i != bid || t == Trigger::Review);
+        }
+        let fresh: Vec<(String, Stall)> = self
+            .stalls
+            .iter()
+            .filter(|(id, s)| prev.get(*id) != Some(*s))
+            .map(|(id, s)| (id.clone(), *s))
+            .collect();
+        for (id, s) in fresh {
+            let bid = agent::reviewed_bead(&id).unwrap_or(&id);
+            let Some((bid, title)) = self.bead(bid).map(|b| (b.id.clone(), b.title.clone())) else {
+                continue;
+            };
+            let trigger = match s {
+                Stall::Waiting => Trigger::Waiting,
+                Stall::Stalled => Trigger::Stalled,
+            };
+            tracing::info!("agent {id} {s:?}");
+            self.notify(trigger, &bid, &title);
+        }
     }
 
     fn entered_review(&mut self) -> Vec<String> {

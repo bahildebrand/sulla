@@ -19,6 +19,23 @@ pub struct Config {
     pub claude: ClaudeConfig,
     pub incus: IncusConfig,
     pub notify: NotifyConfig,
+    pub stall: StallConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct StallConfig {
+    pub minutes: u64,
+    pub prompts: Vec<String>,
+}
+
+impl Default for StallConfig {
+    fn default() -> Self {
+        Self {
+            minutes: 5,
+            prompts: vec!["Do you want to".into(), "No, and tell".into()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -142,6 +159,7 @@ impl Default for Config {
             claude: ClaudeConfig::default(),
             incus: IncusConfig::default(),
             notify: NotifyConfig::default(),
+            stall: StallConfig::default(),
         }
     }
 }

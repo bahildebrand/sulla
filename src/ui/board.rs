@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -5,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 
-use crate::agent;
+use crate::agent::{self, Stall};
 use crate::app::App;
 use crate::beads::{Bead, Column, State};
 use crate::checks::Check;
@@ -15,6 +17,22 @@ fn badge(app: &App, b: &Bead) -> Span<'static> {
     app.ai_reviews
         .get(&b.id)
         .map_or(Span::raw(""), review::verdict_badge)
+}
+
+fn stall_marker(s: Stall) -> Span<'static> {
+    match s {
+        Stall::Waiting => Span::styled("? ", Style::new().fg(Color::Yellow).bold()),
+        Stall::Stalled => Span::styled("⧗ ", Style::new().fg(Color::Yellow)),
+    }
+}
+
+fn stall_of(app: &App, b: &Bead) -> Option<(String, Stall)> {
+    let id = if b.state() == Some(State::Reviewing) {
+        agent::review_id(&b.id)
+    } else {
+        b.id.clone()
+    };
+    app.stalls.get(&id).map(|s| (id, *s))
 }
 
 fn conflict(app: &App, b: &Bead) -> Span<'static> {
@@ -30,6 +48,9 @@ fn check_badge(app: &App, b: &Bead) -> Span<'static> {
 }
 
 fn marker(app: &App, b: &Bead) -> Span<'static> {
+    if let Some((_, s)) = stall_of(app, b) {
+        return stall_marker(s);
+    }
     if b.state() == Some(State::Reviewing) {
         let color = match app.agents.get(&agent::review_id(&b.id)) {
             Some(a) if a.alive => Color::Cyan,
@@ -191,6 +212,18 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     }
     if let Some(u) = app.usage.get(&b.id) {
         meta.push(u.short());
+    }
+    if let Some((id, s)) = stall_of(app, b) {
+        meta.push(match s {
+            Stall::Waiting => "waiting on input".into(),
+            Stall::Stalled => {
+                let mins = app
+                    .agents
+                    .get(&id)
+                    .map_or(0, |a| a.idle(Instant::now()).as_secs() / 60);
+                format!("stalled, no output for {mins}m")
+            }
+        });
     }
     meta.retain(|m| !m.is_empty());
     lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(Color::Cyan));

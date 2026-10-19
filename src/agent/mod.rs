@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use color_eyre::{Result, eyre::eyre};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -15,12 +16,16 @@ pub use copilot::Copilot;
 
 use crate::app::Event;
 use crate::beads::Bead;
+use crate::config::StallConfig;
 
 pub const CHAT_ID: &str = "@chat";
 const REVIEW_SUFFIX: &str = "~review";
 
 const MAX_WHEEL_EVENTS: usize = 500;
 const LINES_PER_WHEEL: usize = 3;
+const PROMPT_QUIET: Duration = Duration::from_secs(3);
+const BELL_GRACE: Duration = Duration::from_secs(2);
+const PROMPT_ROWS: usize = 15;
 
 pub struct Launch {
     pub id: String,
@@ -172,6 +177,51 @@ impl vt100::Callbacks for Bell {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stall {
+    Waiting,
+    Stalled,
+}
+
+struct Activity {
+    last_output: Instant,
+    bell: Option<Instant>,
+}
+
+impl Activity {
+    fn output(&mut self, now: Instant, rang: bool) {
+        if rang {
+            self.bell = Some(now);
+        } else if self
+            .bell
+            .is_some_and(|b| now.saturating_duration_since(b) > BELL_GRACE)
+        {
+            self.bell = None;
+        }
+        self.last_output = now;
+    }
+}
+
+pub fn classify(idle: Duration, bell: bool, prompt: bool, cfg: &StallConfig) -> Option<Stall> {
+    if idle >= PROMPT_QUIET && (bell || prompt) {
+        Some(Stall::Waiting)
+    } else if cfg.minutes > 0 && idle >= Duration::from_secs(cfg.minutes * 60) {
+        Some(Stall::Stalled)
+    } else {
+        None
+    }
+}
+
+fn shows_prompt(contents: &str, patterns: &[String]) -> bool {
+    let lines: Vec<&str> = contents.trim_end().lines().collect();
+    let tail = &lines[lines.len().saturating_sub(PROMPT_ROWS)..];
+    tail.iter().any(|l| {
+        patterns
+            .iter()
+            .any(|p| !p.is_empty() && l.contains(p.as_str()))
+    })
+}
+
 fn is_box_char(c: char) -> bool {
     ('\u{2500}'..='\u{257f}').contains(&c)
 }
@@ -316,6 +366,7 @@ pub fn render_log(bytes: &[u8], rows: u16, cols: u16) -> String {
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
+    activity: Arc<Mutex<Activity>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -374,6 +425,11 @@ impl Agent {
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
         let id = id.to_string();
         let p = parser.clone();
+        let activity = Arc::new(Mutex::new(Activity {
+            last_output: Instant::now(),
+            bell: None,
+        }));
+        let act = activity.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -390,6 +446,7 @@ impl Agent {
                             p.process(&buf[..n]);
                             std::mem::take(&mut p.callbacks_mut().0)
                         };
+                        act.lock().unwrap().output(Instant::now(), rang);
                         if tx.send(Event::AgentOutput).is_err() {
                             return;
                         }
@@ -405,10 +462,35 @@ impl Agent {
         Ok(Self {
             parser,
             alive: true,
+            activity,
             writer,
             master: pair.master,
             child,
         })
+    }
+
+    pub fn idle(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.activity.lock().unwrap().last_output)
+    }
+
+    pub fn stall(&self, now: Instant, cfg: &StallConfig) -> Option<Stall> {
+        if !self.alive {
+            return None;
+        }
+        let (idle, bell) = {
+            let a = self.activity.lock().unwrap();
+            (
+                now.saturating_duration_since(a.last_output),
+                a.bell.is_some(),
+            )
+        };
+        let prompt = idle >= PROMPT_QUIET
+            && !bell
+            && shows_prompt(
+                &self.parser.lock().unwrap().screen().contents(),
+                &cfg.prompts,
+            );
+        classify(idle, bell, prompt, cfg)
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -513,6 +595,44 @@ mod tests {
         assert!(!p.callbacks().0);
         p.process(b"\x07");
         assert!(p.callbacks().0);
+    }
+
+    #[test]
+    fn classify_prefers_waiting_and_respects_threshold() {
+        let cfg = StallConfig::default();
+        let s = Duration::from_secs;
+        assert_eq!(classify(s(1), true, true, &cfg), None);
+        assert_eq!(classify(s(4), true, false, &cfg), Some(Stall::Waiting));
+        assert_eq!(classify(s(4), false, true, &cfg), Some(Stall::Waiting));
+        assert_eq!(classify(s(299), false, false, &cfg), None);
+        assert_eq!(classify(s(300), false, false, &cfg), Some(Stall::Stalled));
+        assert_eq!(classify(s(900), false, true, &cfg), Some(Stall::Waiting));
+        let off = StallConfig { minutes: 0, ..cfg };
+        assert_eq!(classify(s(9000), false, false, &off), None);
+    }
+
+    #[test]
+    fn bell_clears_once_output_resumes() {
+        let t0 = Instant::now();
+        let mut a = Activity {
+            last_output: t0,
+            bell: None,
+        };
+        a.output(t0, true);
+        a.output(t0 + Duration::from_secs(1), false);
+        assert!(a.bell.is_some());
+        a.output(t0 + Duration::from_secs(3), false);
+        assert!(a.bell.is_none());
+    }
+
+    #[test]
+    fn prompt_only_matches_bottom_rows() {
+        let pats = StallConfig::default().prompts;
+        let prompt = "Do you want to run this command?\n 1. Yes\n 3. No, and tell Copilot\n\n\n";
+        assert!(shows_prompt(prompt, &pats));
+        let old = format!("Do you want to\n{}", "line\n".repeat(PROMPT_ROWS));
+        assert!(!shows_prompt(&old, &pats));
+        assert!(!shows_prompt("Do you want to", &[String::new()]));
     }
 
     #[test]
