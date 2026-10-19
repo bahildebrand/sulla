@@ -25,7 +25,14 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .find(|b| b.id == d.id)
                 .map(|b| b.title.as_str())
                 .unwrap_or("");
-            review::render(f, main, d, title, app.slot_location(&d.id).as_deref())
+            review::render(
+                f,
+                main,
+                d,
+                title,
+                app.slot_location(&d.id).as_deref(),
+                app.ai_reviews.get(&d.id),
+            )
         }
     }
     status_line(f, status, app);
@@ -38,15 +45,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Mode::Inspect { id, text, scroll } = &app.mode {
         inspect(f, id, text, *scroll);
     }
-    if let (
-        Mode::Input {
-            kind: InputKind::Comment,
-            buf,
-        },
-        View::Review(d),
-    ) = (&app.mode, &app.view)
-    {
-        comment(f, d, buf);
+    if let (Mode::Input { kind, buf }, View::Review(d)) = (&app.mode, &app.view) {
+        match kind {
+            InputKind::Comment => comment(f, d, buf, false),
+            InputKind::EditComment(_) => comment(f, d, buf, true),
+            _ => {}
+        }
     }
 }
 
@@ -70,11 +74,18 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             tag("COMMENT", Color::Magenta),
             Span::raw(" Enter add, Ctrl-u clear, Esc cancel").dim(),
         ],
+        Mode::Input {
+            kind: InputKind::EditComment(_),
+            ..
+        } => vec![
+            tag("EDIT", Color::Magenta),
+            Span::raw(" Enter save, Ctrl-u clear, Esc cancel").dim(),
+        ],
         Mode::Input { kind, buf } => {
             let prompt = match kind {
                 InputKind::Command => ":".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
-                InputKind::Comment => String::new(),
+                InputKind::Comment | InputKind::EditComment(_) => String::new(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
         }
@@ -150,9 +161,10 @@ const HELP: &[(&str, &str)] = &[
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
     ("Tab J / S-Tab K / ]f [f", "next / prev file"),
     ("c / x", "comment on line / delete its comments"),
-    ("S", "send all comments to agent"),
+    ("C", "edit comment on line (yours or unsent ai)"),
+    ("S", "send all comments to agent (incl. unsent ai)"),
     ("m", "rebase + fast-forward merge"),
-    ("V", "start ai reviewer, it posts line comments"),
+    ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),
     ("D", "discard worktree + branch, hold bead"),
     ("p / a", "swap to agent view (keeps comments, r to return)"),
@@ -274,8 +286,11 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
     );
 }
 
-fn comment(f: &mut Frame, d: &Diff, buf: &str) {
-    let Some((file, line)) = d.comment_target() else {
+fn comment(f: &mut Frame, d: &Diff, buf: &str, edit: bool) {
+    let Some(file) = d.files.get(d.sel) else {
+        return;
+    };
+    let Some(line) = file.lines.get(file.cursor) else {
         return;
     };
     let inner_width = 62usize;
@@ -300,7 +315,12 @@ fn comment(f: &mut Frame, d: &Diff, buf: &str) {
         Line::raw(""),
         Line::from(input),
         Line::raw(""),
-        Line::from("Enter add  Ctrl-u clear  Esc cancel").dim(),
+        Line::from(if edit {
+            "Enter save  Ctrl-u clear  Esc cancel"
+        } else {
+            "Enter add  Ctrl-u clear  Esc cancel"
+        })
+        .dim(),
     ];
     f.render_widget(Clear, area);
     f.render_widget(

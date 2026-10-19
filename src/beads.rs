@@ -45,6 +45,25 @@ struct Blocked {
     blocked_by: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BeadComment {
+    #[serde(default)]
+    text: String,
+    created_at: Option<DateTime<Utc>>,
+}
+
+fn newest_comment(json: &str) -> Result<Option<String>> {
+    if json.trim().is_empty() {
+        return Ok(None);
+    }
+    let list: Vec<BeadComment> = serde_json::from_str(json)?;
+    Ok(list
+        .into_iter()
+        .enumerate()
+        .max_by_key(|(i, c)| (c.created_at, *i))
+        .map(|(_, c)| c.text))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
     Backlog,
@@ -221,6 +240,10 @@ impl Beads {
         self.run(&["show", id])
     }
 
+    pub fn latest_comment(&self, id: &str) -> Result<Option<String>> {
+        newest_comment(&self.run(&["comments", id, "--json"])?)
+    }
+
     pub fn claim(&self, id: &str) -> Result<()> {
         self.run(&["update", id, "--claim", "--actor", ACTOR])
             .map(drop)
@@ -380,6 +403,19 @@ mod tests {
         assert_eq!(b.state(), Some(State::Reviewing));
         assert_eq!(State::Reviewing.as_str(), "reviewing");
         assert_eq!(b.column(Utc::now(), 3), Some(Column::InProgress));
+    }
+
+    #[test]
+    fn newest_comment_picks_latest() {
+        let json = r#"[
+            {"id":"1","text":"old","created_at":"2026-10-19T00:00:00Z"},
+            {"id":"2","text":"new","created_at":"2026-10-19T00:00:05Z"},
+            {"id":"3","text":"tie","created_at":"2026-10-19T00:00:05Z"},
+            {"id":"4","text":"early","created_at":"2026-10-18T00:00:00Z"}
+        ]"#;
+        assert_eq!(newest_comment(json).unwrap().as_deref(), Some("tie"));
+        assert_eq!(newest_comment("[]").unwrap(), None);
+        assert_eq!(newest_comment("").unwrap(), None);
     }
 
     #[test]

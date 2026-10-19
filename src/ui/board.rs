@@ -7,6 +7,13 @@ use ratatui::widgets::{Block, List, ListItem, ListState};
 use crate::agent;
 use crate::app::App;
 use crate::beads::{Bead, Column, State};
+use crate::ui::review;
+
+fn badge(app: &App, b: &Bead) -> Span<'static> {
+    app.ai_reviews
+        .get(&b.id)
+        .map_or(Span::raw(""), review::verdict_badge)
+}
 
 fn marker(app: &App, b: &Bead) -> Span<'static> {
     if b.state() == Some(State::Reviewing) {
@@ -40,6 +47,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .map(|b| {
                 ListItem::new(Line::from(vec![
                     marker(app, b),
+                    badge(app, b),
                     Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
                     Span::raw(b.title.clone()),
                     Span::raw(format!(" {}", b.id)).dim(),
@@ -72,6 +80,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     let mut lines = vec![Line::from(vec![
         marker(app, b),
+        badge(app, b),
         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
         Span::raw(b.title.clone()).bold(),
         Span::raw(format!(" {}", b.id)).dim(),

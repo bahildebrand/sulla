@@ -19,7 +19,7 @@ use crate::git::{Git, RebaseConflict};
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Snapshot};
 use crate::ui::keys;
-use crate::ui::review::Diff;
+use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
 
 pub enum Event {
     Input(CEvent),
@@ -39,6 +39,7 @@ pub enum InputKind {
     Command,
     Feedback(String),
     Comment,
+    EditComment(usize),
 }
 
 pub struct NewBeadForm {
@@ -108,6 +109,7 @@ pub struct App {
     failed: HashSet<String>,
     pub view: View,
     pub parked_review: Option<Diff>,
+    pub ai_reviews: HashMap<String, AiReview>,
     pub mode: Mode,
     pub col: usize,
     pub zoom: bool,
@@ -163,6 +165,7 @@ impl App {
             failed: HashSet::new(),
             view: View::Board,
             parked_review: None,
+            ai_reviews: HashMap::new(),
             mode: Mode::Normal,
             col: 0,
             zoom: false,
@@ -306,11 +309,33 @@ impl App {
                     let _ = self.refresh.send(());
                     return;
                 }
+                let finished: Vec<String> = s
+                    .all
+                    .iter()
+                    .filter(|b| {
+                        b.status != "closed"
+                            && b.state() == Some(State::Review)
+                            && self.reviewing(&b.id)
+                            && self.agents.contains_key(&agent::review_id(&b.id))
+                    })
+                    .map(|b| b.id.clone())
+                    .collect();
                 self.all = s.all;
                 self.ready = s.ready;
                 self.blocked = s.blocked;
+                let all = &self.all;
+                self.ai_reviews.retain(|id, r| {
+                    all.iter().any(|b| {
+                        b.id == *id
+                            && b.status != "closed"
+                            && (r.forwarded || b.state() != Some(State::Running))
+                    })
+                });
                 self.clamp();
                 self.reconcile();
+                for id in finished {
+                    self.collect_ai_review(&id);
+                }
                 self.schedule();
             }
             Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
@@ -480,6 +505,8 @@ impl App {
         }
         let rid = agent::review_id(&bead.id);
         self.remove_agent(&rid, Outcome::Killed);
+        self.ai_reviews.remove(&bead.id);
+        self.inject_ai(&bead.id);
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
         let slot = self
             .slots
@@ -503,6 +530,88 @@ impl App {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn collect_ai_review(&mut self, id: &str) {
+        let text = match self.beads.latest_comment(id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                self.status = format!("ai review of {id}: no comment found, left in review");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("{e:#}");
+                self.status = format!("ai review of {id}: {e}");
+                return;
+            }
+        };
+        let Some(out) = review::parse_ai_review(&text) else {
+            self.status = format!("ai review of {id}: unparseable output, left in review");
+            return;
+        };
+        let r = self.load_diff(id);
+        let Some(diff) = self.report(r) else {
+            return;
+        };
+        let comments: Vec<Comment> = out.comments.iter().map(|c| diff.anchor(c)).collect();
+        let json = match out.verdict {
+            Verdict::Changes => review::feedback_json(id, &comments),
+            Verdict::Approve => None,
+        };
+        let n = comments.len();
+        self.ai_reviews.insert(
+            id.to_string(),
+            AiReview {
+                verdict: out.verdict,
+                comments,
+                forwarded: json.is_some(),
+            },
+        );
+        self.inject_ai(id);
+        match json {
+            Some(json) => {
+                self.deliver(id, &json);
+                self.status = format!("ai review of {id}: {n} comment(s) sent to agent");
+                self.mutated();
+            }
+            None if out.verdict == Verdict::Approve => {
+                self.status = format!("ai review of {id}: approved, {n} comment(s)");
+            }
+            None => {
+                self.status =
+                    format!("ai review of {id}: changes without comments, left in review");
+            }
+        }
+    }
+
+    fn inject_ai(&mut self, id: &str) {
+        let ai: Vec<Comment> = match self.ai_reviews.get(id) {
+            Some(r) if !r.forwarded => r.comments.clone(),
+            _ => Vec::new(),
+        };
+        let open = match &mut self.view {
+            View::Review(d) => Some(d),
+            _ => None,
+        };
+        for d in [open, self.parked_review.as_mut()]
+            .into_iter()
+            .flatten()
+            .filter(|d| d.id == id)
+        {
+            d.comments.retain(|c| !c.ai);
+            d.comments.extend(ai.iter().cloned());
+        }
+    }
+
+    fn sync_ai(&mut self) {
+        let View::Review(d) = &self.view else {
+            return;
+        };
+        if let Some(r) = self.ai_reviews.get_mut(&d.id)
+            && !r.forwarded
+        {
+            r.comments = d.comments.iter().filter(|c| c.ai).cloned().collect();
+        }
     }
 
     fn reviewing(&self, id: &str) -> bool {
@@ -793,6 +902,15 @@ impl App {
                     }
                 }
             }
+            InputKind::EditComment(i) => {
+                if let View::Review(d) = &mut self.view
+                    && let Some(c) = d.comments.get_mut(i)
+                {
+                    c.text = text;
+                    self.status = "comment updated".into();
+                }
+                self.sync_ai();
+            }
         }
     }
 
@@ -1050,6 +1168,15 @@ impl App {
     }
 
     fn feedback(&mut self, id: &str, text: &str) {
+        self.ai_reviews.remove(id);
+        self.deliver(id, text);
+        self.status = format!("feedback sent to {id}");
+        self.parked_review = None;
+        self.view = View::Progress(id.to_string());
+        self.mutated();
+    }
+
+    fn deliver(&mut self, id: &str, text: &str) {
         let r = self.beads.set_state(id, State::Running);
         self.report(r);
         match self.agents.get_mut(id) {
@@ -1064,10 +1191,6 @@ impl App {
                 }
             }
         }
-        self.status = format!("feedback sent to {id}");
-        self.parked_review = None;
-        self.view = View::Progress(id.to_string());
-        self.mutated();
     }
 
     fn relaunch(&mut self, id: &str) {
@@ -1188,22 +1311,26 @@ impl App {
         }
     }
 
-    fn open_review(&mut self, id: String) {
-        let done =
-            self.bead(&id).and_then(|b| b.column(Utc::now(), i64::MAX)) == Some(Column::Done);
-        let r = if done {
-            self.git.merged_diff(&id)
+    fn load_diff(&self, id: &str) -> Result<Diff> {
+        let done = self.bead(id).and_then(|b| b.column(Utc::now(), i64::MAX)) == Some(Column::Done);
+        let text = if done {
+            self.git.merged_diff(id)
         } else {
-            self.git.diff(&id, &self.base)
-        };
+            self.git.diff(id, &self.base)
+        }?;
         let log = if done {
-            self.git.merged_log(&id)
+            self.git.merged_log(id)
         } else {
-            self.git.log(&id, &self.base)
+            self.git.log(id, &self.base)
         };
-        if let Some(text) = self.report(r) {
-            self.view =
-                View::Review(Diff::parse(&id, &text).with_commits(&log.unwrap_or_default()));
+        Ok(Diff::parse(id, &text).with_commits(&log.unwrap_or_default()))
+    }
+
+    fn open_review(&mut self, id: String) {
+        let r = self.load_diff(&id);
+        if let Some(d) = self.report(r) {
+            self.view = View::Review(d);
+            self.inject_ai(&id);
         }
     }
 
@@ -1361,6 +1488,11 @@ impl App {
     }
 
     fn review_key(&mut self, k: KeyEvent, pending: Option<char>) {
+        self.review_key_inner(k, pending);
+        self.sync_ai();
+    }
+
+    fn review_key_inner(&mut self, k: KeyEvent, pending: Option<char>) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pty_size().0 / 2) as isize;
         let View::Review(d) = &mut self.view else {
@@ -1390,6 +1522,15 @@ impl App {
                     self.status = "cannot comment on this line".into();
                 }
             }
+            KeyCode::Char('C') => match d.comment_at_cursor() {
+                Some(i) => {
+                    self.mode = Mode::Input {
+                        kind: InputKind::EditComment(i),
+                        buf: d.comments[i].text.clone(),
+                    };
+                }
+                None => self.status = "no editable comment on this line".into(),
+            },
             KeyCode::Char('x') => {
                 let n = d.delete_comments_at_cursor();
                 self.status = format!("deleted {n} comment(s)");
