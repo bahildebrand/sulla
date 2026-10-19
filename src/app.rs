@@ -24,6 +24,7 @@ use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Snapshot, fmt_duration};
 use crate::ui::keys;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
+use crate::usage::{self, Usage, Watch};
 
 pub enum Event {
     Input(CEvent),
@@ -33,6 +34,7 @@ pub enum Event {
     AgentBell(String),
     Snapshot(Result<Snapshot, String>),
     CheckDone(checks::Done),
+    Usage(usage::Report),
 }
 
 pub enum View {
@@ -134,6 +136,7 @@ pub struct App {
     pub base: String,
     repo: PathBuf,
     chat_session: Option<String>,
+    chat_sessions: Vec<String>,
     beads: Beads,
     git: Git,
     backend: Box<dyn Backend>,
@@ -158,6 +161,9 @@ pub struct App {
     pub ai_reviews: HashMap<String, AiReview>,
     pub checks: HashMap<String, Check>,
     check_runs: u64,
+    pub usage: HashMap<String, Usage>,
+    pub run_usage: Usage,
+    usage_watch: Sender<Watch>,
     pub mode: Mode,
     pub col: usize,
     pub zoom: bool,
@@ -192,6 +198,11 @@ impl App {
             Duration::from_secs(cfg.poll_secs.max(1)),
             tx.clone(),
         );
+        let usage_watch = usage::spawn(
+            cfg.agent,
+            Duration::from_secs(cfg.poll_secs.max(1)),
+            tx.clone(),
+        );
         let backend: Box<dyn Backend> = match cfg.agent {
             AgentKind::Copilot => Box::new(Copilot {
                 cfg: cfg.copilot.clone(),
@@ -207,6 +218,7 @@ impl App {
             base,
             repo,
             chat_session: None,
+            chat_sessions: Vec::new(),
             beads,
             git,
             backend,
@@ -229,6 +241,9 @@ impl App {
             ai_reviews: HashMap::new(),
             checks: HashMap::new(),
             check_runs: 0,
+            usage: HashMap::new(),
+            run_usage: Usage::default(),
+            usage_watch,
             mode: Mode::Normal,
             col: 0,
             zoom: false,
@@ -470,6 +485,7 @@ impl App {
                 });
                 let entered = self.entered_review();
                 self.clamp();
+                self.watch_usage();
                 self.reconcile();
                 for id in &finished {
                     self.collect_ai_review(id);
@@ -489,6 +505,10 @@ impl App {
             }
             Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
             Event::CheckDone(d) => self.check_done(d),
+            Event::Usage(r) => {
+                self.usage = r.per_key;
+                self.run_usage = r.run;
+            }
         }
     }
 
@@ -1141,6 +1161,10 @@ impl App {
             _ => agent::chat_session(&self.repo),
         };
         self.chat_session = Some(session.clone());
+        if !self.chat_sessions.contains(&session) {
+            self.chat_sessions.push(session.clone());
+            self.watch_usage();
+        }
         let launch = Launch {
             id: CHAT_ID.to_string(),
             session,
@@ -1151,6 +1175,26 @@ impl App {
         };
         let cmd = agent::command(self.backend.as_ref(), &launch, self.cfg.kache, None);
         self.insert_agent(cmd, launch.id)
+    }
+
+    fn watch_usage(&self) {
+        let now = Utc::now();
+        let mut watch: Watch = self
+            .all
+            .iter()
+            .filter(|b| b.column(now, self.cfg.done_retention_days).is_some())
+            .map(|b| {
+                let sessions = [b.id.clone(), agent::review_id(&b.id)]
+                    .iter()
+                    .map(|id| agent::session_id(&self.repo, id))
+                    .collect();
+                (b.id.clone(), sessions)
+            })
+            .collect();
+        if !self.chat_sessions.is_empty() {
+            watch.push((CHAT_ID.to_string(), self.chat_sessions.clone()));
+        }
+        let _ = self.usage_watch.send(watch);
     }
 
     fn open_chat(&mut self, fresh: bool) {
@@ -2016,7 +2060,10 @@ impl App {
 
     fn inspect(&mut self, id: String) {
         let r = self.beads.show_text(&id);
-        if let Some(text) = self.report(r) {
+        if let Some(mut text) = self.report(r) {
+            if let Some(u) = self.usage.get(&id) {
+                text = format!("{}\n\nUSAGE\n  {}\n", text.trim_end(), u.detail());
+            }
             self.mode = Mode::Inspect {
                 id,
                 text,

@@ -86,6 +86,10 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   explains the sulla states and how to create beads (staged in Backlog, wired with `bd dep add`,
   released to Pending on your go), so you can plan work and have it fill the queue. It does not
   count toward `max_agents`. `X` ends it, `C` starts a fresh one.
+- Token usage is read from the agent's session files (`~/.copilot/session-state/<id>/events.jsonl`
+  or `~/.claude/projects/*/<id>.jsonl`). Each bead sums its implementer and AI reviewer sessions,
+  shown on the zoomed card and in `i` inspect. Copilot reports cost in AI credits (`cr`), Claude
+  in USD when its transcript includes it. The status bar shows usage since sulla started.
 
 ## Keys
 

@@ -107,8 +107,13 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             vec![tag("CONFIRM", Color::Yellow), Span::raw(format!(" {msg}"))]
         }
     };
+    let usage = if app.run_usage.is_empty() {
+        String::new()
+    } else {
+        format!("{}  ", app.run_usage.short())
+    };
     let right = format!(
-        "{}/{} {}/{}  base:{}  ? help ",
+        "{usage}{}/{} {}/{}  base:{}  ? help ",
         app.backend_name(),
         app.sandbox_name(),
         app.running_count(),

@@ -10,6 +10,7 @@ mod notify;
 mod sandbox;
 mod scheduler;
 mod ui;
+mod usage;
 
 use std::io::stdout;
 use std::path::{Path, PathBuf};

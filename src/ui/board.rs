@@ -189,6 +189,9 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     if let Some(loc) = app.slot_location(&b.id) {
         meta.push(loc);
     }
+    if let Some(u) = app.usage.get(&b.id) {
+        meta.push(u.short());
+    }
     meta.retain(|m| !m.is_empty());
     lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(Color::Cyan));
     if let Some(c) = app.conflicts.get(&b.id) {
