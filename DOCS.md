@@ -180,6 +180,19 @@ watching, revising and merge detection) is the same as with `gh`. A stacked bead
 already be tracked by Graphite, which it is when the parent was also published with Graphite.
 Only sulla runs `gt`; agents never push or submit.
 
+A Graphite publish that fails because of a bad rebase is repaired automatically:
+
+- When `gt track` rejects the parent (`<parent> is not in the history of sulla/<bead>`) or `gt track`
+  or `gt submit` asks for a restack, sulla rebases the branch itself (onto the stack parent's
+  current tip when stacked, else base), then runs `gt track` and `gt submit` once more.
+- When that rebase, or the restack onto a rewritten parent before it, hits conflicts, the rebase is
+  aborted and the bead goes back to its agent (resumed if it stopped) with a prompt naming the
+  exact `git rebase` to run and resolve. The status line says
+  `publishing <bead> hit conflicts with <onto>, its agent is resolving them and sulla will publish again`.
+  Once the agent moves the bead back to Review, sulla publishes it again, together with the
+  beads that were stacked above it in the original publish. That retry is not repaired again: a
+  second conflict is reported in the status line and the beads stay in Review.
+
 sulla rebases stacks itself, so with `tool = "graphite"` it keeps Graphite's metadata in step:
 
 - Whenever a branch is restacked (a parent merged locally, its PR merged, or a closed parent was

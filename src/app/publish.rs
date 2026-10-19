@@ -16,6 +16,14 @@ use crate::ui::review::{Diff, Rejection};
 
 use super::{Action, App, Event, Mode, View};
 
+fn rebase_command(up: &str, onto: &str) -> String {
+    if up == onto {
+        format!("git rebase {onto}")
+    } else {
+        format!("git rebase --onto {onto} {up}")
+    }
+}
+
 struct Publish {
     id: String,
     base: String,
@@ -26,6 +34,7 @@ struct Publish {
     repo: PathBuf,
     git: Git,
     beads: Beads,
+    republish: Option<String>,
 }
 
 impl Publish {
@@ -71,8 +80,21 @@ impl Publish {
         let dir = self.git.worktree_path(id);
         let br = git::branch(id);
         let existed = pr::find(&self.repo, &br)?.is_some();
-        graphite::track(&dir, &br, &self.base)?;
-        graphite::submit(&dir, self.pr.draft)?;
+        let submit = || {
+            graphite::track(&dir, &br, &self.base)?;
+            graphite::submit(&dir, self.pr.draft)
+        };
+        if let Err(e) = submit() {
+            if !graphite::needs_rebase(&e) {
+                return Err(e);
+            }
+            tracing::info!(
+                "gt rejected {br}, rebasing onto {} and retrying: {e:#}",
+                self.base
+            );
+            self.git.rebase(id, &self.trunk)?;
+            submit()?;
+        }
         let Some(created) = pr::find(&self.repo, &br)? else {
             bail!("gt submit opened no PR for {br}");
         };
@@ -175,11 +197,7 @@ impl App {
             tracing::warn!("rebase of {id} before revision: {e:#}");
             return None;
         };
-        let rebase = if up == c.base {
-            format!("git rebase {}", c.base)
-        } else {
-            format!("git rebase --onto {} {up}", c.base)
-        };
+        let rebase = rebase_command(&up, &c.base);
         Some(format!(
             "Rebasing onto the latest {} hit conflicts. First run `{rebase}`, resolve every conflict while preserving the intent of both sides, and finish the rebase.",
             c.base
@@ -378,6 +396,11 @@ impl App {
     }
 
     pub(super) fn publish(&mut self, chain: Vec<String>) {
+        let republish = chain.last().cloned().filter(|_| self.graphite());
+        self.start_publish(chain, republish);
+    }
+
+    fn start_publish(&mut self, chain: Vec<String>, republish: Option<String>) {
         if chain.is_empty() || chain.iter().any(|id| self.publishing.contains(id)) {
             return;
         }
@@ -399,6 +422,7 @@ impl App {
                 repo: self.repo.clone(),
                 git: self.git.clone(),
                 beads: self.beads.clone(),
+                republish: republish.clone(),
             });
         }
         let tx = self.tx.clone();
@@ -406,9 +430,12 @@ impl App {
             let mut jobs = jobs.into_iter();
             while let Some(job) = jobs.next() {
                 let id = job.id.clone();
+                let republish = job.republish.clone();
                 let r = job.run();
                 let failed = r.is_err();
-                let _ = tx.send(Event::Finished(Box::new(move |app| app.pushed(id, r))));
+                let _ = tx.send(Event::Finished(Box::new(move |app| {
+                    app.pushed(id, r, republish)
+                })));
                 if failed {
                     let rest: Vec<String> = jobs.map(|j| j.id).collect();
                     if !rest.is_empty() {
@@ -431,7 +458,19 @@ impl App {
         self.mutated();
     }
 
-    fn pushed(&mut self, id: String, r: Result<(Bead, pr::Pr)>) {
+    pub(super) fn pushed(
+        &mut self,
+        id: String,
+        r: Result<(Bead, pr::Pr)>,
+        republish: Option<String>,
+    ) {
+        if let (Err(e), Some(top)) = (&r, republish)
+            && let Some(c) = e.downcast_ref::<RebaseConflict>()
+        {
+            self.publishing.remove(&id);
+            self.resolve_for_publish(&id, top, c);
+            return self.mutated();
+        }
         let Some((bead, created)) = self.report(r) else {
             self.publishing.remove(&id);
             return self.mutated();
@@ -452,8 +491,41 @@ impl App {
         );
     }
 
+    fn resolve_for_publish(&mut self, id: &str, top: String, c: &RebaseConflict) {
+        tracing::warn!("publish of {id}: {c}");
+        let rebase = rebase_command(&self.git.upstream(id, &self.base), &c.base);
+        let text = format!(
+            "Publishing {id} failed because rebasing onto {onto} hit conflicts. Run `{rebase}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or open a PR, sulla publishes again once you are done. When done, run `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait.",
+            onto = c.base
+        );
+        self.republishing.insert(id.to_string(), top);
+        self.deliver(id, &text);
+        self.status = format!(
+            "publishing {id} hit conflicts with {}, its agent is resolving them and sulla will publish again",
+            c.base
+        );
+    }
+
+    pub(super) fn republish_resolved(&mut self, entered: &[String]) {
+        let all = &self.all;
+        self.republishing
+            .retain(|id, _| all.iter().any(|b| b.id == *id && b.status != "closed"));
+        for id in entered {
+            let Some(top) = self.republishing.remove(id) else {
+                continue;
+            };
+            if !self.graphite() || self.awaiting_pr(&top) {
+                continue;
+            }
+            tracing::info!("{id} resolved its publish conflicts, publishing again");
+            let chain = self.publish_chain(&top);
+            self.start_publish(chain, None);
+        }
+    }
+
     pub(super) fn published(&mut self, id: &str, bead: Bead, r: Result<pr::Pr>) {
         self.publishing.remove(id);
+        self.republishing.remove(id);
         let republished = bead.label("pr").is_some();
         if let Some(created) = self.report(r) {
             self.git.clear_revision(id);

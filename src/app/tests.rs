@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use portable_pty::CommandBuilder;
 
 use crate::agent::Launch;
-use crate::config::ClaudeConfig;
+use crate::config::{ClaudeConfig, PrTool};
 use crate::git;
 use crate::sandbox::Prepare;
 
@@ -450,6 +450,52 @@ fn failed_parent_publish_skips_the_rest_of_the_stack() {
     );
     assert_eq!(h.state("a"), review);
     assert_eq!(h.state("b"), review);
+}
+
+#[test]
+fn publish_conflict_hands_off_to_the_agent_then_republishes() {
+    let review = Some(State::Review);
+    let mut h = Harness::new("publish-conflict", &[("a", review), ("b", review)]);
+    h.app.cfg.workflow = Workflow::Pr;
+    h.app.cfg.pr.tool = PrTool::Graphite;
+    h.stack("b", "a");
+    h.app.git.ensure_worktree("b", "sulla/a").unwrap();
+    let conflict = git::RebaseConflict {
+        base: "sulla/a".into(),
+        detail: "could not apply".into(),
+    };
+    h.app.publishing.insert("a".into());
+    h.app
+        .pushed("a".into(), Err(conflict.into()), Some("b".into()));
+    h.pump();
+    assert!(!h.app.publishing.contains("a"));
+    assert_eq!(h.app.republishing.get("a").map(String::as_str), Some("b"));
+    assert_eq!(h.state("a"), Some(State::Running));
+    h.app.republish_resolved(&[]);
+    assert!(h.app.publishing.is_empty());
+    h.app.edit_local("a", |b| b.set_state_label(review));
+    h.app.republish_resolved(&["a".to_string()]);
+    assert!(h.app.republishing.is_empty());
+    assert!(h.app.publishing.contains("a") && h.app.publishing.contains("b"));
+}
+
+#[test]
+fn publish_conflict_is_reported_without_a_republish_target() {
+    let review = Some(State::Review);
+    let mut h = Harness::new("publish-conflict-off", &[("a", review)]);
+    let conflict = git::RebaseConflict {
+        base: "main".into(),
+        detail: "could not apply".into(),
+    };
+    h.app.publishing.insert("a".into());
+    h.app.pushed("a".into(), Err(conflict.into()), None);
+    assert!(h.app.republishing.is_empty());
+    assert_eq!(h.state("a"), review);
+    assert!(
+        h.app.status.contains("rebase onto main failed"),
+        "{}",
+        h.app.status
+    );
 }
 
 #[test]

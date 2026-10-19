@@ -260,6 +260,7 @@ pub struct App {
     starting: HashSet<String>,
     launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
+    republishing: HashMap<String, String>,
     term: (u16, u16),
     pub suspend: Option<Suspend>,
     pub paused: bool,
@@ -373,6 +374,7 @@ impl App {
             starting: HashSet::new(),
             launching: HashMap::new(),
             publishing: HashSet::new(),
+            republishing: HashMap::new(),
             term: (80, 24),
             suspend: None,
             paused: false,
@@ -674,6 +676,7 @@ impl App {
                     })
                 });
                 let entered = self.entered_review();
+                self.republish_resolved(&entered);
                 self.clamp();
                 self.watch_usage();
                 self.reconcile();

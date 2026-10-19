@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use color_eyre::{Result, eyre::bail};
+use color_eyre::{Report, Result, eyre::bail};
 
 use crate::config::PrTool;
 use crate::git;
@@ -61,6 +61,11 @@ pub fn untrack(dir: &Path, branch: &str) -> Result<()> {
     gt(dir, &untrack_args(branch)).map(|_| ())
 }
 
+pub fn needs_rebase(e: &Report) -> bool {
+    let msg = e.to_string();
+    msg.contains("is not in the history of") || msg.contains("restack")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
     Track { id: String, parent: String },
@@ -107,6 +112,7 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use color_eyre::eyre::eyre;
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -185,6 +191,18 @@ mod tests {
                 Step::Submit("b".into()),
             ]
         );
+    }
+
+    #[test]
+    fn spots_rejections_a_rebase_fixes() {
+        let parent = eyre!(
+            "gt track: tip: Are you sure that sulla/a is the right parent for sulla/b? [track.parent-not-in-history]\n\nERROR: sulla/a is not in the history of sulla/b."
+        );
+        assert!(needs_rebase(&parent));
+        assert!(needs_rebase(&eyre!(
+            "gt submit: ERROR: sulla/b needs restack"
+        )));
+        assert!(!needs_rebase(&eyre!("gt submit: ERROR: not authenticated")));
     }
 
     #[test]
