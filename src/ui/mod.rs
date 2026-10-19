@@ -99,7 +99,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         ],
         Mode::Inspect { .. } => vec![
             tag("INSPECT", Color::Magenta),
-            Span::raw(" j k / Ctrl-d Ctrl-u / gg G scroll, p progress, r review, q Esc close")
+            Span::raw(" j k / Ctrl-d Ctrl-u / gg G scroll, p progress, r review, l session log, q Esc close")
                 .dim(),
         ],
         Mode::Confirm { msg, .. } => {
@@ -148,7 +148,10 @@ const HELP: &[(&str, &str)] = &[
         "Enter / p / r",
         "open / progress (reviewer if reviewing) / review",
     ),
-    ("i", "inspect bead (description, labels, deps)"),
+    (
+        "i",
+        "inspect bead (description, labels, deps), l there shows session log",
+    ),
     ("e", "open $EDITOR in bead worktree"),
     (
         "n",

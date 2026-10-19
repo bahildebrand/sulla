@@ -800,6 +800,32 @@ impl App {
         checks::log_path(&self.repo.join(".sulla").join("checks"), id)
     }
 
+    fn agent_log(&self, id: &str) -> PathBuf {
+        agent::log_path(&self.repo.join(".sulla").join("logs"), id)
+    }
+
+    fn show_log(&mut self, id: String) {
+        let (r, c) = self.pty_size();
+        let render = |path: PathBuf| {
+            std::fs::read(path)
+                .ok()
+                .map(|b| agent::render_log(&b, r, c))
+        };
+        let main = render(self.agent_log(&id));
+        let review = render(self.agent_log(&agent::review_id(&id)));
+        let text = match (main, review) {
+            (None, None) => {
+                self.status = format!("no session log for {id}");
+                return;
+            }
+            (Some(m), None) => m,
+            (None, Some(v)) => format!("--- ai review ---\n{v}"),
+            (Some(m), Some(v)) => format!("{m}\n\n--- ai review ---\n{v}"),
+        };
+        let scroll = text.lines().count().saturating_sub(1) as u16;
+        self.mode = Mode::Inspect { id, text, scroll };
+    }
+
     fn sync_checks(&mut self) {
         let stale: Vec<String> = self
             .checks
@@ -1079,7 +1105,10 @@ impl App {
 
     fn insert_agent(&mut self, cmd: portable_pty::CommandBuilder, id: String) -> Result<()> {
         let (r, c) = self.pty_size();
-        let agent = Agent::spawn(cmd, &id, r, c, self.tx.clone())?;
+        let log = (id != CHAT_ID)
+            .then(|| agent::open_log(&self.agent_log(&id), &id).ok())
+            .flatten();
+        let agent = Agent::spawn(cmd, &id, r, c, log, self.tx.clone())?;
         self.agents.insert(id, agent);
         Ok(())
     }
@@ -1802,6 +1831,7 @@ impl App {
             KeyCode::Char('G') => scroll = max,
             KeyCode::Char('p') => return self.open_progress(self.agent_key(&id)),
             KeyCode::Char('r') => return self.open_review(id),
+            KeyCode::Char('l') => return self.show_log(id),
             _ => {}
         }
         self.mode = Mode::Inspect {

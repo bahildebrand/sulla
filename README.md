@@ -17,6 +17,9 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Ready beads are claimed in priority order until `max_agents` agents are in progress.
 - Each agent runs `copilot --yolo` (or `claude --dangerously-skip-permissions` with `agent = "claude"`) in a PTY inside `.sulla/worktrees/<bead>` on branch
   `sulla/<bead>`, with `RUSTC_WRAPPER=kache`.
+- Raw PTY output of every bead agent is appended to `.sulla/logs/<bead>.log` (AI reviewers to
+  `<bead>~review.log`), so transcripts survive crashes, merges and restarts. `l` in the inspect
+  popup renders the last 5000 lines.
 - Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`, `sulla:review`, `sulla:held`.
 - Each board card shows an activity line: time in the current state, the worktree diff stat
   (`+adds -dels Nf`, refreshed every poll), and the last line of agent output.
@@ -81,7 +84,7 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead, `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
+| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
 | Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:chat [new]` |

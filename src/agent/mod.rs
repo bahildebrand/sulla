@@ -1,8 +1,9 @@
 mod claude;
 mod copilot;
 
+use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -251,6 +252,61 @@ pub fn rate_limit(text: &str) -> Option<(String, usize)> {
     hits.first().map(|l| (l.to_string(), hits.len()))
 }
 
+const LOG_TAIL: usize = 5000;
+
+pub fn log_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.log"))
+}
+
+pub fn open_log(path: &Path, id: &str) -> Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    write!(
+        f,
+        "\x1b[0m\r\n--- sulla: {id} session started {now} ---\r\n"
+    )?;
+    Ok(f)
+}
+
+pub fn render_log(bytes: &[u8], rows: u16, cols: u16) -> String {
+    let mut p = vt100::Parser::new(rows.max(1), cols.max(1), LOG_TAIL);
+    p.process(bytes);
+    let screen = p.screen_mut();
+    screen.set_scrollback(usize::MAX);
+    let back = screen.scrollback();
+    let total = back + screen.size().0 as usize;
+    let mut lines: Vec<String> = Vec::new();
+    let mut joined = false;
+    let mut next = 0;
+    while next < total {
+        let off = back.saturating_sub(next);
+        screen.set_scrollback(off);
+        let top = back - off;
+        let skip = next - top;
+        let rows: Vec<String> = screen.rows(0, cols).collect();
+        for (i, row) in rows.into_iter().enumerate().skip(skip) {
+            let row = row.trim_end().to_string();
+            match lines.last_mut() {
+                Some(last) if joined => last.push_str(&row),
+                _ => lines.push(row),
+            }
+            joined = screen.row_wrapped(i as u16);
+            next += 1;
+        }
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    let start = lines.len().saturating_sub(LOG_TAIL);
+    lines[start..].join("\n")
+}
+
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
@@ -289,6 +345,7 @@ impl Agent {
         id: &str,
         rows: u16,
         cols: u16,
+        mut log: Option<File>,
         tx: Sender<Event>,
     ) -> Result<Self> {
         let size = PtySize {
@@ -317,6 +374,11 @@ impl Agent {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        if let Some(f) = &mut log
+                            && f.write_all(&buf[..n]).is_err()
+                        {
+                            log = None;
+                        }
                         let rang = {
                             let mut p = p.lock().unwrap();
                             p.process(&buf[..n]);
@@ -472,6 +534,36 @@ mod tests {
             rate_limit("fixed line 429 in parser\nquota handling\n"),
             None
         );
+    }
+
+    #[test]
+    fn render_log_keeps_scrollback_and_joins_wraps() {
+        let mut bytes = Vec::new();
+        for i in 0..10 {
+            bytes.extend(format!("line {i}\r\n").as_bytes());
+        }
+        bytes.extend(b"abcdefghij\x1b[1;31mred\x1b[0m\r\n\r\n");
+        let text = render_log(&bytes, 4, 8);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 11);
+        assert_eq!(lines[0], "line 0");
+        assert_eq!(lines[9], "line 9");
+        assert_eq!(lines[10], "abcdefghijred");
+    }
+
+    #[test]
+    fn open_log_appends_sessions() {
+        let dir = std::env::temp_dir().join(format!("sulla-log-{}", std::process::id()));
+        let path = log_path(&dir.join("logs"), "x-1");
+        open_log(&path, "x-1").unwrap().write_all(b"first").unwrap();
+        open_log(&path, "x-1")
+            .unwrap()
+            .write_all(b"second")
+            .unwrap();
+        let text = render_log(&std::fs::read(&path).unwrap(), 24, 80);
+        assert_eq!(text.matches("session started").count(), 2);
+        assert!(text.contains("first") && text.contains("second"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
