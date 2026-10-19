@@ -28,6 +28,10 @@ const PROMPT_QUIET: Duration = Duration::from_secs(3);
 const BELL_GRACE: Duration = Duration::from_secs(2);
 const PROMPT_ROWS: usize = 15;
 const EXIT_GRACE: Duration = Duration::from_secs(30);
+const POLICY_LOADING: &str = "Managed account policy is still loading";
+const PROMPT_RETRY_DELAY: Duration = Duration::from_secs(2);
+const PROMPT_RETRY_WINDOW: Duration = Duration::from_secs(120);
+const PROMPT_RETRY_MAX: u32 = 10;
 
 pub struct Launch {
     pub id: String,
@@ -420,6 +424,44 @@ pub fn render_log(bytes: &[u8], rows: u16, cols: u16) -> String {
     lines[start..].join("\n")
 }
 
+pub struct PromptRetry {
+    text: String,
+    seen: usize,
+    due: Option<Instant>,
+    tries: u32,
+    until: Instant,
+}
+
+impl PromptRetry {
+    pub fn new(text: String, now: Instant) -> Self {
+        Self {
+            text,
+            seen: 0,
+            due: None,
+            tries: 0,
+            until: now + PROMPT_RETRY_WINDOW,
+        }
+    }
+
+    pub fn expired(&self, now: Instant) -> bool {
+        now >= self.until || self.tries >= PROMPT_RETRY_MAX
+    }
+
+    pub fn poll(&mut self, contents: &str, now: Instant) -> Option<&str> {
+        let count = contents.matches(POLICY_LOADING).count();
+        if count > self.seen && self.due.is_none() {
+            self.due = Some(now + PROMPT_RETRY_DELAY);
+        }
+        self.seen = count;
+        if self.due.is_some_and(|d| now >= d) {
+            self.due = None;
+            self.tries += 1;
+            return Some(&self.text);
+        }
+        None
+    }
+}
+
 static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
 
 pub struct Agent {
@@ -428,6 +470,7 @@ pub struct Agent {
     exited: Option<Instant>,
     activity: Arc<Mutex<Activity>>,
     pub generation: u64,
+    retry: Option<PromptRetry>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -530,6 +573,7 @@ impl Agent {
             exited: None,
             activity,
             generation,
+            retry: None,
             writer,
             master: pair.master,
             child,
@@ -578,6 +622,26 @@ impl Agent {
         let mut bytes = crate::ui::keys::paste(text, bracketed);
         bytes.push(b'\r');
         self.write(&bytes);
+    }
+
+    pub fn retry_prompt(&mut self, text: String) {
+        self.retry = Some(PromptRetry::new(text, Instant::now()));
+    }
+
+    pub fn retry_rejected_prompt(&mut self, now: Instant) -> bool {
+        let Some(r) = &mut self.retry else {
+            return false;
+        };
+        if !self.alive || r.expired(now) {
+            self.retry = None;
+            return false;
+        }
+        let contents = self.parser.lock().unwrap().screen().contents();
+        let Some(text) = r.poll(&contents, now).map(String::from) else {
+            return false;
+        };
+        self.submit(&text);
+        true
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -673,6 +737,61 @@ mod tests {
         assert_eq!(old_gen, old.generation);
         assert_ne!(old.generation, new.generation);
         assert_eq!(exit_generation(&rx), new.generation);
+    }
+
+    #[test]
+    fn resubmits_prompt_rejected_while_policy_loads() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args([
+            "-c",
+            "echo '! Managed account policy is still loading. Please wait a moment and try again.'; read l; echo \"got:$l\"; sleep 5",
+        ]);
+        let mut a = Agent::spawn(cmd, "x-1", 10, 120, None, tx).unwrap();
+        a.retry_prompt("fix conflicts".into());
+        let start = Instant::now();
+        let mut sent = false;
+        while start.elapsed() < Duration::from_secs(10) {
+            let later = Instant::now() + PROMPT_RETRY_DELAY;
+            sent |= a.retry_rejected_prompt(Instant::now()) || a.retry_rejected_prompt(later);
+            if a.parser
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("got:fix conflicts")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(sent);
+        assert!(
+            a.parser
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("got:fix conflicts")
+        );
+    }
+
+    #[test]
+    fn prompt_retry_waits_for_new_rejections() {
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        let msg = format!("{POLICY_LOADING}. Please wait");
+        let mut r = PromptRetry::new("go".into(), t);
+        assert_eq!(r.poll("loading", t), None);
+        assert_eq!(r.poll(&msg, t), None);
+        assert_eq!(r.poll(&msg, t + s(1)), None);
+        assert_eq!(r.poll(&msg, t + s(2)), Some("go"));
+        assert_eq!(r.poll(&msg, t + s(10)), None);
+        assert_eq!(r.poll("", t + s(11)), None);
+        assert_eq!(r.poll(&msg, t + s(12)), None);
+        assert_eq!(r.poll(&msg, t + s(14)), Some("go"));
+        assert!(!r.expired(t + s(14)));
+        assert!(r.expired(t + PROMPT_RETRY_WINDOW));
     }
 
     #[test]

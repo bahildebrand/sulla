@@ -917,6 +917,11 @@ impl App {
             return;
         }
         self.rate_scanned = now;
+        for (id, a) in &mut self.agents {
+            if a.retry_rejected_prompt(now) {
+                tracing::warn!("{id} rejected its prompt while loading policy, resubmitted");
+            }
+        }
         let mut seen = HashMap::new();
         let mut fresh = None;
         for (id, a) in &self.agents {
@@ -2003,7 +2008,7 @@ impl App {
         self.sandbox.prepare(slot, &launch)?;
         let cmd = agent::command(self.backend(kind), &launch, self.cfg.kache, Some(slot));
         let cmd = self.sandbox.wrap(slot, &launch, cmd)?;
-        self.insert_agent(cmd, launch.id)
+        self.insert_agent(cmd, launch.id, launch.prompt)
     }
 
     fn take_agent(&mut self, id: &str) -> Option<usize> {
@@ -2056,7 +2061,7 @@ impl App {
             model: None,
         };
         let cmd = agent::command(self.backend(self.cfg.agent), &launch, self.cfg.kache, None);
-        self.insert_agent(cmd, launch.id)
+        self.insert_agent(cmd, launch.id, launch.prompt)
     }
 
     fn watch_usage(&self) {
@@ -2103,12 +2108,20 @@ impl App {
         self.enter_insert(CHAT_ID);
     }
 
-    fn insert_agent(&mut self, cmd: portable_pty::CommandBuilder, id: String) -> Result<()> {
+    fn insert_agent(
+        &mut self,
+        cmd: portable_pty::CommandBuilder,
+        id: String,
+        prompt: Option<String>,
+    ) -> Result<()> {
         let (r, c) = self.pty_size();
         let log = (id != CHAT_ID)
             .then(|| agent::open_log(&self.agent_log(&id), &id).ok())
             .flatten();
-        let agent = Agent::spawn(cmd, &id, r, c, log, self.tx.clone())?;
+        let mut agent = Agent::spawn(cmd, &id, r, c, log, self.tx.clone())?;
+        if let Some(p) = prompt {
+            agent.retry_prompt(p);
+        }
         self.agents.insert(id, agent);
         Ok(())
     }
