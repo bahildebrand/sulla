@@ -906,6 +906,7 @@ impl App {
                 .filter(|b| self.stack_on(&b.id).is_some())
                 .cloned(),
         );
+        candidates.extend(scheduler::revisable(&self.all).cloned());
         scheduler::pick(&candidates, &busy, &self.failed, free)
             .into_iter()
             .cloned()
@@ -976,6 +977,10 @@ impl App {
         }
         let picks = self.picks(free);
         for b in picks {
+            if b.state() == Some(State::Revise) {
+                self.revise(&b);
+                continue;
+            }
             tracing::info!("scheduling {}", b.id);
             let r = self
                 .beads
@@ -990,6 +995,116 @@ impl App {
             }
             self.mutated();
         }
+    }
+
+    fn revise(&mut self, bead: &Bead) {
+        let id = bead.id.clone();
+        tracing::info!("revising {id} from PR feedback");
+        let r = self.start_revision(bead);
+        if self.report(r).is_some() {
+            self.failed.remove(&id);
+            self.status = format!("revising {id} from PR feedback");
+        } else {
+            self.failed.insert(id.clone());
+            let r = self.beads.set_state(&id, State::Revise);
+            self.report(r);
+        }
+        self.mutated();
+    }
+
+    fn start_revision(&mut self, bead: &Bead) -> Result<()> {
+        let id = bead.id.as_str();
+        let number: u64 = bead
+            .label("pr")
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| eyre!("{id} has no pr:<number> label"))?;
+        if !self.git.worktree_path(id).join(".git").exists() {
+            return Err(eyre!("{id} has no worktree to revise"));
+        }
+        let conflict = self.rebase_for_revision(id);
+        let pending = self
+            .pr_watch
+            .beads
+            .get(id)
+            .map(|s| s.pending.clone())
+            .unwrap_or_default();
+        let failures = pr::failures(&self.repo, number, &pending.failing);
+        let text = pr::revise_prompt(
+            id,
+            number,
+            &pending.comments,
+            &failures,
+            conflict.as_deref(),
+        );
+        self.git.mark_revision(id)?;
+        self.budget_runs.remove(id);
+        self.beads
+            .set_state_because(id, State::Running, "revising PR feedback")?;
+        match self.agents.get_mut(id) {
+            Some(a) if a.alive => a.submit(&text),
+            _ => {
+                self.remove_agent(id, Outcome::Exited);
+                self.start_agent(bead, true, Some(text))?;
+            }
+        }
+        self.pr_watch
+            .beads
+            .entry(id.to_string())
+            .or_default()
+            .take();
+        if let Err(e) = self.pr_watch.save() {
+            tracing::warn!("pr watch: {e:#}");
+        }
+        Ok(())
+    }
+
+    fn rebase_for_revision(&self, id: &str) -> Option<String> {
+        let onto = self
+            .git
+            .fetch_base(&self.cfg.pr.remote, &self.base)
+            .map(|r| r.trim_start_matches("refs/remotes/").to_string())
+            .unwrap_or_else(|e| {
+                tracing::warn!("fetch {}: {e:#}", self.base);
+                self.base.clone()
+            });
+        let up = self.git.upstream(id, &onto);
+        let e = self.git.rebase(id, &onto).err()?;
+        let Some(c) = e.downcast_ref::<RebaseConflict>() else {
+            tracing::warn!("rebase of {id} before revision: {e:#}");
+            return None;
+        };
+        let rebase = if up == c.base {
+            format!("git rebase {}", c.base)
+        } else {
+            format!("git rebase --onto {} {up}", c.base)
+        };
+        Some(format!(
+            "Rebasing onto the latest {} hit conflicts. First run `{rebase}`, resolve every conflict while preserving the intent of both sides, and finish the rebase.",
+            c.base
+        ))
+    }
+
+    fn request_revise(&mut self, bead: &Bead) {
+        if bead.state() != Some(State::Pr) {
+            self.status = format!("{} is not awaiting a PR", bead.id);
+            return;
+        }
+        let n = self
+            .pr_watch
+            .beads
+            .get(&bead.id)
+            .map_or(0, |s| s.pending.count());
+        if n == 0 {
+            self.status = format!("no unaddressed PR feedback for {}", bead.id);
+            return;
+        }
+        let r = self
+            .beads
+            .set_state_because(&bead.id, State::Revise, "PR feedback");
+        if self.report(r).is_some() {
+            self.status = format!("{} queued to revise {n} PR feedback item(s)", bead.id);
+        }
+        self.mutated();
     }
 
     fn stack_on(&self, id: &str) -> Option<String> {
@@ -1531,6 +1646,8 @@ impl App {
             .and_then(|_| self.beads.add_label(id, &label))
             .and_then(|_| self.beads.set_state(id, State::Pr));
         if self.report(r).is_some() {
+            self.git.clear_revision(id);
+            self.reply_revised(id, created.number);
             self.stop_check(id);
             self.remove_agent(&agent::review_id(id), Outcome::Killed);
             self.remove_agent(id, Outcome::Killed);
@@ -1542,6 +1659,30 @@ impl App {
             }
         }
         self.mutated();
+    }
+
+    fn reply_revised(&mut self, id: &str, number: u64) {
+        let Some(fb) = self
+            .pr_watch
+            .beads
+            .get_mut(id)
+            .and_then(|s| s.revising.take())
+        else {
+            return;
+        };
+        if let Err(e) = self.pr_watch.save() {
+            tracing::warn!("pr watch: {e:#}");
+        }
+        if !self.cfg.pr.reply || fb.is_empty() {
+            return;
+        }
+        let r = self
+            .git
+            .head(id)
+            .and_then(|head| pr::post_comment(&self.repo, number, &pr::reply(&fb, &head)));
+        if let Err(e) = r {
+            tracing::warn!("reply on PR #{number} for {id}: {e:#}");
+        }
     }
 
     fn on_pr(&mut self, id: &str, number: u64, r: Result<PrStatus, String>) {
@@ -1570,6 +1711,7 @@ impl App {
         let seen = self.pr_watch.beads.entry(id.to_string()).or_default();
         let before = seen.clone();
         let activity = seen.update(&s);
+        let queued = s.state == PrState::Open && seen.queue(&activity);
         if *seen != before
             && let Err(e) = self.pr_watch.save()
         {
@@ -1594,6 +1736,19 @@ impl App {
         }
         if activity.failing.is_some() {
             what.push("checks failing".into());
+        }
+        if queued {
+            if self.cfg.pr.auto_revise {
+                let r = self
+                    .beads
+                    .set_state_because(id, State::Revise, "PR feedback");
+                if self.report(r).is_some() {
+                    what.push("queued for revision".into());
+                }
+                self.mutated();
+            } else {
+                what.push("U revises".into());
+            }
         }
         let what = what.join(", ");
         self.status = format!("PR #{number} for {id}: {what}");
@@ -2765,6 +2920,7 @@ impl App {
             KeyCode::Char('S') => self.release_backlog(),
             KeyCode::Char('B') => self.move_to_backlog(&b),
             KeyCode::Char('A') => self.relaunch(&b.id),
+            KeyCode::Char('U') => self.request_revise(&b),
             KeyCode::Char('t') => self.show_check(b.id),
             KeyCode::Char('T') => self.rerun_check(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {

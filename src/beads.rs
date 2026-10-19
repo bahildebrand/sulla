@@ -138,6 +138,7 @@ pub enum State {
     Review,
     Held,
     Pr,
+    Revise,
 }
 
 impl State {
@@ -149,6 +150,7 @@ impl State {
             State::Review => "review",
             State::Held => "held",
             State::Pr => "pr",
+            State::Revise => "revise",
         }
     }
 }
@@ -171,6 +173,7 @@ impl Bead {
                 "review" => Some(State::Review),
                 "held" => Some(State::Held),
                 "pr" => Some(State::Pr),
+                "revise" => Some(State::Revise),
                 _ => None,
             })
     }
@@ -211,6 +214,7 @@ impl Bead {
             Some(State::Backlog) => Some(Column::Backlog),
             Some(State::Review) => Some(Column::Review),
             Some(State::Pr) => Some(Column::AwaitingPr),
+            Some(State::Revise) => Some(Column::Pending),
             Some(State::Running | State::Reviewing) => Some(Column::InProgress),
             _ if self.status == "in_progress" => Some(Column::InProgress),
             _ => Some(Column::Pending),
@@ -538,6 +542,11 @@ mod tests {
         assert_eq!(b.state(), Some(State::Pr));
         assert_eq!(b.label("pr"), Some("42"));
         assert_eq!(b.column(Utc::now(), 3), Some(Column::AwaitingPr));
+        let r = bead(
+            r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:revise","pr:42"]}"#,
+        );
+        assert_eq!(r.state(), Some(State::Revise));
+        assert_eq!(r.column(Utc::now(), 3), Some(Column::Pending));
     }
 
     #[test]

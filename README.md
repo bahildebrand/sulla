@@ -25,7 +25,7 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log, `h` the timeline), `H` bead timeline (time per state, review rounds, ai verdicts), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
+| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log, `h` the timeline), `H` bead timeline (time per state, review rounds, ai verdicts), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `U` revise from PR feedback, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
 | Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR (`workflow = "pr"`), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:chat [new]` |
@@ -95,6 +95,8 @@ remote = "origin"         # remote that sulla branches are pushed to
 draft = false             # open pull requests as drafts
 poll_secs = 120           # how often to poll open pull requests
 backup_sessions = true    # back up agent sessions so agents can resume on review comments
+auto_revise = true        # resume the agent on new PR comments or failing checks (false: U on the board)
+reply = false             # comment on the PR with what a revision addressed when republishing
 
 [presets]                 # prompt guidance picked per bead with a preset:<name> label
 perf = "This is a performance change. Measure before and after and report the numbers."

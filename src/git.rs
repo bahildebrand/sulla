@@ -66,6 +66,10 @@ fn stack_ref(id: &str) -> String {
     format!("refs/sulla/stack/{id}")
 }
 
+fn revision_ref(id: &str) -> String {
+    format!("refs/sulla/revise/{id}")
+}
+
 fn parent_key(id: &str) -> String {
     format!("sulla.{id}.parent")
 }
@@ -251,6 +255,58 @@ impl Git {
         Ok(())
     }
 
+    pub fn rebase(&self, id: &str, onto: &str) -> Result<()> {
+        if self.stack_parent(id).is_some() {
+            return self.restack(id, onto);
+        }
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            bail!("no worktree for {id}");
+        }
+        if !run(&wt, &["status", "--porcelain"])?.trim().is_empty() {
+            bail!("{id} has uncommitted changes");
+        }
+        if let Err(e) = run(&wt, &["rebase", onto]) {
+            let _ = run(&wt, &["rebase", "--abort"]);
+            return Err(RebaseConflict {
+                base: onto.to_string(),
+                detail: e.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    pub fn mark_revision(&self, id: &str) -> Result<()> {
+        let head = run(&self.worktree_path(id), &["rev-parse", "HEAD"])?;
+        run(&self.repo, &["update-ref", &revision_ref(id), head.trim()]).map(drop)
+    }
+
+    pub fn clear_revision(&self, id: &str) {
+        let _ = run(&self.repo, &["update-ref", "-d", &revision_ref(id)]);
+    }
+
+    pub fn revision(&self, id: &str) -> Option<String> {
+        let r = revision_ref(id);
+        (self.ref_exists(&r)
+            && run(
+                &self.worktree_path(id),
+                &["merge-base", "--is-ancestor", &r, "HEAD"],
+            )
+            .is_ok())
+        .then_some(r)
+    }
+
+    fn review_base(&self, id: &str, base: &str) -> Result<String> {
+        if let Some(r) = self.revision(id) {
+            return Ok(r);
+        }
+        let up = self.upstream(id, base);
+        Ok(run(&self.worktree_path(id), &["merge-base", &up, "HEAD"])?
+            .trim()
+            .to_string())
+    }
+
     pub fn diff(&self, id: &str, base: &str) -> Result<String> {
         let wt = self.worktree_path(id);
         let br = branch(id);
@@ -266,9 +322,8 @@ impl Git {
                 ],
             );
         }
-        let up = self.upstream(id, base);
-        let mb = run(&wt, &["merge-base", &up, "HEAD"])?;
-        let mut out = run(&wt, &["diff", "--no-color", "--no-ext-diff", mb.trim()])?;
+        let mb = self.review_base(id, base)?;
+        let mut out = run(&wt, &["diff", "--no-color", "--no-ext-diff", &mb])?;
         for f in run(&wt, &["ls-files", "--others", "--exclude-standard"])?.lines() {
             let o = Command::new("git")
                 .arg("-C")
@@ -308,10 +363,11 @@ impl Git {
 
     pub fn log(&self, id: &str, base: &str) -> Result<String> {
         let wt = self.worktree_path(id);
-        let up = self.upstream(id, base);
         if wt.join(".git").exists() {
+            let up = self.revision(id).unwrap_or_else(|| self.upstream(id, base));
             Self::log_range(&wt, &format!("{up}..HEAD"))
         } else {
+            let up = self.upstream(id, base);
             Self::log_range(&self.repo, &format!("{up}..{}", branch(id)))
         }
     }
@@ -376,8 +432,7 @@ impl Git {
                 );
             }
         }
-        let up = self.upstream(id, base);
-        let mb = run(&wt, &["merge-base", &up, "HEAD"])?.trim().to_string();
+        let mb = self.review_base(id, base)?;
         for p in &rejection.restore {
             if run(&wt, &["cat-file", "-e", &format!("{mb}:{p}")]).is_ok() {
                 run(&wt, &["checkout", &mb, "--", p])?;
@@ -602,6 +657,7 @@ impl Git {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         self.unstack(id);
+        self.clear_revision(id);
         let wt = self.worktree_path(id);
         if wt.exists() {
             run(
@@ -638,6 +694,38 @@ mod tests {
         let g = Git::new(dir.clone());
         g.ensure_ignored().unwrap();
         (dir, g)
+    }
+
+    #[test]
+    fn revision_rebases_and_scopes_review_to_new_commits() {
+        let (dir, g) = scratch("revise");
+        let wt = g.ensure_worktree("r-1", "main").unwrap();
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        g.commit_pending("r-1", "r-1: work").unwrap();
+        std::fs::write(dir.join("m.txt"), "m\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "main moved"]);
+        g.rebase("r-1", "main").unwrap();
+        assert!(run(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).is_ok());
+
+        g.mark_revision("r-1").unwrap();
+        std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+        g.commit_pending("r-1", "r-1: address feedback").unwrap();
+        let d = g.diff("r-1", "main").unwrap();
+        assert!(d.contains("c.txt") && !d.contains("b.txt"));
+        let log = g.log("r-1", "main").unwrap();
+        assert!(log.contains("address feedback") && !log.contains("r-1: work"));
+
+        g.clear_revision("r-1");
+        assert!(g.diff("r-1", "main").unwrap().contains("b.txt"));
+
+        std::fs::write(dir.join("b.txt"), "main\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "conflict"]);
+        let err = g.rebase("r-1", "main").unwrap_err();
+        assert!(err.downcast_ref::<RebaseConflict>().is_some());
+        assert!(g.dirty("r-1").unwrap().trim().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

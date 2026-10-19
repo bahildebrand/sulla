@@ -86,6 +86,11 @@ pub fn watched_prs(all: &[Bead]) -> Vec<(String, u64)> {
         .collect()
 }
 
+pub fn revisable(all: &[Bead]) -> impl Iterator<Item = &Bead> {
+    all.iter()
+        .filter(|b| b.status != "closed" && b.state() == Some(State::Revise))
+}
+
 pub fn spawn_pr_watcher(
     beads: Beads,
     repo: PathBuf,
@@ -360,6 +365,35 @@ mod tests {
             .collect();
         assert_eq!(ids, ["old-p1", "new-p1"]);
         assert!(pick(&ready, &busy, &HashSet::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn revise_beads_are_picked_within_capacity() {
+        let mut revise = bead("rev", 1, "2026-01-01T00:00:00Z", &["sulla:revise", "pr:7"]);
+        revise.status = "in_progress".into();
+        let mut pr = bead("pr", 0, "2026-01-01T00:00:00Z", &["sulla:pr", "pr:8"]);
+        pr.status = "in_progress".into();
+        let all = vec![revise, pr];
+        let mut candidates = vec![
+            bead("p2", 2, "2026-01-01T00:00:00Z", &[]),
+            bead("p1", 1, "2026-01-02T00:00:00Z", &[]),
+        ];
+        candidates.extend(revisable(&all).cloned());
+        let ids = |free| -> Vec<String> {
+            pick(&candidates, &HashSet::new(), &HashSet::new(), free)
+                .iter()
+                .map(|b| b.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(1), ["rev"]);
+        assert_eq!(ids(2), ["rev", "p1"]);
+        assert_eq!(ids(0), Vec::<String>::new());
+        let busy = HashSet::from(["rev".to_string()]);
+        let picked: Vec<_> = pick(&candidates, &busy, &HashSet::new(), 1)
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+        assert_eq!(picked, ["p1"]);
     }
 
     #[test]

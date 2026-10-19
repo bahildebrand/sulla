@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::health::Probe;
 
 pub const GH: &str = "gh";
+pub const MARKER: &str = "<!-- sulla -->";
+const LOG_LINES: usize = 40;
+const LOG_WIDTH: usize = 240;
 
 pub fn probe() -> Probe {
     Probe::new("gh", GH).also(&["auth", "status"])
@@ -110,7 +113,7 @@ pub enum PrState {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrComment {
     pub id: String,
     pub author: String,
@@ -118,16 +121,21 @@ pub struct PrComment {
     pub path: Option<String>,
     pub line: Option<u64>,
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub approval: bool,
 }
 
 impl PrComment {
-    pub fn describe(&self) -> String {
-        let at = match (&self.path, self.line) {
+    fn location(&self) -> String {
+        match (&self.path, self.line) {
             (Some(p), Some(l)) => format!(" on {p}:{l}"),
             (Some(p), None) => format!(" on {p}"),
             _ => String::new(),
-        };
-        format!("{}{at}: {}", self.author, self.body.trim())
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!("{}{}: {}", self.author, self.location(), self.body.trim())
     }
 }
 
@@ -191,6 +199,7 @@ struct RawView {
 }
 
 fn comment(r: RawItem) -> Option<PrComment> {
+    let approval = r.state == "APPROVED";
     let body = match (r.body.trim(), r.state.as_str()) {
         ("", "APPROVED") => "approved".to_string(),
         ("", "CHANGES_REQUESTED") => "changes requested".to_string(),
@@ -211,6 +220,7 @@ fn comment(r: RawItem) -> Option<PrComment> {
         path: r.path,
         line: r.line.or(r.original_line),
         created_at: r.created_at,
+        approval,
     })
 }
 
@@ -272,6 +282,7 @@ fn parse_view(json: &str, inline: Vec<PrComment>) -> Result<PrStatus> {
         .filter_map(comment)
         .chain(inline)
         .collect();
+    comments.retain(|c| !c.body.contains(MARKER));
     comments.sort_by_key(|c| c.created_at);
     Ok(PrStatus {
         state,
@@ -311,6 +322,30 @@ pub struct Seen {
     pub checks: Checks,
     #[serde(default)]
     pub closed: bool,
+    #[serde(default)]
+    pub pending: Feedback,
+    #[serde(default)]
+    pub revising: Option<Feedback>,
+    #[serde(default)]
+    pub addressed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Feedback {
+    #[serde(default)]
+    pub comments: Vec<PrComment>,
+    #[serde(default)]
+    pub failing: Vec<String>,
+}
+
+impl Feedback {
+    pub fn is_empty(&self) -> bool {
+        self.comments.is_empty() && self.failing.is_empty()
+    }
+
+    pub fn count(&self) -> usize {
+        self.comments.len() + self.failing.len()
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -348,6 +383,37 @@ impl Seen {
             failing,
             closed,
         }
+    }
+
+    pub fn queue(&mut self, a: &Activity) -> bool {
+        let comments: Vec<PrComment> = a
+            .comments
+            .iter()
+            .filter(|c| !c.approval && !self.addressed.contains(&c.id))
+            .filter(|c| !self.pending.comments.iter().any(|p| p.id == c.id))
+            .cloned()
+            .collect();
+        let failing = a.failing.clone().unwrap_or_default();
+        if comments.is_empty() && failing.is_empty() {
+            return false;
+        }
+        self.pending.comments.extend(comments);
+        if !failing.is_empty() {
+            self.pending.failing = failing;
+        }
+        true
+    }
+
+    pub fn take(&mut self) -> Feedback {
+        let fb = std::mem::take(&mut self.pending);
+        self.addressed
+            .extend(fb.comments.iter().map(|c| c.id.clone()));
+        let r = self.revising.get_or_insert_default();
+        r.comments.extend(fb.comments.iter().cloned());
+        if !fb.failing.is_empty() {
+            r.failing = fb.failing.clone();
+        }
+        fb
     }
 }
 
@@ -388,6 +454,176 @@ pub fn notes(number: u64, a: &Activity) -> String {
         lines.push(format!("PR #{number} checks failing: {}", names.join(", ")));
     }
     lines.join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub name: String,
+    pub log: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawPrCheck {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default)]
+    link: String,
+}
+
+fn gh_lenient(repo: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new(GH).args(args).current_dir(repo).output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() && stdout.trim().is_empty() {
+        bail!(
+            "gh {}: {}",
+            args.iter().take(2).copied().collect::<Vec<_>>().join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(stdout)
+}
+
+fn failing_links(json: &str) -> Result<Vec<(String, String)>> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str::<Vec<RawPrCheck>>(json)?
+        .into_iter()
+        .filter(|c| c.bucket == "fail")
+        .map(|c| (c.name, c.link))
+        .collect())
+}
+
+fn log_args(link: &str) -> Option<Vec<String>> {
+    let id = |s: &str| {
+        let s = s.split(['?', '#']).next()?;
+        s.parse::<u64>().ok().map(|_| s.to_string())
+    };
+    let mut parts = link.split("/actions/runs/").nth(1)?.split('/');
+    let run = id(parts.next()?)?;
+    match (parts.next(), parts.next().and_then(id)) {
+        (Some("job"), Some(job)) => Some(vec!["--job".into(), job]),
+        _ => Some(vec![run]),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}...", s.chars().take(n).collect::<String>())
+    }
+}
+
+pub fn excerpt(log: &str) -> Option<String> {
+    let lines: Vec<String> = log
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| truncate(l, LOG_WIDTH))
+        .collect();
+    let skip = lines.len().saturating_sub(LOG_LINES);
+    (!lines.is_empty()).then(|| lines[skip..].join("\n"))
+}
+
+pub fn failures(repo: &Path, number: u64, names: &[String]) -> Vec<Failure> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let n = number.to_string();
+    let links = gh_lenient(repo, &["pr", "checks", &n, "--json", "name,bucket,link"])
+        .and_then(|j| failing_links(&j))
+        .unwrap_or_else(|e| {
+            tracing::warn!("pr #{number} checks: {e:#}");
+            Vec::new()
+        });
+    names
+        .iter()
+        .map(|name| {
+            let log = links
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, l)| log_args(l))
+                .and_then(|extra| {
+                    let mut args = vec!["run", "view"];
+                    args.extend(extra.iter().map(String::as_str));
+                    args.push("--log-failed");
+                    gh(repo, &args)
+                        .map_err(|e| tracing::warn!("logs for {name}: {e:#}"))
+                        .ok()
+                })
+                .and_then(|l| excerpt(&l));
+            Failure {
+                name: name.clone(),
+                log,
+            }
+        })
+        .collect()
+}
+
+pub fn revise_prompt(
+    id: &str,
+    number: u64,
+    comments: &[PrComment],
+    failures: &[Failure],
+    conflict: Option<&str>,
+) -> String {
+    let mut out = format!(
+        "PR #{number} for this bead got new feedback. Continue from your earlier work and address it.\n"
+    );
+    if let Some(c) = conflict {
+        out.push_str(&format!("\n{c}\n"));
+    }
+    if !comments.is_empty() {
+        out.push_str("\nReview comments:\n");
+        for (i, c) in comments.iter().enumerate() {
+            out.push_str(&format!("{}. {}{}:\n", i + 1, c.author, c.location()));
+            for l in c.body.trim().lines() {
+                out.push_str(&format!("   {l}\n"));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        out.push_str("\nFailing checks:\n");
+        for f in failures {
+            out.push_str(&format!("- {}\n", f.name));
+            if let Some(log) = &f.log {
+                out.push_str("  Log excerpt (gh run view --log-failed):\n  ```\n");
+                for l in log.lines() {
+                    out.push_str(&format!("  {l}\n"));
+                }
+                out.push_str("  ```\n");
+            }
+        }
+    }
+    out.push_str(&format!(
+        "\nAddress each review comment, or explain in your final message why a comment should not lead to a change. Fix the failing checks. Commit your changes, then run the build and tests and make sure they pass. Do not push and do not comment on the PR, sulla publishes after human review. When done, run `bd set-state {id} sulla=review --reason \"addressed PR feedback\"` then stop and wait."
+    ));
+    out
+}
+
+pub fn reply(fb: &Feedback, head: &str) -> String {
+    let short: String = head.chars().take(7).collect();
+    let mut lines = vec![MARKER.to_string(), format!("Pushed `{short}` addressing:")];
+    lines.extend(
+        fb.comments
+            .iter()
+            .map(|c| format!("- {}{}", c.author, c.location())),
+    );
+    if !fb.failing.is_empty() {
+        lines.push(format!("- failing checks: {}", fb.failing.join(", ")));
+    }
+    lines.join("\n")
+}
+
+pub fn post_comment(repo: &Path, number: u64, body: &str) -> Result<()> {
+    gh(
+        repo,
+        &["pr", "comment", &number.to_string(), "--body", body],
+    )
+    .map(drop)
 }
 
 #[cfg(test)]
@@ -484,6 +720,7 @@ mod tests {
             path: None,
             line: None,
             created_at: None,
+            approval: false,
         });
         more.checks = Checks::Pending;
         let a = seen.update(&more);
@@ -501,5 +738,128 @@ mod tests {
         assert!(a.closed);
         assert!(seen.update(&more).is_empty());
         assert_eq!(notes(4, &a), "PR #4 checks failing: test");
+    }
+
+    fn comment(id: &str, author: &str, body: &str, at: Option<(&str, u64)>) -> PrComment {
+        PrComment {
+            id: id.into(),
+            author: author.into(),
+            body: body.into(),
+            path: at.map(|(p, _)| p.into()),
+            line: at.map(|(_, l)| l),
+            created_at: None,
+            approval: false,
+        }
+    }
+
+    #[test]
+    fn builds_revise_prompt_from_comments_and_checks() {
+        let comments = vec![
+            comment(
+                "rc1",
+                "alice",
+                "rename this\nand add a test",
+                Some(("src/a.rs", 12)),
+            ),
+            comment("IC_1", "bob", "please split the PR", None),
+        ];
+        let failures = vec![
+            Failure {
+                name: "test".into(),
+                log: Some("boom\nassert failed".into()),
+            },
+            Failure {
+                name: "lint".into(),
+                log: None,
+            },
+        ];
+        let p = revise_prompt(
+            "x-1",
+            9,
+            &comments,
+            &failures,
+            Some("Rebasing hit conflicts."),
+        );
+        assert_eq!(
+            p,
+            "PR #9 for this bead got new feedback. Continue from your earlier work and address it.\n\
+             \nRebasing hit conflicts.\n\
+             \nReview comments:\n\
+             1. alice on src/a.rs:12:\n   rename this\n   and add a test\n\
+             2. bob:\n   please split the PR\n\
+             \nFailing checks:\n\
+             - test\n  Log excerpt (gh run view --log-failed):\n  ```\n  boom\n  assert failed\n  ```\n\
+             - lint\n\
+             \nAddress each review comment, or explain in your final message why a comment should not lead to a change. Fix the failing checks. Commit your changes, then run the build and tests and make sure they pass. Do not push and do not comment on the PR, sulla publishes after human review. When done, run `bd set-state x-1 sulla=review --reason \"addressed PR feedback\"` then stop and wait."
+        );
+        let p = revise_prompt("x-1", 9, &comments[1..], &[], None);
+        assert!(!p.contains("Failing checks"));
+        assert!(!p.contains("conflicts"));
+    }
+
+    #[test]
+    fn queues_actionable_feedback_and_marks_it_addressed() {
+        let mut seen = Seen::default();
+        let mut approve = comment("PRR_9", "bob", "approved", None);
+        approve.approval = true;
+        assert!(!seen.queue(&Activity {
+            comments: vec![approve],
+            ..Default::default()
+        }));
+        let a = Activity {
+            comments: vec![comment("rc1", "alice", "fix", Some(("a.rs", 1)))],
+            failing: Some(vec!["test".into()]),
+            closed: false,
+        };
+        assert!(seen.queue(&a));
+        assert!(!seen.queue(&Activity {
+            comments: a.comments.clone(),
+            ..Default::default()
+        }));
+        assert_eq!(seen.pending.count(), 2);
+        let fb = seen.take();
+        assert_eq!(fb.failing, ["test"]);
+        assert!(seen.pending.is_empty());
+        assert_eq!(seen.addressed, ["rc1"]);
+        assert!(!seen.queue(&Activity {
+            comments: a.comments.clone(),
+            ..Default::default()
+        }));
+        let json = serde_json::to_string(&seen).unwrap();
+        let back: Seen = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, seen);
+        let body = reply(seen.revising.as_ref().unwrap(), "abcdef123456");
+        assert_eq!(
+            body,
+            "<!-- sulla -->\nPushed `abcdef1` addressing:\n- alice on a.rs:1\n- failing checks: test"
+        );
+        let marked = format!(
+            r#"{{"state":"OPEN","comments":[{{"id":"IC_9","author":{{"login":"me"}},"body":"{}"}}]}}"#,
+            body.replace('\n', "\\n").replace('`', "")
+        );
+        assert!(parse_view(&marked, Vec::new()).unwrap().comments.is_empty());
+    }
+
+    #[test]
+    fn finds_failed_check_logs() {
+        let json = r#"[
+            {"name":"test","bucket":"fail","link":"https://github.com/o/r/actions/runs/11/job/22"},
+            {"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/runs/33?check_suite_focus=true"},
+            {"name":"build","bucket":"pass","link":"https://github.com/o/r/actions/runs/44/job/55"}
+        ]"#;
+        let links = failing_links(json).unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            log_args(&links[0].1),
+            Some(vec!["--job".into(), "22".into()])
+        );
+        assert_eq!(log_args(&links[1].1), Some(vec!["33".into()]));
+        assert_eq!(log_args("https://ci.example.com/build/1"), None);
+        let log: String = (0..100).map(|i| format!("line {i}\n\n")).collect();
+        let e = excerpt(&log).unwrap();
+        assert_eq!(e.lines().count(), LOG_LINES);
+        assert!(e.starts_with("line 60\n"));
+        assert!(excerpt(&"x".repeat(500)).unwrap().ends_with("..."));
+        assert_eq!(excerpt("  \n"), None);
     }
 }

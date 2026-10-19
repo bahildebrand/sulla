@@ -60,6 +60,12 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
             Style::new().fg(Color::Cyan),
         ));
     }
+    if !seen.pending.is_empty() {
+        spans.push(Span::styled(
+            format!("↻{} ", seen.pending.count()),
+            Style::new().fg(Color::Magenta),
+        ));
+    }
     if seen.closed {
         spans.push(Span::styled("closed ", Style::new().fg(Color::Red)));
     }

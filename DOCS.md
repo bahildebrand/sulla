@@ -5,7 +5,7 @@ See [README.md](README.md) for setup, keys and config.
 ## Bead lifecycle
 
 Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`,
-`sulla:review`, `sulla:held`, `sulla:pr`.
+`sulla:review`, `sulla:held`, `sulla:pr`, `sulla:revise`.
 
 - **Backlog** beads are never auto scheduled. The `n` popup creates beads in Backlog or Pending,
   `B` moves a bead to Backlog, `s` releases it to Pending, `S` releases the whole Backlog.
@@ -21,6 +21,8 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
   instead of merging. The bead stays open in **Awaiting PR** (`sulla:pr`, plus `pr:<number>`) with
   its worktree and agent session intact, while the agent is stopped. Awaiting PR beads never count
   toward `max_agents`, are never scheduled and are not resumed on restart.
+- **Revise** (`sulla:revise`): an Awaiting PR bead with new PR feedback waits in Pending and is
+  picked like any other pending bead (see [Revising from PR feedback](#revising-from-pr-feedback)).
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
@@ -39,6 +41,10 @@ the `gh` CLI, configured by the `[pr]` table:
 - `poll_secs` (default `120`): how often open pull requests are polled.
 - `backup_sessions` (default `true`): back up agent sessions so agents can resume on review
   comments.
+- `auto_revise` (default `true`): queue a revision when a PR gets new comments or failing checks.
+  When `false`, sulla only notifies and `U` on the board queues it.
+- `reply` (default `false`): when a revised bead is published again, comment on the PR with the
+  pushed commit and what it addressed.
 
 ### Stacked beads
 
@@ -140,14 +146,41 @@ plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments
   and a `pr` notification fires. Reviews with an empty body count only when they approve or
   request changes.
 
-Seen comment and review ids, the last checks result and the closed flag are kept per bead in
-`.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the number of PR
-comments seen, `⟳ci`, `✓ci` or `✗ci` for the checks result and `closed` when the PR was closed.
-Publishing triggers an immediate poll.
+Seen comment and review ids, the last checks result, the closed flag and unaddressed feedback are
+kept per bead in `.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the
+number of PR comments seen, `↻<n>` for unaddressed feedback, `⟳ci`, `✓ci` or `✗ci` for the checks
+result and `closed` when the PR was closed. Publishing triggers an immediate poll.
 
-The watcher only reads from GitHub. Agent and AI reviewer prompts tell agents never to post
-comments, reviews or replies to GitHub or change PRs through `gh`. PR feedback reaches them only
-through the bead notes.
+### Revising from PR feedback
+
+New comments and reviews (approvals excluded) and newly failing checks on an open PR are queued
+as unaddressed feedback. With `[pr] auto_revise = true` (the default) the bead moves to
+`sulla:revise` and shows in Pending, otherwise only the notification fires and `U` on the board
+queues it. Revise beads are scheduled like pending work, so they wait for a free slot under
+`max_agents`, ordered by priority.
+
+When a Revise bead is picked, sulla:
+
+1. Fetches `<remote>/<base>` and rebases `sulla/<bead>` onto it in the worktree (a bead stacked on
+   a parent that is still open is restacked onto the parent instead). On conflicts the rebase is
+   aborted and the prompt tells the agent to run it and resolve the conflicts first.
+2. Records the rebased HEAD in `refs/sulla/revise/<bead>`. Until the next publish, the Review diff,
+   log and rejected hunks cover only the commits made since then.
+3. Resumes the bead's agent session with a prompt listing each comment (author, `file:line`,
+   body) and each failing check with the last lines of `gh run view --log-failed` when available.
+   The agent is told to address every comment, commit, run the build and tests, run
+   `bd set-state <bead> sulla=review --reason "addressed PR feedback"` and stop, and not to push or
+   comment on the PR.
+
+The queued comment ids are then marked addressed so they never retrigger. When the bead is back in
+Review, read the incremental diff and publish again with `P`: the branch is force pushed with
+`--force-with-lease` to the existing PR and the bead returns to Awaiting PR. With `reply = true`
+sulla comments on the PR with the pushed commit and what it addressed. That comment carries a
+hidden `<!-- sulla -->` marker so the watcher ignores it.
+
+Apart from that opt-in reply, sulla only reads from GitHub. Agent and AI reviewer prompts tell
+agents never to post comments, reviews or replies to GitHub or change PRs through `gh`. PR
+feedback reaches them only through the bead notes and the revise prompt.
 
 ### Rejecting hunks
 

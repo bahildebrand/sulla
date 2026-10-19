@@ -206,6 +206,7 @@ const HELP: &[(&str, &str)] = &[
         "launch / resume agent (blocked beads are queued instead)",
     ),
     ("t / T", "show pre-merge check output / rerun checks"),
+    ("U", "revise an Awaiting PR bead from its new PR feedback"),
     ("q", "quit"),
     ("Progress", ""),
     ("i / a", "insert mode (type into agent, resumes if exited)"),
