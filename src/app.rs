@@ -16,14 +16,15 @@ use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall
 use crate::beads::{Bead, Beads, Column, State};
 use crate::budget::{self, Budget};
 use crate::checks::{self, Check};
-use crate::config::{AgentKind, Config, Trigger};
+use crate::config::{AgentKind, Config, SandboxKind, Trigger};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{DiffStat, Git, RebaseConflict};
+use crate::health::{self, Probe, Tool};
 use crate::notify::Notifier;
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
-use crate::scheduler::{self, Backoff, Snapshot, fmt_duration};
+use crate::scheduler::{self, Backoff, Idle, Snapshot, fmt_duration};
 use crate::timeline;
 use crate::ui::keys;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
@@ -38,6 +39,7 @@ pub enum Event {
     Snapshot(Result<Snapshot, String>),
     CheckDone(checks::Done),
     Usage(usage::Report),
+    Health(Vec<Tool>),
 }
 
 pub enum View {
@@ -139,6 +141,7 @@ pub enum Mode {
         msg: String,
     },
     Help,
+    Health,
     Inspect {
         id: String,
         text: String,
@@ -232,6 +235,8 @@ pub struct App {
     term: (u16, u16),
     pub pending_edit: Option<PathBuf>,
     pub paused: bool,
+    pub health: Option<Vec<Tool>>,
+    pub bd_error: Option<String>,
     pub quit: bool,
 }
 
@@ -319,6 +324,8 @@ impl App {
             term: (80, 24),
             pending_edit: None,
             paused: false,
+            health: None,
+            bd_error: None,
             quit: false,
         })
     }
@@ -663,6 +670,7 @@ impl App {
                     })
                     .map(|b| b.id.clone())
                     .collect();
+                self.bd_error = None;
                 self.all = s.all;
                 self.ready = s.ready;
                 self.blocked = s.blocked;
@@ -709,13 +717,17 @@ impl App {
                 self.sync_checks();
                 self.schedule();
             }
-            Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
+            Event::Snapshot(Err(e)) => {
+                self.status = format!("bd: {e}");
+                self.bd_error = Some(e);
+            }
             Event::CheckDone(d) => self.check_done(d),
             Event::Usage(r) => {
                 self.usage_seen = true;
                 self.usage = r.per_key;
                 self.run_usage = r.run;
             }
+            Event::Health(tools) => self.health = Some(tools),
         }
     }
 
@@ -852,18 +864,14 @@ impl App {
         }
     }
 
-    fn schedule(&mut self) {
-        if self.paused || self.backoff.remaining(Instant::now()).is_some() {
-            return;
-        }
-        let free = self
-            .cfg
+    fn free_slots(&self) -> usize {
+        self.cfg
             .max_agents
             .saturating_sub(self.running_count())
-            .min(self.slots.free(self.cfg.max_agents));
-        if free == 0 {
-            return;
-        }
+            .min(self.slots.free(self.cfg.max_agents))
+    }
+
+    fn picks(&self, free: usize) -> Vec<Bead> {
         let busy: HashSet<String> = self.agents.keys().cloned().collect();
         let mut candidates = self.ready.clone();
         candidates.extend(
@@ -872,10 +880,72 @@ impl App {
                 .filter(|b| self.stack_on(&b.id).is_some())
                 .cloned(),
         );
-        let picks: Vec<Bead> = scheduler::pick(&candidates, &busy, &self.failed, free)
+        scheduler::pick(&candidates, &busy, &self.failed, free)
             .into_iter()
             .cloned()
+            .collect()
+    }
+
+    pub fn idle(&self) -> Option<Idle> {
+        if self.paused {
+            return Some(Idle::Paused);
+        }
+        if let Some(d) = self.backoff.remaining(Instant::now()) {
+            return Some(Idle::RateLimited(d));
+        }
+        let free = self.free_slots();
+        if free == 0 {
+            return Some(Idle::SlotsFull {
+                running: self.running_count(),
+                max: self.cfg.max_agents,
+            });
+        }
+        if !self.picks(free).is_empty() {
+            return None;
+        }
+        Some(scheduler::why_idle(&self.all, &self.blocked, &self.failed))
+    }
+
+    fn open_health(&mut self) {
+        let used: HashSet<AgentKind> = std::iter::once(self.cfg.agent)
+            .chain(
+                self.all
+                    .iter()
+                    .filter(|b| b.status != "closed")
+                    .map(|b| agent::selection(b, self.cfg.agent).0),
+            )
             .collect();
+        let mut probes = vec![Probe::new("bd", "bd")];
+        for kind in AgentKind::ALL.into_iter().filter(|k| used.contains(k)) {
+            let bin = match kind {
+                AgentKind::Copilot => &self.cfg.copilot.bin,
+                AgentKind::Claude => &self.cfg.claude.bin,
+            };
+            probes.push(Probe::new(self.backend(kind).name(), bin));
+        }
+        probes.extend([
+            Probe::new("kache", "kache")
+                .off((!self.cfg.kache).then_some("disabled (kache = false)")),
+            Probe::new("incus", &self.cfg.incus.bin)
+                .off(
+                    (self.cfg.sandbox != SandboxKind::Incus)
+                        .then_some("not used (sandbox = worktree)"),
+                )
+                .also(&["query", "/1.0"]),
+        ]);
+        health::spawn(probes, self.tx.clone());
+        self.mode = Mode::Health;
+    }
+
+    fn schedule(&mut self) {
+        if self.paused || self.backoff.remaining(Instant::now()).is_some() {
+            return;
+        }
+        let free = self.free_slots();
+        if free == 0 {
+            return;
+        }
+        let picks = self.picks(free);
         for b in picks {
             tracing::info!("scheduling {}", b.id);
             let r = self
@@ -1546,6 +1616,11 @@ impl App {
                 }
             }
             Mode::Help => {}
+            Mode::Health => {
+                if k.code == KeyCode::Char('r') {
+                    self.open_health();
+                }
+            }
             Mode::Inspect { id, text, scroll } => self.inspect_key(k, id, text, scroll),
             Mode::Normal => self.normal_key(k),
         }
@@ -1781,6 +1856,7 @@ impl App {
             }
             "kill" if !rest.is_empty() => self.confirm_kill(rest.to_string()),
             "chat" => self.open_chat(rest == "new"),
+            "health" => self.open_health(),
             _ => self.status = format!("unknown command: {cmd}"),
         }
     }
@@ -2364,6 +2440,7 @@ impl App {
             KeyCode::Char('c') => self.open_chat(false),
             KeyCode::Char('C') => self.open_chat(true),
             KeyCode::Char('P') => self.set_paused(!self.paused),
+            KeyCode::Char('!') => self.open_health(),
             _ => self.board_bead_key(k),
         }
     }

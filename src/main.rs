@@ -7,6 +7,7 @@ mod config;
 mod conflicts;
 mod filter;
 mod git;
+mod health;
 mod notify;
 mod presets;
 mod sandbox;

@@ -148,6 +148,104 @@ pub fn pick<'a>(
     candidates
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Idle {
+    Paused,
+    RateLimited(Duration),
+    SlotsFull {
+        running: usize,
+        max: usize,
+    },
+    Failed(Vec<String>),
+    Blocked(usize),
+    Backlog(usize),
+    Waiting {
+        blocked: usize,
+        backlog: usize,
+        held: usize,
+    },
+    Empty,
+}
+
+impl Idle {
+    pub fn describe(&self) -> String {
+        match self {
+            Idle::Paused => "scheduling paused (P or :resume)".into(),
+            Idle::RateLimited(d) => format!(
+                "rate limited, resuming in {} (:resume to override)",
+                fmt_duration(*d)
+            ),
+            Idle::SlotsFull { running, max } if running < max => {
+                format!("all {max} slots in use ({running} working agents, :max <n> to raise)")
+            }
+            Idle::SlotsFull { running, max } => {
+                format!("slots full, {running}/{max} agents running (:max <n> to raise)")
+            }
+            Idle::Failed(ids) => {
+                format!("failed to start {} (:refresh to retry)", ids.join(", "))
+            }
+            Idle::Blocked(1) => "the only pending bead is blocked".into(),
+            Idle::Blocked(n) => format!("all {n} pending beads are blocked"),
+            Idle::Backlog(n) => format!(
+                "backlog only, {n} bead{} in backlog (s or S to release)",
+                if *n == 1 { "" } else { "s" }
+            ),
+            Idle::Waiting {
+                blocked,
+                backlog,
+                held,
+            } => {
+                let parts: Vec<String> =
+                    [(blocked, "blocked"), (backlog, "backlog"), (held, "held")]
+                        .into_iter()
+                        .filter(|(n, _)| **n > 0)
+                        .map(|(n, s)| format!("{n} {s}"))
+                        .collect();
+                format!("nothing ready, {}", parts.join(", "))
+            }
+            Idle::Empty => "no open beads to start".into(),
+        }
+    }
+}
+
+pub fn why_idle(
+    all: &[Bead],
+    blocked: &HashMap<String, Vec<String>>,
+    failed: &HashSet<String>,
+) -> Idle {
+    let mut failed_ids = Vec::new();
+    let (mut n_blocked, mut backlog, mut held) = (0, 0, 0);
+    for b in all
+        .iter()
+        .filter(|b| b.status != "closed" && b.issue_type != "epic")
+    {
+        if failed.contains(&b.id) {
+            failed_ids.push(b.id.clone());
+            continue;
+        }
+        match b.state() {
+            Some(State::Backlog) => backlog += 1,
+            Some(State::Held) => held += 1,
+            None if blocked.contains_key(&b.id) => n_blocked += 1,
+            _ => {}
+        }
+    }
+    if !failed_ids.is_empty() {
+        failed_ids.sort();
+        return Idle::Failed(failed_ids);
+    }
+    match (n_blocked, backlog, held) {
+        (0, 0, 0) => Idle::Empty,
+        (n, 0, 0) => Idle::Blocked(n),
+        (0, n, 0) => Idle::Backlog(n),
+        (blocked, backlog, held) => Idle::Waiting {
+            blocked,
+            backlog,
+            held,
+        },
+    }
+}
+
 pub fn stack_parent<'a>(
     id: &str,
     blocked: &'a HashMap<String, Vec<String>>,
@@ -246,6 +344,59 @@ mod tests {
         assert!(b.resume());
         assert!(!b.resume());
         assert_eq!(b.hit(t + BACKOFF_MAX * 3), Some(BACKOFF_BASE));
+    }
+
+    #[test]
+    fn idle_reason_classifies_pending_work() {
+        let none = HashSet::new();
+        let blocked = HashMap::from([
+            ("b1".to_string(), vec!["x".to_string()]),
+            ("b2".to_string(), vec!["x".to_string()]),
+        ]);
+        let mut epic = bead("e", 1, "2026-01-01T00:00:00Z", &[]);
+        epic.issue_type = "epic".into();
+        let mut done = bead("d", 1, "2026-01-01T00:00:00Z", &["sulla:backlog"]);
+        done.status = "closed".into();
+        let b1 = bead("b1", 1, "2026-01-01T00:00:00Z", &[]);
+        let b2 = bead("b2", 1, "2026-01-01T00:00:00Z", &[]);
+        let bl = bead("bl", 1, "2026-01-01T00:00:00Z", &["sulla:backlog"]);
+        let held = bead("h", 1, "2026-01-01T00:00:00Z", &["sulla:held"]);
+        let run = bead("r", 1, "2026-01-01T00:00:00Z", &["sulla:running"]);
+
+        let base = vec![epic, done, run];
+        let with = |extra: &[&Bead]| {
+            let mut v = base.clone();
+            v.extend(extra.iter().map(|b| (*b).clone()));
+            v
+        };
+        assert_eq!(why_idle(&base, &blocked, &none), Idle::Empty);
+        assert_eq!(
+            why_idle(&with(&[&b1, &b2]), &blocked, &none),
+            Idle::Blocked(2)
+        );
+        assert_eq!(why_idle(&with(&[&bl]), &blocked, &none), Idle::Backlog(1));
+        assert_eq!(
+            why_idle(&with(&[&b1, &bl, &held]), &blocked, &none),
+            Idle::Waiting {
+                blocked: 1,
+                backlog: 1,
+                held: 1
+            }
+        );
+        assert_eq!(
+            Idle::Waiting {
+                blocked: 0,
+                backlog: 0,
+                held: 2
+            }
+            .describe(),
+            "nothing ready, 2 held"
+        );
+        let failed = HashSet::from(["bl".to_string(), "gone".to_string()]);
+        assert_eq!(
+            why_idle(&with(&[&b1, &bl]), &blocked, &failed),
+            Idle::Failed(vec!["bl".into()])
+        );
     }
 
     #[test]

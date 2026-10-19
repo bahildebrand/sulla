@@ -100,6 +100,10 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - When an agent's recent output shows a 429, rate limit, or quota error, sulla stops launching
   new agents for 1 minute, doubling on repeat hits up to 30 minutes. Running agents are left
   alone. The status bar shows `RATE LIMITED` with the time left, and `:resume` lifts it early.
+- `!` on the board (or `:health`) opens a health panel. It probes `bd`, the agent CLI, `kache`
+  and `incus` (`--version`, plus `incus query /1.0` for the daemon), shows the last bd poll error,
+  and says why the scheduler is not starting work: paused, rate limited, slots full, failed
+  starts, all blocked, backlog only, or nothing open. `r` rechecks.
 - `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the bead's worktree. Agents keep
   running meanwhile, so edits may conflict with a live agent.
 - Agents still marked running or in review when sulla restarts are resumed via their agent

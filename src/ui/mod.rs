@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
 use crate::config::AgentKind;
+use crate::health::Status;
 use review::Diff;
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -44,6 +45,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Help) {
         help(f, app);
     }
+    if matches!(app.mode, Mode::Health) {
+        health(f, app);
+    }
     if let Mode::NewBead(form) = &app.mode {
         new_bead(f, form);
     }
@@ -64,6 +68,10 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!(" {s} "), Style::new().bg(c).fg(Color::Black).bold())
     };
     let left: Vec<Span> = match &app.mode {
+        Mode::Health => vec![
+            tag("HEALTH", Color::Cyan),
+            Span::raw(" r recheck, any other key closes").dim(),
+        ],
         Mode::Normal | Mode::Help => vec![
             tag("NORMAL", Color::Blue),
             Span::raw(format!(" {}", app.status)),
@@ -150,8 +158,12 @@ const HELP: &[(&str, &str)] = &[
     ("Global", ""),
     ("?", "help"),
     (
+        "! / :health",
+        "health of bd, agent, kache, incus and why nothing starts",
+    ),
+    (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :chat [new])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :chat [new] :health)",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
@@ -246,6 +258,71 @@ fn help(f: &mut Frame, _app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" sulla keys ")),
+        area,
+    );
+}
+
+fn health(f: &mut Frame, app: &App) {
+    let mut lines = vec![Line::from(Span::raw("Tools").bold().yellow())];
+    match &app.health {
+        None => lines.push(Line::raw("  checking...").dim()),
+        Some(tools) => {
+            for t in tools {
+                let (mark, color, text) = match &t.status {
+                    Status::Ok(v) => ("ok", Color::Green, v.clone()),
+                    Status::Missing => (
+                        "missing",
+                        Color::Red,
+                        format!("`{}` not found on PATH", t.bin),
+                    ),
+                    Status::Failed(e) => ("error", Color::Red, e.clone()),
+                    Status::Off(why) => ("off", Color::DarkGray, why.clone()),
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  {:<10}", t.name)).cyan(),
+                    Span::styled(format!("{mark:<8}"), Style::new().fg(color).bold()),
+                    Span::raw(text),
+                ]));
+            }
+        }
+    }
+    if let Some(e) = &app.bd_error {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<10}", "bd poll")).cyan(),
+            Span::styled(
+                format!("{:<8}", "error"),
+                Style::new().fg(Color::Red).bold(),
+            ),
+            Span::raw(e.clone()),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::raw("Scheduler").bold().yellow()));
+    lines.push(Line::raw(format!(
+        "  {} of {} agents running",
+        app.running_count(),
+        app.cfg.max_agents
+    )));
+    lines.push(match app.idle() {
+        None => Line::from(Span::raw("  starting work").green()),
+        Some(i) => Line::from(vec![
+            Span::raw("  idle: ").red().bold(),
+            Span::raw(i.describe()),
+        ]),
+    });
+    let rows: usize = lines.iter().map(|l| l.width().div_ceil(88).max(1)).sum();
+    let height = (rows as u16 + 2).min(f.area().height);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Length(90)])
+        .flex(Flex::Center)
+        .areas(area);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(" health ")),
         area,
     );
 }
