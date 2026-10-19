@@ -419,7 +419,7 @@ impl Sandbox for Incus {
             &self.host,
             &cwd,
             &env,
-            cmd.get_argv(),
+            &init_argv(self.cfg.init.as_deref(), cmd.get_argv()),
             true,
         );
         let mut out = CommandBuilder::from_argv(argv);
@@ -495,7 +495,7 @@ impl Sandbox for Incus {
             &self.host,
             &cwd,
             &env,
-            argv,
+            &init_argv(self.cfg.init.as_deref(), argv),
             false,
         );
         let mut c = Command::new(&argv[0]);
@@ -600,6 +600,18 @@ fn exec_env<'a>(
         put(k, v);
     }
     env
+}
+
+fn init_argv(init: Option<&str>, argv: &[OsString]) -> Vec<OsString> {
+    let Some(init) = init.filter(|s| !s.trim().is_empty()) else {
+        return argv.to_vec();
+    };
+    let mut out: Vec<OsString> = ["bash", "-c", &format!("{init}\nexec \"$@\""), "sulla"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    out.extend(argv.iter().cloned());
+    out
 }
 
 fn exec_argv(
@@ -778,6 +790,27 @@ mod tests {
         );
         let argv = exec_argv("incus", "n", &host(), "/w", &[], &["sh".into()], false);
         assert!(argv.contains(&"-T".into()) && !argv.contains(&"-t".into()));
+    }
+
+    #[test]
+    fn init_argv_runs_init_then_execs_argv() {
+        let argv: Vec<OsString> = vec!["claude".into(), "-p".into(), "do it".into()];
+        assert_eq!(init_argv(None, &argv), argv);
+        assert_eq!(init_argv(Some("  "), &argv), argv);
+        let out = init_argv(Some("source /x && activate"), &argv);
+        let out: Vec<_> = out.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            out,
+            [
+                "bash",
+                "-c",
+                "source /x && activate\nexec \"$@\"",
+                "sulla",
+                "claude",
+                "-p",
+                "do it",
+            ]
+        );
     }
 
     #[test]

@@ -160,6 +160,7 @@ pub struct IncusConfig {
     pub reset_volumes: bool,
     pub mounts: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub init: Option<String>,
 }
 
 impl Default for IncusConfig {
@@ -177,6 +178,7 @@ impl Default for IncusConfig {
             reset_volumes: true,
             mounts: vec!["~/.claude".into(), "~/.copilot".into()],
             env: BTreeMap::new(),
+            init: None,
         }
     }
 }

@@ -202,6 +202,25 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
   networks (and volumes when `reset_volumes = true`) and kill the agent user's processes.
 - Hard reset when a slot has run `reset_every` beads, when a bead is discarded, or when the light
   reset fails: the container is restored to its `clean` snapshot.
+- Mounts are added when a slot is created and the snapshot keeps them, so after changing `mounts`
+  delete the repo's slot containers (`incus delete --force <name>`) to have them recreated.
+
+### Shell init
+
+`[incus] init` is a bash snippet run in the worktree before every command sulla execs in a slot
+(agents, AI reviewers and checks), for setup a static `env` cannot express, like activating a
+conda environment or putting a worktree-relative directory on `PATH`. The command is then started
+with `exec` from that shell, so exported variables carry over. If the snippet fails, the command
+still starts.
+
+```toml
+[incus]
+mounts = ["~/.claude", "~/.copilot", "~/micromamba", "~/.local/bin/micromamba"]
+init = '''
+eval "$("$HOME/.local/bin/micromamba" shell hook -s bash)" && micromamba activate myenv
+export PATH="$PWD/.venv/bin:$PATH"
+'''
+```
 
 ### Reaching a slot's services
 
