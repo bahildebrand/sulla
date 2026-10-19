@@ -1,9 +1,13 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::process::Command;
 
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{
+    Result,
+    eyre::{WrapErr, bail},
+};
 
-use crate::beads::Beads;
+use crate::beads::{self, Beads};
 use crate::config::{AgentKind, Config, PrTool, SandboxKind, Workflow};
 use crate::git::{self, Git};
 
@@ -212,6 +216,73 @@ fn configure<R: BufRead, W: Write>(
     Ok(w.table)
 }
 
+fn storage<R: BufRead, W: Write>(p: &mut Prompter<R, W>, dolt: bool) -> Result<bool> {
+    if !dolt {
+        p.say("`dolt` is not on PATH, so the default is an embedded database. Install dolt to use a Dolt SQL server.")?;
+    }
+    let default = if dolt { "server" } else { "embedded" };
+    Ok(p.choice("Beads database", &["server", "embedded"], default)? == "server")
+}
+
+fn migration(prefix: &str) -> String {
+    let backup = format!("../{prefix}-beads-backup");
+    [
+        "This repo uses an embedded beads database: every bd call takes a file lock, so sulla and agents queue behind each other.".to_string(),
+        "A Dolt SQL server is faster, and sulla then reads beads through `bd serve`. sulla never migrates a database itself.".into(),
+        "To switch without losing data, stop sulla and every agent, then run in the repo:".into(),
+        String::new(),
+        format!("  bd backup init {backup} && bd backup sync"),
+        "  mv .beads .beads.embedded".into(),
+        format!("  bd init --server -p {prefix}"),
+        format!("  bd backup restore --force {backup}"),
+        "  bd list --all".into(),
+        String::new(),
+        "Carry over any settings from .beads.embedded/config.yaml, and delete .beads.embedded once everything is there.".into(),
+    ]
+    .join("\n")
+}
+
+fn has_dolt() -> bool {
+    Command::new("dolt")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn setup_beads<R: BufRead, W: Write>(p: &mut Prompter<R, W>, repo: &Path) -> Result<()> {
+    let metadata = repo.join(".beads").join("metadata.json");
+    if metadata.exists() {
+        if beads::server_mode(repo) {
+            p.say("Beads database: Dolt SQL server, read through `bd serve`.")?;
+        } else {
+            let prefix = std::fs::read_to_string(&metadata)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v["dolt_database"].as_str().map(String::from))
+                .unwrap_or_else(|| "beads".into());
+            p.say(&migration(&prefix))?;
+            p.say("")?;
+        }
+        return Ok(());
+    }
+    let server = storage(p, has_dolt())?;
+    let mut args = vec!["init", "--non-interactive"];
+    if server {
+        args.push("--server");
+    }
+    p.say(&format!("running `bd {}`", args.join(" ")))?;
+    let status = Command::new("bd")
+        .args(&args)
+        .current_dir(repo)
+        .env(beads::NO_TELEMETRY.0, beads::NO_TELEMETRY.1)
+        .status()
+        .wrap_err("running bd init")?;
+    if !status.success() {
+        bail!("`bd {}` failed with {status}", args.join(" "));
+    }
+    Ok(())
+}
+
 fn read_table(path: &Path) -> Result<toml::Table> {
     if !path.exists() {
         return Ok(toml::Table::new());
@@ -231,6 +302,7 @@ pub fn run(dir: &Path) -> Result<()> {
     let stdin = std::io::stdin();
     let mut p = Prompter::new(stdin.lock(), std::io::stdout());
     let repo = git::toplevel(dir).wrap_err("not a git repository, run `git init` first")?;
+    setup_beads(&mut p, &repo)?;
     Beads::new(&repo)
         .list_all()
         .wrap_err("bd is not usable here, run `bd init` first")?;
@@ -307,6 +379,35 @@ mod tests {
         assert_eq!(cfg.check.as_deref(), Some("cargo test"));
         assert_eq!(cfg.poll_secs, 9);
         assert!(!t.contains_key("base_branch"));
+    }
+
+    #[test]
+    fn storage_defaults_to_server_when_dolt_is_installed() {
+        let pick = |input: &str, dolt: bool| {
+            let mut out = Vec::new();
+            let mut p = Prompter::new(input.as_bytes(), &mut out);
+            let server = storage(&mut p, dolt).unwrap();
+            (server, String::from_utf8(out).unwrap())
+        };
+        let (server, out) = pick("\n", true);
+        assert!(server);
+        assert!(out.contains("Beads database (server/embedded) [server]: "));
+        assert!(!pick("embedded\n", true).0);
+        let (server, out) = pick("\n", false);
+        assert!(!server);
+        assert!(out.contains("`dolt` is not on PATH"));
+        assert!(out.contains("[embedded]: "));
+        assert!(pick("server\n", false).0);
+    }
+
+    #[test]
+    fn migration_keeps_the_old_database_and_restores_a_backup() {
+        let m = migration("sulla");
+        assert!(m.contains("bd backup init ../sulla-beads-backup && bd backup sync"));
+        assert!(m.contains("mv .beads .beads.embedded"));
+        assert!(m.contains("bd init --server -p sulla"));
+        assert!(m.contains("bd backup restore --force ../sulla-beads-backup"));
+        assert!(!m.contains('\u{2014}'));
     }
 
     #[test]

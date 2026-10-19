@@ -11,6 +11,7 @@ use portable_pty::CommandBuilder;
 
 use super::{Outcome, Sandbox};
 use crate::agent::Launch;
+use crate::beads;
 use crate::config::{AgentKind, IncusConfig};
 use crate::sessions;
 
@@ -18,6 +19,7 @@ const MAX_NAME: usize = 63;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 const BOOT_POLL: Duration = Duration::from_secs(1);
 const ADDR_TRIES: u32 = 30;
+const BEADS_DEVICE: &str = "beads-dolt";
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -163,7 +165,7 @@ pub struct Incus {
 }
 
 impl Incus {
-    pub fn new(cfg: IncusConfig, repo: PathBuf) -> Result<Self> {
+    pub fn new(mut cfg: IncusConfig, repo: PathBuf) -> Result<Self> {
         match Command::new(&cfg.bin).arg("--version").output() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(eyre!(
@@ -173,6 +175,11 @@ impl Incus {
             }
             Err(e) => return Err(eyre!("incus sandbox: running `{}`: {e}", cfg.bin)),
             Ok(_) => {}
+        }
+        if beads::server_mode(&repo) {
+            cfg.env
+                .entry("BEADS_DOLT_AUTO_START".into())
+                .or_insert_with(|| "0".into());
         }
         let host = Host::detect()?;
         let cli = Cli {
@@ -243,6 +250,27 @@ impl Incus {
             ])?;
         }
         Ok(())
+    }
+
+    fn beads_proxy(&self, name: &str) -> Result<()> {
+        if !beads::server_mode(&self.repo) {
+            return Ok(());
+        }
+        let Some(port) = beads::dolt_port(&self.repo) else {
+            tracing::warn!("incus: no Dolt server port for {name}, run `bd dolt start`");
+            return Ok(());
+        };
+        let addr = format!("tcp:127.0.0.1:{port}");
+        let inst = self.cli.query(&format!("/1.0/instances/{name}"))?;
+        let dev = &inst["devices"][BEADS_DEVICE];
+        if dev["listen"] == addr.as_str() && dev["connect"] == addr.as_str() {
+            return Ok(());
+        }
+        if !dev.is_null() {
+            self.run(&["config", "device", "remove", name, BEADS_DEVICE])?;
+        }
+        tracing::info!("incus: forwarding {addr} in {name} to the host Dolt server");
+        self.run(&proxy_args(name, &addr)).map(drop)
     }
 
     fn settle(&mut self, slot: usize) {
@@ -402,6 +430,7 @@ impl Sandbox for Incus {
                 .map_err(|e| self.idmap_error(e))?;
         }
         self.wait_ready(&name)?;
+        self.beads_proxy(&name)?;
         tracing::info!("incus: {name} ready");
         self.refresh_address(slot);
         Ok(())
@@ -519,6 +548,23 @@ impl Incus {
         c.args(&argv[1..]);
         c
     }
+}
+
+fn proxy_args(name: &str, addr: &str) -> Vec<String> {
+    [
+        "config",
+        "device",
+        "add",
+        name,
+        BEADS_DEVICE,
+        "proxy",
+        &format!("listen={addr}"),
+        &format!("connect={addr}"),
+        "bind=instance",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 fn parse_ipv4(json: &str, name: &str) -> Option<String> {
@@ -749,6 +795,25 @@ mod tests {
         assert_eq!(expand_home("~", "/h"), "/h");
         assert_eq!(expand_home("/abs/~x", "/h"), "/abs/~x");
         assert_eq!(expand_home("~other/x", "/h"), "~other/x");
+    }
+
+    #[test]
+    fn beads_proxy_listens_on_container_loopback_only() {
+        let args = proxy_args("c", "tcp:127.0.0.1:46509");
+        assert_eq!(
+            args,
+            [
+                "config",
+                "device",
+                "add",
+                "c",
+                "beads-dolt",
+                "proxy",
+                "listen=tcp:127.0.0.1:46509",
+                "connect=tcp:127.0.0.1:46509",
+                "bind=instance",
+            ]
+        );
     }
 
     #[test]

@@ -292,14 +292,63 @@ Each poll runs `git merge-tree` on every open bead's committed branch against ba
 open branch. Conflicting beads show `⚠` on their card, and the zoomed card, Review header and file
 list say with what. Uncommitted changes are not checked.
 
+## Beads database
+
+Beads keeps its data in Dolt, either embedded in each `bd` process (bd's default) or in a Dolt SQL
+server (`bd init --server`). sulla works with both, and `.beads/metadata.json` (`dolt_mode`) tells
+it which one a repo uses.
+
+- **Embedded.** Every read and write is a `bd` subprocess. Each one takes 0.25 to 0.35s and the
+  database file lock, so sulla's polling and the agents' `bd` calls queue behind each other.
+- **Server.** sulla starts the Dolt server with `bd dolt start` if it is not running, then starts
+  `bd serve` on a fixed per-repo port (20000 to 29999, derived from the repo path) and reads
+  through its loopback HTTP API instead of spawning `bd`. If a `bd serve` for the same `.beads`
+  already listens on that port, sulla reuses it. No config is needed. `bd serve` output goes to
+  `.sulla/bd-serve.log`.
+
+Over HTTP sulla reads the board (`bd list`, `bd ready`, and `bd blocked` when the bd build
+advertises `blocked.list`; bd 1.3.1 does not, so `bd blocked` still runs as a CLI call), bead
+details for `i` and `H`, comments and events, and writes claims, releases, label and note
+updates, priority, close and delete. `bd set-state` and `bd create` have no HTTP equivalent and
+stay CLI calls, as does anything a `bd serve` build does not list in `GET /v0/beads/context`. In
+server mode the CLI talks to the same server, so those calls take about 0.07s.
+
+HTTP writes do not run bd's mutation hooks. When `.beads/hooks/on_create`, `on_update` or
+`on_close` exists and is executable, sulla sends its writes through the CLI so the hooks keep
+firing. Agents always use the CLI. If `bd serve` cannot start or stops answering, sulla falls back
+to the CLI for every call and says why in the health panel.
+
+On exit sulla stops the `bd serve` it started (one it reused keeps running) and leaves the Dolt
+server running, since agents in other terminals and other tools may still use it. Stop it with
+`bd dolt stop`.
+
+sulla sets `DOLT_DISABLE_EVENT_FLUSH=1` for every `bd` it runs in server mode (including
+`bd dolt start` and `bd serve`), so a Dolt server it starts does not send Dolt's anonymous usage
+events. A server started elsewhere keeps its own setting.
+
+`sulla init` runs `bd init --server` when the repo has no beads database yet and `dolt` is on
+`PATH` (otherwise it offers an embedded one). It never migrates a database. For an embedded repo
+it prints these steps, which keep the full Dolt history. Stop sulla and every agent first:
+
+```sh
+bd backup init ../<prefix>-beads-backup && bd backup sync
+mv .beads .beads.embedded
+bd init --server -p <prefix>
+bd backup restore --force ../<prefix>-beads-backup
+bd list --all
+```
+
+Then carry over settings from `.beads.embedded/config.yaml` and delete `.beads.embedded` once
+everything is there.
+
 ## Board
 
 - The board refreshes every `poll_secs` (default 2). Git state (diff stats, conflicts, stacks) is
   reread every time, but with embedded Dolt the `bd list`, `bd ready` and `bd blocked` calls only
   run when the database manifest under `.beads/embeddeddolt` has changed since the last read,
   after sulla's own writes, and at least once a minute. Each `bd` call takes the embedded
-  database lock, so polling it constantly slowed down every other `bd` command. Other backends
-  are polled every time.
+  database lock, so polling it constantly slowed down every other `bd` command. A Dolt SQL server
+  is read every time, over `bd serve` (see [Beads database](#beads-database)).
 - Cards show time in state, the worktree diff stat (`+adds -dels Nf`) and the last line of agent
   output.
 - The card meta line shows dependencies by id: `stacked on <parent>` for a stacked bead (that
@@ -313,7 +362,9 @@ list say with what. Uncommitted changes are not checked.
   across columns. The status bar shows `CHAIN <id>` and column counts read `shown/total` while it
   is on. `L` again (or `Esc`) restores the normal board. It combines with the `/` filter.
 - `!` (or `:health`) opens a health panel: probes `bd`, the agent CLI, `kache` and `incus`
-  (including `incus query /1.0`), plus `gh` (including `gh auth status`) when `workflow = "pr"`,
-  shows the last bd poll error, and explains why nothing is
+  (including `incus query /1.0`), plus `gh` (including `gh auth status`) when `workflow = "pr"`.
+  In a server-mode repo it also checks the `dolt` binary, whether the Dolt server answers on its
+  port, and whether `bd serve` is up (started by sulla or reused, or why sulla fell back to the
+  CLI). It shows the last bd poll error, and explains why nothing is
   starting (paused, rate limited, slots full, failed starts, all blocked, backlog only, or nothing
   open). `r` rechecks.

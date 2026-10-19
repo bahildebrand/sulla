@@ -386,6 +386,7 @@ impl App {
             None => git.current_branch()?,
         };
         let beads = Beads::new(&repo);
+        beads.connect();
         let refresh = scheduler::spawn_poller(
             beads.clone(),
             git.clone(),
@@ -1158,7 +1159,12 @@ impl App {
                     .map(|b| agent::selection(b, self.cfg.agent).0),
             )
             .collect();
-        let mut probes = vec![Probe::new("bd", "bd")];
+        let mut probes = vec![
+            Probe::new("bd", "bd"),
+            Probe::new("dolt", "dolt")
+                .version(&["version"])
+                .off((!self.beads.server_mode()).then_some("not used (embedded database)")),
+        ];
         for kind in AgentKind::ALL.into_iter().filter(|k| used.contains(k)) {
             let bin = match kind {
                 AgentKind::Copilot => &self.cfg.copilot.bin,
@@ -1182,7 +1188,7 @@ impl App {
                 probes.push(graphite::probe());
             }
         }
-        health::spawn(probes, self.tx.clone());
+        health::spawn(probes, self.beads.clone(), self.tx.clone());
         self.mode = Mode::Health;
     }
 
@@ -3837,6 +3843,7 @@ impl App {
         self.deferred.clear();
         self.sandbox.shutdown();
         self.notifier.shutdown();
+        self.beads.shutdown();
     }
 }
 

@@ -4,6 +4,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use crate::app::Event;
+use crate::beads::Beads;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -27,6 +28,7 @@ pub struct Probe {
     pub name: String,
     pub bin: String,
     pub off: Option<String>,
+    pub version: Vec<String>,
     pub extra: Option<Vec<String>>,
 }
 
@@ -36,8 +38,14 @@ impl Probe {
             name: name.into(),
             bin: bin.into(),
             off: None,
+            version: vec!["--version".into()],
             extra: None,
         }
+    }
+
+    pub fn version(mut self, args: &[&str]) -> Self {
+        self.version = args.iter().map(|s| s.to_string()).collect();
+        self
     }
 
     pub fn off(mut self, why: Option<&str>) -> Self {
@@ -53,7 +61,7 @@ impl Probe {
     fn run(&self) -> Tool {
         let status = match &self.off {
             Some(why) => Status::Off(why.clone()),
-            None => match run(&self.bin, &["--version".to_string()]) {
+            None => match run(&self.bin, &self.version) {
                 Err(s) => s,
                 Ok(v) => match &self.extra {
                     Some(args) => match run(&self.bin, args) {
@@ -128,9 +136,14 @@ fn first_line(s: &str) -> Option<String> {
         .map(String::from)
 }
 
-pub fn spawn(probes: Vec<Probe>, tx: Sender<Event>) {
+pub fn spawn(probes: Vec<Probe>, beads: Beads, tx: Sender<Event>) {
     std::thread::spawn(move || {
-        let tools = probes.iter().map(Probe::run).collect();
+        let mut tools: Vec<Tool> = probes.iter().map(Probe::run).collect();
+        let at = tools
+            .iter()
+            .position(|t| t.name == "dolt")
+            .map_or(tools.len(), |i| i + 1);
+        tools.splice(at..at, beads.health());
         let _ = tx.send(Event::Health(tools));
     });
 }
@@ -164,6 +177,10 @@ mod tests {
             Probe::new("x", "true").also(&["x"]).run().status,
             Status::Ok(_)
         ));
+        assert_eq!(
+            Probe::new("x", "echo").version(&["v1"]).run().status,
+            Status::Ok("v1".into())
+        );
         assert!(matches!(
             Probe::new("x", "bash").also(&["-c", "echo nope >&2; exit 3"]).run().status,
             Status::Failed(m) if m.contains("nope")

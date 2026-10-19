@@ -12,12 +12,17 @@ cargo run -- -C /path/to/repo        # -C points sulla at another repo, like git
 cargo run -- --max-agents 5 --base main
 ```
 
-The repo must be a git repo with `bd init` already run in it. `sulla init` adds `.sulla/` to
+The repo must be a git repo. If it has no beads database yet, `sulla init` creates one, a Dolt
+SQL server by default (`bd init --server`), and for an existing embedded database it prints how to
+migrate without losing data (it never migrates on its own). It adds `.sulla/` to
 `.git/info/exclude`, then asks for the agent, model, max agents, base branch, workflow, sandbox, kache and check command.
 Press enter to keep the current value. Answers that match the global config are not pinned in
 the repo file, other keys already in `.sulla/config.toml` are kept.
 
-Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
+Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`, plus `dolt` for a
+server-mode beads database. In server mode sulla starts the Dolt server and `bd serve` and reads
+beads over HTTP instead of spawning `bd` for every call, see
+[DOCS.md](DOCS.md#beads-database).
 
 ## How it works
 
@@ -199,6 +204,13 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
   first use and reused across beads. The repo is bind-mounted at the same absolute path, along
   with each `mounts` entry, so worktrees, `.beads` and agent logins work unchanged. Agents run
   the real `bd` inside the container against the shared `.beads`.
+- With a server-mode beads database, each slot gets an Incus proxy device (`beads-dolt`) that
+  listens on the container's `127.0.0.1:<dolt port>` and forwards to the host's Dolt server on
+  `127.0.0.1`, so `bd` in the container uses the port in `.beads/dolt-server.port` unchanged.
+  The server stays bound to the host's loopback, so it is not reachable on the Incus bridge or
+  beyond. sulla also sets `BEADS_DOLT_AUTO_START=0` in the container, so `bd` there never starts
+  a second server over the shared data directory. The device is checked before every bead and
+  updated if the server's port changed.
 - Each slot keeps a persistent Docker volume at `/var/lib/docker`, so pulled images and build
   cache survive resets.
 - Light reset after every merged, discarded or killed bead: remove all Docker containers and

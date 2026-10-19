@@ -1,10 +1,18 @@
+mod serve;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use color_eyre::{Result, eyre::bail};
 use serde::Deserialize;
+use serde_json::json;
+
+use crate::health::{Status as Health, Tool};
+use serve::{Fail, Http, Server, Status as ServeStatus};
+pub use serve::{NO_TELEMETRY, dolt_port, server_mode};
 
 pub const ACTOR: &str = "sulla";
 const STATE_DIM: &str = "sulla";
@@ -68,12 +76,17 @@ fn parse_comments(json: &str) -> Result<Vec<Comment>> {
     Ok(serde_json::from_str(json)?)
 }
 
-fn newest_comment(json: &str) -> Result<Option<String>> {
-    Ok(parse_comments(json)?
+fn newest(comments: Vec<Comment>) -> Option<String> {
+    comments
         .into_iter()
         .enumerate()
         .max_by_key(|(i, c)| (c.created_at, *i))
-        .map(|(_, c)| c.text))
+        .map(|(_, c)| c.text)
+}
+
+#[cfg(test)]
+fn newest_comment(json: &str) -> Result<Option<String>> {
+    Ok(newest(parse_comments(json)?))
 }
 
 fn stamp_state_changes(all: &mut [Bead]) {
@@ -229,23 +242,117 @@ impl Bead {
     }
 }
 
+const MUTATION_HOOKS: [&str; 3] = ["on_create", "on_update", "on_close"];
+const READY_EXCLUDES: [&str; 3] = ["sulla:held", "sulla:backlog", "sulla:pr"];
+
 #[derive(Debug, Clone)]
 pub struct Beads {
     repo: PathBuf,
+    server: Arc<Server>,
 }
 
 impl Beads {
     pub fn new(repo: &Path) -> Self {
         Self {
             repo: repo.to_path_buf(),
+            server: Arc::new(Server::new(server_mode(repo))),
         }
     }
 
+    pub fn server_mode(&self) -> bool {
+        self.server.mode
+    }
+
+    pub fn connect(&self) {
+        if !self.server.mode {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || me.server.start(&me.repo));
+    }
+
+    pub fn shutdown(&self) {
+        self.server.stop();
+    }
+
+    pub fn health(&self) -> Vec<Tool> {
+        if !self.server.mode {
+            return Vec::new();
+        }
+        let tool = |name: &str, bin: &str, status| Tool {
+            name: name.into(),
+            bin: bin.into(),
+            status,
+        };
+        let sql = match dolt_port(&self.repo) {
+            Some(p) if serve::listening(p) => Health::Ok(format!("running on 127.0.0.1:{p}")),
+            Some(p) => Health::Failed(format!(
+                "not answering on 127.0.0.1:{p}, start it with `bd dolt start`"
+            )),
+            None => Health::Failed("not running, start it with `bd dolt start`".into()),
+        };
+        let serve = match self.server.status() {
+            ServeStatus::Ready { url, .. } if !self.server.live() => {
+                Health::Failed(format!("{url} stopped answering, using the bd CLI"))
+            }
+            ServeStatus::Ready { url, ours } => Health::Ok(format!(
+                "{url} ({})",
+                if ours {
+                    "started by sulla"
+                } else {
+                    "already running"
+                }
+            )),
+            ServeStatus::Starting => Health::Off("starting".into()),
+            ServeStatus::Failed(e) => Health::Failed(format!(
+                "{e}, using the bd CLI (log: {})",
+                serve::log_path(&self.repo).display()
+            )),
+            ServeStatus::Embedded => Health::Off("not used (embedded database)".into()),
+        };
+        vec![tool("dolt sql", "dolt", sql), tool("bd serve", "bd", serve)]
+    }
+
+    fn http(&self, cap: &str) -> Option<&Http> {
+        self.server.http().filter(|h| h.can(cap))
+    }
+
+    fn http_write(&self, cap: &str) -> Option<&Http> {
+        self.http(cap).filter(|_| !self.has_mutation_hooks())
+    }
+
+    fn has_mutation_hooks(&self) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = self.repo.join(".beads").join("hooks");
+        MUTATION_HOOKS.iter().any(|h| {
+            std::fs::metadata(dir.join(h))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    }
+
+    fn via<T>(
+        &self,
+        http: Option<&Http>,
+        call: impl FnOnce(&Http) -> Result<T, Fail>,
+        cli: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        if let Some(h) = http {
+            match call(h) {
+                Ok(v) => return Ok(v),
+                Err(Fail::Err(e)) => return Err(e),
+                Err(Fail::Down(e)) => self.server.down(&e),
+            }
+        }
+        cli()
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("bd")
-            .args(args)
-            .current_dir(&self.repo)
-            .output()?;
+        let mut cmd = Command::new("bd");
+        cmd.args(args).current_dir(&self.repo);
+        if self.server.mode {
+            cmd.env(serve::NO_TELEMETRY.0, serve::NO_TELEMETRY.1);
+        }
+        let out = cmd.output()?;
         if !out.status.success() {
             bail!(
                 "bd {}: {}",
@@ -283,74 +390,123 @@ impl Beads {
     }
 
     pub fn list_all(&self) -> Result<Vec<Bead>> {
-        let mut all = self.json(&["list", "--all", "--json", "-n", "0"])?;
+        let mut all = self.via(
+            self.http("issues.list"),
+            |h| h.list(None),
+            || self.json(&["list", "--all", "--json", "-n", "0"]),
+        )?;
         stamp_state_changes(&mut all);
         Ok(all.into_iter().filter(Bead::is_work).collect())
     }
 
     pub fn ready(&self) -> Result<Vec<Bead>> {
-        Ok(self
-            .json(&[
-                "ready",
-                "--json",
-                "-n",
-                "0",
-                "--exclude-label",
-                "sulla:held",
-                "--exclude-label",
-                "sulla:backlog",
-                "--exclude-label",
-                "sulla:pr",
-            ])?
+        let ready = self.via(
+            self.http("ready.list"),
+            |h| h.ready(&READY_EXCLUDES),
+            || {
+                let mut args = vec!["ready", "--json", "-n", "0"];
+                for l in READY_EXCLUDES {
+                    args.extend(["--exclude-label", l]);
+                }
+                self.json(&args)
+            },
+        )?;
+        Ok(ready
             .into_iter()
             .filter(|b| b.is_work() && b.issue_type != "epic")
             .collect())
     }
 
     pub fn blocked(&self) -> Result<HashMap<String, Vec<String>>> {
-        let out = self.run(&["blocked", "--json"])?;
-        if out.trim().is_empty() {
-            return Ok(HashMap::new());
-        }
-        let list: Vec<Blocked> = serde_json::from_str(&out)?;
+        let list = self.via(
+            self.http("blocked.list"),
+            |h| h.blocked(),
+            || {
+                let out = self.run(&["blocked", "--json"])?;
+                if out.trim().is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(serde_json::from_str::<Vec<Blocked>>(&out)?)
+            },
+        )?;
         Ok(list.into_iter().map(|b| (b.id, b.blocked_by)).collect())
     }
 
     pub fn show(&self, id: &str) -> Result<Bead> {
-        match self.json(&["show", id, "--json"])?.into_iter().next() {
-            Some(b) => Ok(b),
-            None => bail!("bead {id} not found"),
-        }
+        self.via(
+            self.http("issues.get"),
+            |h| h.show(id),
+            || match self.json(&["show", id, "--json"])?.into_iter().next() {
+                Some(b) => Ok(b),
+                None => bail!("bead {id} not found"),
+            },
+        )
     }
 
     pub fn show_text(&self, id: &str) -> Result<String> {
-        self.run(&["show", id])
+        self.via(
+            self.http("issues.get"),
+            |h| h.detail(id).map(|d| serve::render(&d)),
+            || self.run(&["show", id]),
+        )
     }
 
     pub fn comments(&self, id: &str) -> Result<Vec<Comment>> {
-        parse_comments(&self.run(&["comments", id, "--json"])?)
+        self.via(
+            self.http("issues.get"),
+            |h| h.comments(id),
+            || parse_comments(&self.run(&["comments", id, "--json"])?),
+        )
     }
 
     pub fn events(&self, id: &str) -> Result<Vec<Bead>> {
         Ok(self
-            .json(&["list", "--parent", id, "--all", "--json", "-n", "0"])?
+            .via(
+                self.http("issues.list"),
+                |h| h.list(Some(id)),
+                || self.json(&["list", "--parent", id, "--all", "--json", "-n", "0"]),
+            )?
             .into_iter()
             .filter(|b| b.issue_type == "event")
             .collect())
     }
 
     pub fn latest_comment(&self, id: &str) -> Result<Option<String>> {
-        newest_comment(&self.run(&["comments", id, "--json"])?)
+        Ok(newest(self.comments(id)?))
     }
 
     pub fn claim(&self, id: &str) -> Result<()> {
-        self.run(&["update", id, "--claim", "--actor", ACTOR])
-            .map(drop)
+        self.via(
+            self.http_write("issues.claim"),
+            |h| h.claim(id),
+            || {
+                self.run(&["update", id, "--claim", "--actor", ACTOR])
+                    .map(drop)
+            },
+        )
     }
 
     pub fn unclaim(&self, id: &str) -> Result<()> {
-        self.run(&["unclaim", id, "--force", "--actor", ACTOR])
-            .map(drop)
+        self.via(
+            self.http_write("issues.release"),
+            |h| h.release(id),
+            || {
+                self.run(&["unclaim", id, "--force", "--actor", ACTOR])
+                    .map(drop)
+            },
+        )
+    }
+
+    fn update(&self, id: &str, patch: serde_json::Value, args: &[&str]) -> Result<()> {
+        self.via(
+            self.http_write("issues.update"),
+            |h| h.update(id, patch),
+            || {
+                let mut all = vec!["update", id];
+                all.extend_from_slice(args);
+                self.run(&all).map(drop)
+            },
+        )
     }
 
     pub fn set_state(&self, id: &str, state: State) -> Result<()> {
@@ -373,43 +529,68 @@ impl Beads {
         if labels.is_empty() {
             return Ok(());
         }
-        let mut args = vec!["update", bead.id.as_str()];
-        for l in labels {
+        let mut args = Vec::new();
+        for l in &labels {
             args.extend(["--remove-label", l]);
         }
-        self.run(&args).map(drop)
+        self.update(&bead.id, json!({"remove_labels": labels}), &args)
     }
 
     pub fn add_label(&self, id: &str, label: &str) -> Result<()> {
-        self.run(&["update", id, "--add-label", label]).map(drop)
+        self.update(id, json!({"add_labels": [label]}), &["--add-label", label])
     }
 
     pub fn remove_label(&self, id: &str, label: &str) -> Result<()> {
-        self.run(&["update", id, "--remove-label", label]).map(drop)
+        self.update(
+            id,
+            json!({"remove_labels": [label]}),
+            &["--remove-label", label],
+        )
     }
 
     pub fn append_notes(&self, id: &str, text: &str) -> Result<()> {
-        self.run(&["update", id, "--append-notes", text]).map(drop)
+        self.update(id, json!({"append_notes": text}), &["--append-notes", text])
     }
 
     pub fn set_priority(&self, id: &str, priority: u8) -> Result<()> {
-        self.run(&["update", id, "-p", &priority.to_string()])
-            .map(drop)
+        self.update(
+            id,
+            json!({"priority": priority}),
+            &["-p", &priority.to_string()],
+        )
     }
 
     pub fn close(&self, id: &str, reason: &str) -> Result<()> {
-        self.run(&["close", id, "-r", reason, "--actor", ACTOR])
-            .map(drop)
+        self.via(
+            self.http_write("issues.close"),
+            |h| h.close(id, reason, false),
+            || {
+                self.run(&["close", id, "-r", reason, "--actor", ACTOR])
+                    .map(drop)
+            },
+        )
     }
 
     pub fn force_close(&self, id: &str, reason: &str) -> Result<()> {
-        self.run(&["close", id, "-r", reason, "--force", "--actor", ACTOR])
-            .map(drop)
+        self.via(
+            self.http_write("issues.close"),
+            |h| h.close(id, reason, true),
+            || {
+                self.run(&["close", id, "-r", reason, "--force", "--actor", ACTOR])
+                    .map(drop)
+            },
+        )
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        self.run(&["delete", id, "--force", "--actor", ACTOR])
-            .map(drop)
+        self.via(
+            self.http_write("issues.delete"),
+            |h| h.delete(id),
+            || {
+                self.run(&["delete", id, "--force", "--actor", ACTOR])
+                    .map(drop)
+            },
+        )
     }
 
     pub fn open_blockers(&self, id: &str) -> Result<Vec<String>> {
