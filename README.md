@@ -6,9 +6,15 @@ queue. See [DESIGN.md](DESIGN.md) for the why.
 ## Running
 
 ```sh
-cargo run -- -C /path/to/repo        # repo must have `bd init` run in it
+cargo run -- init -C /path/to/repo   # set up git, beads and .sulla/config.toml
+cargo run -- -C /path/to/repo
 cargo run -- --max-agents 5 --base main
 ```
+
+`sulla init` runs `git init` and `bd init` if needed, adds `.sulla/` to `.git/info/exclude`, then
+asks for the agent, model, max agents, base branch, workflow, sandbox, kache and check command.
+Press enter to keep the current value. Answers that match the global config are not pinned in
+the repo file, other keys already in `.sulla/config.toml` are kept.
 
 Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 

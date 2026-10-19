@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub max_agents: usize,
@@ -26,14 +26,14 @@ pub struct Config {
     pub presets: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudgetConfig {
     pub minutes: u64,
     pub tokens: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Workflow {
     #[default]
@@ -41,7 +41,7 @@ pub enum Workflow {
     Pr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrConfig {
     pub remote: String,
@@ -65,7 +65,7 @@ impl Default for PrConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StallConfig {
     pub minutes: u64,
@@ -81,7 +81,7 @@ impl Default for StallConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotifyMethod {
     Bell,
@@ -89,7 +89,7 @@ pub enum NotifyMethod {
     Tmux,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Trigger {
     Review,
@@ -99,7 +99,7 @@ pub enum Trigger {
     Pr,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotifyConfig {
     pub methods: Vec<NotifyMethod>,
@@ -127,7 +127,7 @@ impl Default for NotifyConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxKind {
     #[default]
@@ -135,7 +135,7 @@ pub enum SandboxKind {
     Incus,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IncusConfig {
     pub bin: String,
@@ -171,7 +171,7 @@ impl Default for IncusConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     #[default]
@@ -196,7 +196,7 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClaudeConfig {
     pub bin: String,
@@ -204,7 +204,7 @@ pub struct ClaudeConfig {
     pub extra_args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CopilotConfig {
     pub bin: String,
@@ -281,7 +281,7 @@ impl Config {
     }
 }
 
-fn merge(base: &mut toml::Table, over: toml::Table) {
+pub fn merge(base: &mut toml::Table, over: toml::Table) {
     for (k, v) in over {
         match (base.get_mut(&k), v) {
             (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),

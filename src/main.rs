@@ -8,6 +8,7 @@ mod conflicts;
 mod filter;
 mod git;
 mod health;
+mod init;
 mod notify;
 mod pr;
 mod presets;
@@ -26,7 +27,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_eyre::{Result, eyre::WrapErr};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -50,6 +51,14 @@ struct Args {
     max_agents: Option<usize>,
     #[arg(long)]
     base: Option<String>,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Set up the repo for sulla and write .sulla/config.toml
+    Init,
 }
 
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -73,6 +82,9 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
+    if let Some(Cmd::Init) = args.cmd {
+        return init::run(&args.repo);
+    }
     let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
     let mut cfg = Config::load(&repo).wrap_err("loading config")?;
     if let Some(n) = args.max_agents {
@@ -83,7 +95,7 @@ fn main() -> Result<()> {
     }
     beads::Beads::new(&repo)
         .list_all()
-        .wrap_err("bd is not usable here, run `bd init` in the repo")?;
+        .wrap_err("bd is not usable here, run `sulla init` in the repo")?;
     let _guard = init_logging()?;
 
     let (tx, rx) = channel();
