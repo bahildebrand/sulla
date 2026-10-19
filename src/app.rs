@@ -927,12 +927,10 @@ impl App {
                 self.watch_usage();
                 self.reconcile();
                 for id in &finished {
-                    self.collect_ai_review(id);
+                    self.collect_ai_review(id, entered.contains(id));
                 }
                 for id in entered {
-                    if finished.contains(&id)
-                        && self.ai_reviews.get(&id).is_some_and(|r| r.forwarded)
-                    {
+                    if finished.contains(&id) {
                         continue;
                     }
                     if let Some(title) = self.bead(&id).map(|b| b.title.clone()) {
@@ -1002,7 +1000,7 @@ impl App {
     fn reconcile(&mut self) {
         self.reap_reviewers();
         self.sweep_stacks();
-        let known: HashSet<String> = self.agents.keys().cloned().collect();
+        let known: HashSet<String> = self.agents.keys().chain(&self.starting).cloned().collect();
         let mut orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()
             .filter(|b| !self.failed.contains(&b.id))
@@ -1031,11 +1029,13 @@ impl App {
                     continue;
                 }
                 tracing::info!("resuming orphaned agent {}", b.id);
-                let r = self.start_agent(&b, true, None);
-                if self.report(r).is_none() {
-                    self.failed.insert(b.id.clone());
-                }
-                self.rebuilt_status();
+                let id = b.id.clone();
+                self.start_agent(b, true, None, move |app, r| {
+                    if app.report(r).is_none() {
+                        app.failed.insert(id);
+                    }
+                    app.rebuilt_status();
+                });
             } else {
                 tracing::info!("resetting orphaned bead {}", b.id);
                 self.edit_local(&b.id, |b| {
@@ -1232,11 +1232,14 @@ impl App {
             self.status = format!("revising {id} from PR feedback");
             self.rebuilt_status();
         } else {
-            self.failed.insert(id.clone());
-            let r = self.beads.set_state(&id, State::Revise);
-            self.report(r);
+            self.revision_failed(id);
         }
-        self.mutated();
+    }
+
+    fn revision_failed(&mut self, id: String) {
+        self.failed.insert(id.clone());
+        self.edit_local(&id, |b| b.set_state_label(Some(State::Revise)));
+        self.bd_run(move |beads| beads.set_state(&id, State::Revise));
     }
 
     fn start_revision(&mut self, bead: &Bead) -> Result<()> {
@@ -1265,13 +1268,23 @@ impl App {
         );
         self.git.mark_revision(id)?;
         self.budget_runs.remove(id);
-        self.beads
-            .set_state_because(id, State::Running, "revising PR feedback")?;
+        self.edit_local(id, |b| b.set_state_label(Some(State::Running)));
+        let bead_id = id.to_string();
+        self.bd_run(move |beads| {
+            beads.set_state_because(&bead_id, State::Running, "revising PR feedback")
+        });
         match self.agents.get_mut(id) {
             Some(a) if a.alive => a.send_prompt(&text),
             _ => {
                 self.remove_agent(id, Outcome::Exited);
-                self.start_agent(bead, true, Some(text))?;
+                let rid = id.to_string();
+                self.start_agent(bead.clone(), true, Some(text), move |app, r| {
+                    if app.report(r).is_some() {
+                        app.rebuilt_status();
+                    } else {
+                        app.revision_failed(rid);
+                    }
+                });
             }
         }
         self.pr_watch
@@ -1341,9 +1354,51 @@ impl App {
             .map(String::from)
     }
 
-    fn start_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
-        let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
-        self.launch_agent(&bead, resume, prompt)
+    fn start_agent(
+        &mut self,
+        bead: Bead,
+        resume: bool,
+        prompt: Option<String>,
+        done: impl FnOnce(&mut App, Result<()>) + Send + 'static,
+    ) {
+        let id = bead.id.clone();
+        let was = self.bead(&id).and_then(Bead::state);
+        self.starting.insert(id.clone());
+        self.bd(
+            move |beads| Ok(beads.show(&bead.id).unwrap_or(bead)),
+            move |app, r| {
+                app.starting.remove(&id);
+                let r = r.and_then(|b| {
+                    let stopped = app.bead(&id).is_none_or(|b| {
+                        let now = b.state();
+                        b.status == "closed"
+                            || (now != was && matches!(now, Some(State::Held | State::Backlog)))
+                    });
+                    if stopped {
+                        bail!("{id} was stopped before its agent started");
+                    }
+                    app.launch_or_prompt(&b, resume, prompt)
+                });
+                done(app, r);
+            },
+        );
+    }
+
+    fn launch_or_prompt(
+        &mut self,
+        bead: &Bead,
+        resume: bool,
+        prompt: Option<String>,
+    ) -> Result<()> {
+        match self.agents.get_mut(&bead.id) {
+            Some(a) if a.alive => {
+                if let Some(p) = prompt {
+                    a.send_prompt(&p);
+                }
+                Ok(())
+            }
+            _ => self.launch_agent(bead, resume, prompt),
+        }
     }
 
     fn launch_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
@@ -1473,11 +1528,8 @@ impl App {
         let Some(b) = self.bead(id).cloned() else {
             return;
         };
-        if self
-            .agents
-            .get(&agent::review_id(id))
-            .is_some_and(|a| a.alive)
-        {
+        let rid = agent::review_id(id);
+        if self.agents.get(&rid).is_some_and(|a| a.alive) || self.starting.contains(&rid) {
             self.status = format!("reviewer for {id} is already running");
             return;
         }
@@ -1489,11 +1541,26 @@ impl App {
             self.status = format!("all {} agent slots are busy", self.cfg.max_agents);
             return;
         }
-        let r = self.launch_review(&b);
-        if self.report(r).is_some() {
-            self.status = format!("ai review of {id} started (p to watch)");
-        }
-        self.mutated();
+        self.status = format!("starting ai review of {id}...");
+        self.starting.insert(rid.clone());
+        let id = id.to_string();
+        self.bd(
+            move |beads| Ok(beads.show(&b.id).unwrap_or(b)),
+            move |app, r| {
+                app.starting.remove(&rid);
+                if !app
+                    .bead(&id)
+                    .is_some_and(|b| b.state() == Some(State::Review))
+                {
+                    app.status = format!("{id} left review, ai review not started");
+                    return;
+                }
+                let r = r.and_then(|b| app.launch_review(&b));
+                if app.report(r).is_some() {
+                    app.status = format!("ai review of {id} started (p to watch)");
+                }
+            },
+        );
     }
 
     fn launch_review(&mut self, bead: &Bead) -> Result<()> {
@@ -1505,12 +1572,11 @@ impl App {
         self.remove_agent(&rid, Outcome::Killed);
         self.ai_reviews.remove(&bead.id);
         self.inject_ai(&bead.id);
-        let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
         let slot = self
             .slots
             .acquire_with(&rid, &bead.id, self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {rid}"))?;
-        let (kind, model) = agent::selection(&bead, self.cfg.agent);
+        let (kind, model) = agent::selection(bead, self.cfg.agent);
         let launch = Launch {
             session: agent::session_id(&self.repo, &rid),
             id: rid.clone(),
@@ -1518,25 +1584,40 @@ impl App {
             worktree,
             resume: false,
             prompt: Some(agent::with_system(
-                agent::review_prompt(&bead, &self.git.upstream(&bead.id, &self.base)),
+                agent::review_prompt(bead, &self.git.upstream(&bead.id, &self.base)),
                 self.cfg.system_prompt.as_deref(),
             )),
             model,
         };
-        let r = self
-            .beads
-            .set_state(&bead.id, State::Reviewing)
-            .and_then(|_| self.spawn_sandboxed(slot, launch, kind));
-        if let Err(e) = r {
+        if let Err(e) = self.spawn_sandboxed(slot, launch, kind) {
             self.slots.release(&rid);
-            let _ = self.beads.set_state(&bead.id, State::Review);
             return Err(e);
         }
+        self.edit_local(&bead.id, |b| b.set_state_label(Some(State::Reviewing)));
+        let id = bead.id.clone();
+        self.bd_run(move |beads| beads.set_state(&id, State::Reviewing));
         Ok(())
     }
 
-    fn collect_ai_review(&mut self, id: &str) {
-        let text = match self.beads.latest_comment(id) {
+    fn collect_ai_review(&mut self, id: &str, notify: bool) {
+        let bead = id.to_string();
+        let id = id.to_string();
+        self.bd(
+            move |beads| beads.latest_comment(&bead),
+            move |app, r| {
+                app.apply_ai_review(&id, r);
+                if notify
+                    && !app.ai_reviews.get(&id).is_some_and(|r| r.forwarded)
+                    && let Some(title) = app.bead(&id).map(|b| b.title.clone())
+                {
+                    app.notify(Trigger::Review, &id, &title);
+                }
+            },
+        );
+    }
+
+    fn apply_ai_review(&mut self, id: &str, comment: Result<Option<String>>) {
+        let text = match comment {
             Ok(Some(t)) => t,
             Ok(None) => {
                 self.status = format!("ai review of {id}: no comment found, left in review");
@@ -1575,7 +1656,6 @@ impl App {
             Some(json) => {
                 self.deliver(id, &json);
                 self.status = format!("ai review of {id}: {n} comment(s) sent to agent");
-                self.mutated();
             }
             None if out.verdict == Verdict::Approve => {
                 self.status = format!("ai review of {id}: approved, {n} comment(s)");
@@ -2105,8 +2185,8 @@ impl App {
         }
         let notes = pr::notes(number, &activity);
         if !notes.is_empty() {
-            let r = self.beads.append_notes(id, &notes);
-            self.report(r);
+            let bead = id.to_string();
+            self.bd_run(move |beads| beads.append_notes(&bead, &notes));
         }
         let mut what = Vec::new();
         if activity.closed {
@@ -2122,13 +2202,12 @@ impl App {
         }
         if queued {
             if self.cfg.pr.auto_revise {
-                let r = self
-                    .beads
-                    .set_state_because(id, State::Revise, "PR feedback");
-                if self.report(r).is_some() {
-                    what.push("queued for revision".into());
-                }
-                self.mutated();
+                self.edit_local(id, |b| b.set_state_label(Some(State::Revise)));
+                let bead = id.to_string();
+                self.bd_run(move |beads| {
+                    beads.set_state_because(&bead, State::Revise, "PR feedback")
+                });
+                what.push("queued for revision".into());
             } else {
                 what.push("U revises".into());
             }
@@ -3159,16 +3238,15 @@ impl App {
         self.ai_reviews.remove(id);
         self.deliver(id, text);
         self.status = format!("feedback sent to {id}");
-        self.rebuilt_status();
         self.parked_review = None;
         self.view = View::Progress(id.to_string());
-        self.mutated();
     }
 
     fn deliver(&mut self, id: &str, text: &str) {
         self.budget_runs.remove(id);
-        let r = self.beads.set_state(id, State::Running);
-        self.report(r);
+        self.edit_local(id, |b| b.set_state_label(Some(State::Running)));
+        let bead = id.to_string();
+        self.bd_run(move |beads| beads.set_state(&bead, State::Running));
         match self.agents.get_mut(id) {
             Some(a) if a.alive => {
                 a.send_prompt(text);
@@ -3176,8 +3254,11 @@ impl App {
             _ => {
                 self.remove_agent(id, Outcome::Exited);
                 if let Some(b) = self.bead(id).cloned() {
-                    let r = self.start_agent(&b, true, Some(text.to_string()));
-                    self.report(r);
+                    self.start_agent(b, true, Some(text.to_string()), |app, r| {
+                        if app.report(r).is_some() {
+                            app.rebuilt_status();
+                        }
+                    });
                 }
             }
         }
@@ -3185,6 +3266,10 @@ impl App {
 
     fn relaunch(&mut self, id: &str) {
         if self.agents.get(id).is_some_and(|a| a.alive) {
+            return;
+        }
+        if self.starting.contains(id) {
+            self.status = format!("{id} is already starting");
             return;
         }
         if agent::reviewed_bead(id).is_some() || self.reviewing(id) {
@@ -3209,24 +3294,28 @@ impl App {
         {
             let by = by.join(", ");
             if matches!(b.state(), Some(State::Held | State::Backlog)) {
-                let r = self.beads.clear_state(&b);
-                self.report(r);
-                self.mutated();
+                self.edit_local(id, |b| b.set_state_label(None));
+                self.bd_run(move |beads| beads.clear_state(&b));
             }
             self.status = format!("{id} is blocked by {by}, queued in Pending");
             return;
         }
-        let r = self.start_agent(&b, resume, None);
-        if self.report(r).is_some() {
-            self.failed.remove(id);
-            if !matches!(b.state(), Some(State::Review | State::Pr)) {
-                let r = self.beads.set_state(id, State::Running);
-                self.report(r);
+        let run = !matches!(b.state(), Some(State::Review | State::Pr));
+        self.status = format!("launching {id}...");
+        let id = id.to_string();
+        self.start_agent(b, resume, None, move |app, r| {
+            if app.report(r).is_none() {
+                return;
             }
-            self.status = format!("launched {id}");
-            self.rebuilt_status();
-            self.mutated();
-        }
+            app.failed.remove(&id);
+            if run {
+                app.edit_local(&id, |b| b.set_state_label(Some(State::Running)));
+                let bead = id.clone();
+                app.bd_run(move |beads| beads.set_state(&bead, State::Running));
+            }
+            app.status = format!("launched {id}");
+            app.rebuilt_status();
+        });
     }
 
     fn open_progress(&mut self, id: String) {
