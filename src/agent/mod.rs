@@ -17,7 +17,7 @@ pub use copilot::Copilot;
 
 use crate::app::Event;
 use crate::beads::Bead;
-use crate::config::StallConfig;
+use crate::config::{AgentKind, StallConfig};
 
 pub const CHAT_ID: &str = "@chat";
 const REVIEW_SUFFIX: &str = "~review";
@@ -36,6 +36,7 @@ pub struct Launch {
     pub worktree: PathBuf,
     pub resume: bool,
     pub prompt: Option<String>,
+    pub model: Option<String>,
 }
 
 pub trait Backend: Send + Sync {
@@ -43,13 +44,27 @@ pub trait Backend: Send + Sync {
     fn command(&self, launch: &Launch) -> CommandBuilder;
 }
 
-pub fn task_prompt(bead: &Bead, parent: Option<&str>) -> String {
+pub fn selection(bead: &Bead, default: AgentKind) -> (AgentKind, Option<String>) {
+    let kind = match bead.label("agent") {
+        Some(v) => AgentKind::parse(v).unwrap_or_else(|| {
+            tracing::warn!("{}: unknown agent {v}, using {}", bead.id, default.name());
+            default
+        }),
+        None => default,
+    };
+    (kind, bead.label("model").map(String::from))
+}
+
+pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str)>) -> String {
     let id = &bead.id;
     let mut desc = if bead.description.trim().is_empty() {
         String::new()
     } else {
         format!("\n\n{}", bead.description.trim())
     };
+    if let Some((name, text)) = preset {
+        desc.push_str(&format!("\n\nApproach ({name}): {text}"));
+    }
     let notes = if bead.notes.trim().is_empty() {
         String::new()
     } else {
@@ -838,10 +853,34 @@ mod tests {
     fn task_prompt_includes_notes_only_when_present() {
         let mut b: Bead =
             serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
-        assert!(!task_prompt(&b, None).contains("Notes"));
+        assert!(!task_prompt(&b, None, None).contains("Notes"));
         b.notes = "Retry after discarded attempt: broke the build".into();
-        let p = task_prompt(&b, None);
+        let p = task_prompt(&b, None, None);
         assert!(p.contains("Notes"));
         assert!(p.contains("broke the build"));
+    }
+
+    #[test]
+    fn task_prompt_includes_preset() {
+        let b: Bead = serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
+        let p = task_prompt(&b, None, Some(("bugfix", "reproduce first")));
+        assert!(p.contains("Approach (bugfix): reproduce first"));
+    }
+
+    #[test]
+    fn selection_reads_agent_and_model_labels() {
+        let b: Bead = serde_json::from_str(
+            r#"{"id":"x-1","title":"t","status":"open","labels":["agent:Claude","model:opus"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            selection(&b, AgentKind::Copilot),
+            (AgentKind::Claude, Some("opus".into()))
+        );
+        let b: Bead = serde_json::from_str(
+            r#"{"id":"x-1","title":"t","status":"open","labels":["agent:nope"]}"#,
+        )
+        .unwrap();
+        assert_eq!(selection(&b, AgentKind::Claude), (AgentKind::Claude, None));
     }
 }

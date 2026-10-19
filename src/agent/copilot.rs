@@ -15,7 +15,7 @@ impl Backend for Copilot {
     fn command(&self, launch: &Launch) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(&self.cfg.bin);
         cmd.arg("--yolo");
-        if let Some(m) = &self.cfg.model {
+        if let Some(m) = launch.model.as_ref().or(self.cfg.model.as_ref()) {
             cmd.args(["--model", m]);
         }
         cmd.args(&self.cfg.extra_args);

@@ -84,6 +84,12 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
 - Retrying (`F`) discards the same way but asks why the last attempt failed, appends that to the bead's notes, and returns the bead to Pending. The agent prompt includes the bead's notes, so the next attempt sees every retry note.
 - Killing an agent holds its bead in Pending until released with `s`.
+- A bead picks its agent with an `agent:copilot` or `agent:claude` label and its model with
+  `model:<name>`, overriding `agent` and the backend's `model` from config. Its AI reviewer uses
+  the same agent and model. Without labels the config defaults apply.
+- A `preset:<name>` label adds approach guidance to the agent prompt. Built-in presets are
+  `bugfix`, `feature`, `refactor`, `tests` and `docs`; `[presets]` in config overrides them or
+  adds new ones. The `n` popup sets the agent and preset labels for you.
 - `[budget]` caps each agent run in minutes and/or tokens (input + output, as on the card). A
   bead overrides it with labels `budget:minutes=45` or `budget:tokens=500k` (`k`/`M` suffixes,
   `0` = unlimited). The clock and token count start when the bead enters running and restart
@@ -175,6 +181,9 @@ prompts = ["Do you want to", "No, and tell"] # screen text meaning a permission/
 [budget]
 minutes = 0               # max minutes per agent run, 0 = unlimited
 tokens = 0                # max input + output tokens per agent run, 0 = unlimited
+
+[presets]                 # prompt guidance picked per bead with a preset:<name> label
+perf = "This is a performance change. Measure before and after and report the numbers."
 ```
 
 Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).

@@ -205,6 +205,7 @@ mod tests {
             worktree: "/tmp/wt".into(),
             resume: false,
             prompt: None,
+            model: None,
         };
         let mut cmd = CommandBuilder::new("copilot");
         cmd.args(["--resume", "s", "-i", "hi there"]);

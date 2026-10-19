@@ -254,7 +254,7 @@ impl Locator {
     }
 }
 
-pub type Watch = Vec<(String, Vec<String>)>;
+pub type Watch = Vec<(String, AgentKind, Vec<String>)>;
 
 pub struct Report {
     pub per_key: HashMap<String, Usage>,
@@ -262,7 +262,6 @@ pub struct Report {
 }
 
 struct Tracker {
-    kind: AgentKind,
     locator: Locator,
     sessions: HashMap<String, Transcript>,
     baseline: HashMap<String, Usage>,
@@ -272,11 +271,11 @@ impl Tracker {
     fn scan(&mut self, watch: &Watch) -> Report {
         let mut per_key = HashMap::new();
         let mut run = Usage::default();
-        for (key, sessions) in watch {
+        for (key, kind, sessions) in watch {
             let mut total = Usage::default();
             for s in sessions {
                 let t = self.sessions.entry(s.clone()).or_default();
-                t.poll(self.kind, || self.locator.find(self.kind, s));
+                t.poll(*kind, || self.locator.find(*kind, s));
                 let now = t.usage();
                 let base = *self.baseline.entry(s.clone()).or_insert(now);
                 run += now.minus(base);
@@ -290,11 +289,10 @@ impl Tracker {
     }
 }
 
-pub fn spawn(kind: AgentKind, every: Duration, tx: Sender<Event>) -> Sender<Watch> {
+pub fn spawn(every: Duration, tx: Sender<Event>) -> Sender<Watch> {
     let (watch_tx, watch_rx): (Sender<Watch>, Receiver<Watch>) = channel();
     std::thread::spawn(move || {
         let mut tracker = Tracker {
-            kind,
             locator: Locator::from_env(),
             sessions: HashMap::new(),
             baseline: HashMap::new(),
@@ -406,7 +404,6 @@ mod tests {
         let rec = "{\"type\":\"session.usage_record\",\"data\":{\"usage\":{\"inputTokens\":10,\"outputTokens\":1}}}\n";
         std::fs::write(sess.join("events.jsonl"), rec).unwrap();
         let mut tracker = Tracker {
-            kind: AgentKind::Copilot,
             locator: Locator {
                 copilot: dir.clone(),
                 claude: dir.clone(),
@@ -414,7 +411,11 @@ mod tests {
             sessions: HashMap::new(),
             baseline: HashMap::new(),
         };
-        let watch = vec![("x-1".to_string(), vec!["s1".to_string(), "s2".to_string()])];
+        let watch = vec![(
+            "x-1".to_string(),
+            AgentKind::Copilot,
+            vec!["s1".to_string(), "s2".to_string()],
+        )];
         let r = tracker.scan(&watch);
         assert_eq!(r.per_key["x-1"].input, 10);
         assert!(r.run.is_empty());

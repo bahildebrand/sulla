@@ -21,6 +21,7 @@ use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::notify::Notifier;
+use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Snapshot, fmt_duration};
 use crate::ui::keys;
@@ -57,19 +58,62 @@ pub struct NewBeadForm {
     pub title: String,
     pub description: String,
     pub priority: u8,
+    pub agent: Option<AgentKind>,
+    pub presets: Vec<String>,
+    pub preset: Option<usize>,
     pub backlog: bool,
     pub field: usize,
 }
 
-impl Default for NewBeadForm {
-    fn default() -> Self {
+impl NewBeadForm {
+    pub const FIELDS: usize = 6;
+
+    pub fn new(presets: Vec<String>) -> Self {
         Self {
             title: String::new(),
             description: String::new(),
             priority: 2,
+            agent: None,
+            presets,
+            preset: None,
             backlog: false,
             field: 0,
         }
+    }
+
+    fn cycle_agent(&mut self, forward: bool) {
+        let opts: Vec<Option<AgentKind>> = std::iter::once(None)
+            .chain(AgentKind::ALL.into_iter().map(Some))
+            .collect();
+        let i = opts.iter().position(|o| *o == self.agent).unwrap_or(0);
+        let n = opts.len();
+        self.agent = opts[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }];
+    }
+
+    fn cycle_preset(&mut self, forward: bool) {
+        let n = self.presets.len() + 1;
+        let i = self.preset.map_or(0, |p| p + 1);
+        let j = if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        };
+        self.preset = j.checked_sub(1);
+    }
+
+    pub fn labels(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(a) = self.agent {
+            out.push(format!("agent:{}", a.name()));
+        }
+        if let Some(p) = self.preset.and_then(|i| self.presets.get(i)) {
+            out.push(format!("{}:{p}", presets::LABEL));
+        }
+        out
     }
 }
 
@@ -142,7 +186,7 @@ pub struct App {
     chat_sessions: Vec<String>,
     beads: Beads,
     git: Git,
-    backend: Box<dyn Backend>,
+    backends: HashMap<AgentKind, Box<dyn Backend>>,
     sandbox: Box<dyn Sandbox>,
     slots: Slots,
     deferred: HashMap<usize, Outcome>,
@@ -207,19 +251,20 @@ impl App {
             Duration::from_secs(cfg.poll_secs.max(1)),
             tx.clone(),
         );
-        let usage_watch = usage::spawn(
-            cfg.agent,
-            Duration::from_secs(cfg.poll_secs.max(1)),
-            tx.clone(),
-        );
-        let backend: Box<dyn Backend> = match cfg.agent {
-            AgentKind::Copilot => Box::new(Copilot {
+        let usage_watch = usage::spawn(Duration::from_secs(cfg.poll_secs.max(1)), tx.clone());
+        let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
+        backends.insert(
+            AgentKind::Copilot,
+            Box::new(Copilot {
                 cfg: cfg.copilot.clone(),
             }),
-            AgentKind::Claude => Box::new(Claude {
+        );
+        backends.insert(
+            AgentKind::Claude,
+            Box::new(Claude {
                 cfg: cfg.claude.clone(),
             }),
-        };
+        );
         Ok(Self {
             notifier: Notifier::new(cfg.notify.clone()),
             stalls: HashMap::new(),
@@ -235,7 +280,7 @@ impl App {
             chat_sessions: Vec::new(),
             beads,
             git,
-            backend,
+            backends,
             sandbox,
             slots: Slots::default(),
             deferred: HashMap::new(),
@@ -278,7 +323,11 @@ impl App {
     }
 
     pub fn backend_name(&self) -> &str {
-        self.backend.name()
+        self.backend(self.cfg.agent).name()
+    }
+
+    fn backend(&self, kind: AgentKind) -> &dyn Backend {
+        self.backends[&kind].as_ref()
     }
 
     pub fn sandbox_name(&self) -> &str {
@@ -858,8 +907,13 @@ impl App {
         };
         let parent = self.git.stack_parent(&bead.id);
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
-        let prompt =
-            prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead, parent.as_deref())));
+        let prompt = prompt.or_else(|| {
+            (!resume).then(|| {
+                let preset = presets::for_bead(&self.cfg.presets, &bead);
+                agent::task_prompt(&bead, parent.as_deref(), preset)
+            })
+        });
+        let (kind, model) = agent::selection(&bead, self.cfg.agent);
         let slot = self
             .slots
             .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
@@ -871,8 +925,9 @@ impl App {
             worktree,
             resume,
             prompt,
+            model,
         };
-        let r = self.spawn_sandboxed(slot, launch);
+        let r = self.spawn_sandboxed(slot, launch, kind);
         if let Err(e) = r {
             self.slots.release(&bead.id);
             return Err(e);
@@ -921,6 +976,7 @@ impl App {
             .slots
             .acquire_with(&rid, &bead.id, self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {rid}"))?;
+        let (kind, model) = agent::selection(&bead, self.cfg.agent);
         let launch = Launch {
             session: agent::session_id(&self.repo, &rid),
             id: rid.clone(),
@@ -931,11 +987,12 @@ impl App {
                 &bead,
                 &self.git.upstream(&bead.id, &self.base),
             )),
+            model,
         };
         let r = self
             .beads
             .set_state(&bead.id, State::Reviewing)
-            .and_then(|_| self.spawn_sandboxed(slot, launch));
+            .and_then(|_| self.spawn_sandboxed(slot, launch, kind));
         if let Err(e) = r {
             self.slots.release(&rid);
             let _ = self.beads.set_state(&bead.id, State::Review);
@@ -1296,9 +1353,9 @@ impl App {
         }
     }
 
-    fn spawn_sandboxed(&mut self, slot: usize, launch: Launch) -> Result<()> {
+    fn spawn_sandboxed(&mut self, slot: usize, launch: Launch, kind: AgentKind) -> Result<()> {
         self.sandbox.prepare(slot, &launch)?;
-        let cmd = agent::command(self.backend.as_ref(), &launch, self.cfg.kache, Some(slot));
+        let cmd = agent::command(self.backend(kind), &launch, self.cfg.kache, Some(slot));
         let cmd = self.sandbox.wrap(slot, &launch, cmd)?;
         self.insert_agent(cmd, launch.id)
     }
@@ -1350,8 +1407,9 @@ impl App {
             worktree: self.repo.clone(),
             resume,
             prompt: (!resume).then(|| agent::chat_prompt(&self.base, self.cfg.max_agents)),
+            model: None,
         };
-        let cmd = agent::command(self.backend.as_ref(), &launch, self.cfg.kache, None);
+        let cmd = agent::command(self.backend(self.cfg.agent), &launch, self.cfg.kache, None);
         self.insert_agent(cmd, launch.id)
     }
 
@@ -1366,11 +1424,16 @@ impl App {
                     .iter()
                     .map(|id| agent::session_id(&self.repo, id))
                     .collect();
-                (b.id.clone(), sessions)
+                let kind = agent::selection(b, self.cfg.agent).0;
+                (b.id.clone(), kind, sessions)
             })
             .collect();
         if !self.chat_sessions.is_empty() {
-            watch.push((CHAT_ID.to_string(), self.chat_sessions.clone()));
+            watch.push((
+                CHAT_ID.to_string(),
+                self.cfg.agent,
+                self.chat_sessions.clone(),
+            ));
         }
         let _ = self.usage_watch.send(watch);
     }
@@ -1610,13 +1673,22 @@ impl App {
                     self.status = "title required".into();
                     form.field = 0;
                 } else {
-                    self.create_bead(&title, form.description.trim(), form.priority, form.backlog);
+                    let labels = form.labels();
+                    self.create_bead(
+                        &title,
+                        form.description.trim(),
+                        form.priority,
+                        form.backlog,
+                        &labels,
+                    );
                     return;
                 }
             }
             KeyCode::Enter => form.field = 2,
-            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 4,
-            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 3) % 4,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % NewBeadForm::FIELDS,
+            KeyCode::BackTab | KeyCode::Up => {
+                form.field = (form.field + NewBeadForm::FIELDS - 1) % NewBeadForm::FIELDS
+            }
             KeyCode::Right | KeyCode::Char('-') if form.field == 2 => {
                 form.priority = (form.priority + 1).min(4)
             }
@@ -1624,11 +1696,15 @@ impl App {
                 form.priority = form.priority.saturating_sub(1)
             }
             KeyCode::Char(c @ '0'..='4') if form.field == 2 => form.priority = c as u8 - b'0',
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => {
+            KeyCode::Left if form.field == 3 => form.cycle_agent(false),
+            KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => form.cycle_agent(true),
+            KeyCode::Left if form.field == 4 => form.cycle_preset(false),
+            KeyCode::Right | KeyCode::Char(' ') if form.field == 4 => form.cycle_preset(true),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 5 => {
                 form.backlog = !form.backlog
             }
-            KeyCode::Char('b') if form.field == 3 => form.backlog = true,
-            KeyCode::Char('p') if form.field == 3 => form.backlog = false,
+            KeyCode::Char('b') if form.field == 5 => form.backlog = true,
+            KeyCode::Char('p') if form.field == 5 => form.backlog = false,
             KeyCode::Backspace => {
                 match form.field {
                     0 => form.title.pop(),
@@ -1687,7 +1763,7 @@ impl App {
         match name {
             "q" | "quit" => self.request_quit(),
             "q!" | "quit!" => self.quit = true,
-            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2, false),
+            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2, false, &[]),
             "max" => match rest.parse() {
                 Ok(n) => {
                     self.cfg.max_agents = n;
@@ -1708,8 +1784,17 @@ impl App {
         }
     }
 
-    fn create_bead(&mut self, title: &str, description: &str, priority: u8, backlog: bool) {
-        let r = self.beads.create(title, description, priority, backlog);
+    fn create_bead(
+        &mut self,
+        title: &str,
+        description: &str,
+        priority: u8,
+        backlog: bool,
+        labels: &[String],
+    ) {
+        let r = self
+            .beads
+            .create(title, description, priority, backlog, labels);
         if let Some(id) = self.report(r) {
             self.status = format!("created {id}");
             self.mutated();
@@ -2273,7 +2358,7 @@ impl App {
             }
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('n') => {
-                self.mode = Mode::NewBead(NewBeadForm::default());
+                self.mode = Mode::NewBead(NewBeadForm::new(presets::names(&self.cfg.presets)));
             }
             KeyCode::Char('c') => self.open_chat(false),
             KeyCode::Char('C') => self.open_chat(true),

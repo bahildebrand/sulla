@@ -8,6 +8,7 @@ mod conflicts;
 mod filter;
 mod git;
 mod notify;
+mod presets;
 mod sandbox;
 mod scheduler;
 mod ui;

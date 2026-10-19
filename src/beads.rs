@@ -144,6 +144,13 @@ impl State {
 }
 
 impl Bead {
+    pub fn label(&self, key: &str) -> Option<&str> {
+        self.labels.iter().find_map(|l| {
+            let v = l.strip_prefix(key)?.strip_prefix(':')?.trim();
+            (!v.is_empty()).then_some(v)
+        })
+    }
+
     pub fn state(&self) -> Option<State> {
         self.labels
             .iter()
@@ -352,6 +359,7 @@ impl Beads {
         description: &str,
         priority: u8,
         backlog: bool,
+        labels: &[String],
     ) -> Result<String> {
         let p = priority.to_string();
         let mut args = vec!["create", title, "-p", &p, "--silent"];
@@ -360,6 +368,9 @@ impl Beads {
         }
         if backlog {
             args.extend(["-l", "sulla:backlog"]);
+        }
+        for l in labels {
+            args.extend(["-l", l.as_str()]);
         }
         Ok(self.run(&args)?.trim().to_string())
     }

@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
+use crate::config::AgentKind;
 use review::Diff;
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -171,7 +172,7 @@ const HELP: &[(&str, &str)] = &[
     ("e", "open $EDITOR in bead worktree"),
     (
         "n",
-        "new bead popup (title, description, priority, start state)",
+        "new bead popup (title, description, priority, agent, preset, start state)",
     ),
     ("c / C", "open conversation agent / start a fresh one"),
     ("+ -", "raise / lower priority"),
@@ -266,7 +267,16 @@ fn inspect(f: &mut Frame, id: &str, text: &str, scroll: u16) {
 fn new_bead(f: &mut Frame, form: &NewBeadForm) {
     let inner_width = 62usize;
     let wrapped = |text: &str| (13 + text.chars().count() + 1).div_ceil(inner_width).max(1);
-    let rows = wrapped(&form.title) + wrapped(&form.description) + 7;
+    let preset_width: usize = 19
+        + form
+            .presets
+            .iter()
+            .map(|p| p.chars().count() + 2)
+            .sum::<usize>();
+    let rows = wrapped(&form.title)
+        + wrapped(&form.description)
+        + preset_width.div_ceil(inner_width).max(1)
+        + 10;
     let height = (rows as u16 + 2).min(f.area().height);
     let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -295,6 +305,25 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         .collect::<Vec<_>>();
     let mut prio_line = vec![label(2, "Priority")];
     prio_line.extend(prio);
+    let choice = |name: String, on: bool| {
+        let s = Span::raw(format!(" {name} "));
+        if on { s.black().on_cyan() } else { s.dim() }
+    };
+    let mut agent_line = vec![label(3, "Agent")];
+    agent_line.push(choice("default".into(), form.agent.is_none()));
+    agent_line.extend(
+        AgentKind::ALL
+            .into_iter()
+            .map(|k| choice(k.name().into(), form.agent == Some(k))),
+    );
+    let mut preset_line = vec![label(4, "Preset")];
+    preset_line.push(choice("none".into(), form.preset.is_none()));
+    preset_line.extend(
+        form.presets
+            .iter()
+            .enumerate()
+            .map(|(i, n)| choice(n.clone(), form.preset == Some(i))),
+    );
     let start = [("Pending", false), ("Backlog", true)]
         .into_iter()
         .map(|(n, v)| {
@@ -306,7 +335,7 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
             }
         })
         .collect::<Vec<_>>();
-    let mut start_line = vec![label(3, "Start in")];
+    let mut start_line = vec![label(5, "Start in")];
     start_line.extend(start);
     let lines = vec![
         Line::from(vec![
@@ -321,9 +350,14 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         Line::raw(""),
         Line::from(prio_line),
         Line::raw(""),
+        Line::from(agent_line),
+        Line::raw(""),
+        Line::from(preset_line),
+        Line::raw(""),
         Line::from(start_line),
         Line::raw(""),
-        Line::from("Tab/S-Tab field  Left/Right or 0-4 priority  Left/Right start  Enter create  Esc cancel").dim(),
+        Line::from("Tab/S-Tab field  Left/Right choose  0-4 priority  Enter create  Esc cancel")
+            .dim(),
     ];
     f.render_widget(Clear, area);
     f.render_widget(

@@ -21,6 +21,7 @@ pub struct Config {
     pub notify: NotifyConfig,
     pub stall: StallConfig,
     pub budget: BudgetConfig,
+    pub presets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -134,12 +135,29 @@ impl Default for IncusConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     #[default]
     Copilot,
     Claude,
+}
+
+impl AgentKind {
+    pub const ALL: [AgentKind; 2] = [AgentKind::Copilot, AgentKind::Claude];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AgentKind::Copilot => "copilot",
+            AgentKind::Claude => "claude",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.name().eq_ignore_ascii_case(s.trim()))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,6 +193,7 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             stall: StallConfig::default(),
             budget: BudgetConfig::default(),
+            presets: BTreeMap::new(),
         }
     }
 }

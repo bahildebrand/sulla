@@ -15,7 +15,7 @@ impl Backend for Claude {
     fn command(&self, launch: &Launch) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(&self.cfg.bin);
         cmd.arg("--dangerously-skip-permissions");
-        if let Some(m) = &self.cfg.model {
+        if let Some(m) = launch.model.as_ref().or(self.cfg.model.as_ref()) {
             cmd.args(["--model", m]);
         }
         cmd.args(&self.cfg.extra_args);
@@ -46,6 +46,7 @@ mod tests {
             worktree: PathBuf::from("/w"),
             resume,
             prompt: prompt.map(String::from),
+            model: None,
         }
     }
 
@@ -75,6 +76,17 @@ mod tests {
         let a = args(&backend().command(&launch(true, None)));
         assert_eq!(a[a.len() - 2], "--resume");
         assert_eq!(a.len(), 4);
+    }
+
+    #[test]
+    fn launch_model_overrides_config() {
+        let mut b = backend();
+        b.cfg.model = Some("sonnet".into());
+        let mut l = launch(false, None);
+        l.model = Some("opus".into());
+        let a = args(&b.command(&l));
+        let i = a.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(a[i + 1], "opus");
     }
 
     #[test]
