@@ -141,7 +141,11 @@ a new AI review, when you send feedback, or when the bead goes back to running.
 With `workflow = "pr"`, `P` publishes the reviewed bead instead of `m`. Pending changes are
 committed and rejected hunks dropped as on merge, then `sulla/<bead>` is pushed to the `[pr]`
 remote with `--set-upstream` and `gh pr create --head sulla/<bead> --base <base>` opens a PR (a
-draft when `draft = true`) titled after the bead with its description as the body. If an open PR
+draft when `draft = true`). The PR takes its title from the subject of the branch's first commit
+and its body from that commit's body, so a commit written to the repo's PR conventions becomes the
+PR description. When that commit's body is empty, the bead description is used as the body
+(followed by `Bead: <bead>`). When the first commit is the one sulla made for uncommitted changes
+(`<bead>: <title>`), the bead title and description are used instead. If an open PR
 already exists for the branch it is reused. A bead stacked on a parent that is itself Awaiting PR
 targets the parent's branch instead of base. The bead gets `pr:<number>`, moves to Awaiting PR and
 its agent and reviewer stop, leaving the worktree and session for later rounds. Publishing again
@@ -158,7 +162,7 @@ Graphite's metadata and never rebases. It then runs
 `gt submit --no-interactive --no-edit --no-ai --no-stack` (plus `--draft` when `draft = true`),
 which pushes the branch and its downstack and opens or updates their PRs, never touching branches
 stacked above it. The PR is looked up with `gh pr list --head sulla/<bead>`, and when it was just
-created its title and body are set from the bead with `gh pr edit`. The rest (labels, Awaiting PR,
+created its title and body are set with `gh pr edit` the same way as with `gh`. The rest (labels, Awaiting PR,
 watching, revising and merge detection) is the same as with `gh`. A stacked bead's parent must
 already be tracked by Graphite, which it is when the parent was also published with Graphite.
 Only sulla runs `gt`; agents never push or submit.

@@ -121,6 +121,25 @@ pub fn body(id: &str, description: &str) -> String {
     }
 }
 
+pub fn text(
+    id: &str,
+    title: &str,
+    description: &str,
+    commit: Option<(String, String)>,
+) -> (String, String) {
+    match commit {
+        Some((subject, msg)) if !subject.is_empty() => {
+            let body = if msg.is_empty() {
+                body(id, description)
+            } else {
+                msg
+            };
+            (subject, body)
+        }
+        _ => (title.to_string(), body(id, description)),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
     Open,
@@ -644,6 +663,28 @@ pub fn post_comment(repo: &Path, number: u64, body: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pr_text_prefers_first_commit_over_bead() {
+        let commit = |s: &str, b: &str| Some((s.to_string(), b.to_string()));
+        assert_eq!(
+            text(
+                "m-1",
+                "Bead title",
+                "Bead desc",
+                commit("feat: x", "### Summary")
+            ),
+            ("feat: x".into(), "### Summary".into())
+        );
+        assert_eq!(
+            text("m-1", "Bead title", "Bead desc", commit("feat: x", "")),
+            ("feat: x".into(), "Bead desc\n\nBead: m-1".into())
+        );
+        assert_eq!(
+            text("m-1", "Bead title", "Bead desc", None),
+            ("Bead title".into(), "Bead desc\n\nBead: m-1".into())
+        );
+    }
 
     #[test]
     fn parses_created_url_and_list() {

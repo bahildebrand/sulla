@@ -266,21 +266,30 @@ impl Publish {
             PrTool::Gh => {
                 self.git
                     .push(id, &self.pr.remote, bead.label("pr").is_some())?;
+                let (title, body) = self.text(&bead, &msg)?;
                 pr::create(
                     &self.repo,
                     &git::branch(id),
                     &self.base,
-                    &bead.title,
-                    &pr::body(id, &bead.description),
+                    &title,
+                    &body,
                     self.pr.draft,
                 )?
             }
-            PrTool::Graphite => self.submit_graphite(&bead)?,
+            PrTool::Graphite => self.submit_graphite(&bead, &msg)?,
         };
         Ok((bead, created))
     }
 
-    fn submit_graphite(&self, bead: &Bead) -> Result<pr::Pr> {
+    fn text(&self, bead: &Bead, auto_msg: &str) -> Result<(String, String)> {
+        let commit = self
+            .git
+            .first_commit(&self.id, &self.base)?
+            .filter(|(subject, _)| subject != auto_msg);
+        Ok(pr::text(&self.id, &bead.title, &bead.description, commit))
+    }
+
+    fn submit_graphite(&self, bead: &Bead, auto_msg: &str) -> Result<pr::Pr> {
         let id = self.id.as_str();
         let dir = self.git.worktree_path(id);
         let br = git::branch(id);
@@ -291,12 +300,8 @@ impl Publish {
             bail!("gt submit opened no PR for {br}");
         };
         if !existed {
-            pr::edit(
-                &self.repo,
-                created.number,
-                &bead.title,
-                &pr::body(id, &bead.description),
-            )?;
+            let (title, body) = self.text(bead, auto_msg)?;
+            pr::edit(&self.repo, created.number, &title, &body)?;
         }
         Ok(created)
     }

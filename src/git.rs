@@ -395,6 +395,18 @@ impl Git {
         )
     }
 
+    pub fn first_commit(&self, id: &str, base: &str) -> Result<Option<(String, String)>> {
+        let wt = self.worktree_path(id);
+        let up = self.upstream(id, base);
+        let revs = run(&wt, &["rev-list", "--reverse", &format!("{up}..HEAD")])?;
+        let Some(first) = revs.lines().next() else {
+            return Ok(None);
+        };
+        let subject = run(&wt, &["log", "-1", "--format=%s", first])?;
+        let body = run(&wt, &["log", "-1", "--format=%b", first])?;
+        Ok(Some((subject.trim().to_string(), body.trim().to_string())))
+    }
+
     pub fn merged_log(&self, id: &str) -> Result<String> {
         let (b, h) = (merged_ref(id, "base"), merged_ref(id, "head"));
         Self::log_range(&self.repo, &format!("{b}..{h}"))
@@ -787,6 +799,31 @@ mod tests {
         assert_eq!(pushed(), g.head("p-1").ok());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&remote).unwrap();
+    }
+
+    #[test]
+    fn first_commit_is_oldest_beyond_upstream() {
+        let (dir, g) = scratch("first");
+        let wt = g.ensure_worktree("f-1", "main").unwrap();
+        assert_eq!(g.first_commit("f-1", "main").unwrap(), None);
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        git(&wt, &["add", "b.txt"]);
+        git(
+            &wt,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat: add b\n\n### Summary\n\nAdds b.",
+            ],
+        );
+        std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+        g.commit_pending("f-1", "f-1: work").unwrap();
+        assert_eq!(
+            g.first_commit("f-1", "main").unwrap(),
+            Some(("feat: add b".into(), "### Summary\n\nAdds b.".into()))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
