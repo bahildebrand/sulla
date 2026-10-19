@@ -66,7 +66,7 @@ pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
     all.iter()
         .filter(|b| b.status != "closed")
         .filter(|b| match b.state() {
-            Some(State::Running) => !known.contains(&b.id),
+            Some(State::Running | State::Review) => !known.contains(&b.id),
             Some(State::Reviewing) => !known.contains(&agent::review_id(&b.id)),
             _ => false,
         })
@@ -118,12 +118,17 @@ mod tests {
             bead("rev", 1, "2026-01-01T00:00:00Z", &["sulla:reviewing"]),
             bead("live", 1, "2026-01-01T00:00:00Z", &["sulla:reviewing"]),
             bead("done", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
+            bead("idle", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
         ];
-        let known = HashSet::from(["rev".to_string(), agent::review_id("live")]);
+        let known = HashSet::from([
+            "rev".to_string(),
+            "done".to_string(),
+            agent::review_id("live"),
+        ]);
         let ids: Vec<_> = orphans(&all, &known)
             .iter()
             .map(|b| b.id.as_str())
             .collect();
-        assert_eq!(ids, ["run", "rev"]);
+        assert_eq!(ids, ["run", "rev", "idle"]);
     }
 }

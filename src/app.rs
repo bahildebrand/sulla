@@ -463,20 +463,30 @@ impl App {
     fn reconcile(&mut self) {
         self.reap_reviewers();
         let known: HashSet<String> = self.agents.keys().cloned().collect();
-        let orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
+        let mut orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()
             .filter(|b| !self.failed.contains(&b.id))
             .cloned()
             .collect();
+        orphans.sort_by_key(|b| b.state() != Some(State::Running));
         for b in orphans {
-            if b.state() == Some(State::Reviewing) {
+            let state = b.state();
+            if state == Some(State::Reviewing) {
                 tracing::info!("returning orphaned review {} to review", b.id);
                 let r = self.beads.set_state(&b.id, State::Review);
                 self.report(r);
                 self.mutated();
+                if known.contains(&b.id) {
+                    continue;
+                }
+            }
+            let has_worktree = self.git.worktree_path(&b.id).join(".git").exists();
+            if matches!(state, Some(State::Review | State::Reviewing))
+                && (!has_worktree || self.slots.free(self.cfg.max_agents) == 0)
+            {
                 continue;
             }
-            if self.git.worktree_path(&b.id).join(".git").exists() {
+            if has_worktree {
                 tracing::info!("resuming orphaned agent {}", b.id);
                 let r = self.start_agent(&b, true, None);
                 if self.report(r).is_none() {

@@ -49,7 +49,8 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Killing an agent holds its bead in Pending until released with `s`.
 - `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the bead's worktree. Agents keep
   running meanwhile, so edits may conflict with a live agent.
-- Agents still marked running when sulla restarts are resumed via their agent session.
+- Agents still marked running or in review when sulla restarts are resumed via their agent
+  session, so review beads keep their slots ahead of pending work.
 - `c` opens a conversation agent in the main checkout, not tied to any bead. Its first prompt
   explains the sulla states and how to create beads (staged in Backlog, wired with `bd dep add`,
   released to Pending on your go), so you can plan work and have it fill the queue. It does not
