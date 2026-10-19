@@ -2,6 +2,7 @@ mod agent;
 mod app;
 mod beads;
 mod config;
+mod conflicts;
 mod git;
 mod notify;
 mod sandbox;

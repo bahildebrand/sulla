@@ -5,6 +5,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use serde::{Deserialize, Serialize};
 
+use crate::conflicts::Conflict;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     File,
@@ -455,6 +457,7 @@ pub fn render(
     title: &str,
     loc: Option<&str>,
     ai: Option<&AiReview>,
+    conflict: Option<(&Conflict, &str)>,
 ) {
     let (adds, dels) = diff.adds_dels();
     let mut spans = vec![
@@ -484,6 +487,13 @@ pub fn render(
             ));
         }
     }
+    if let Some((c, base)) = conflict {
+        spans.push(Span::styled(
+            format!("⚠ {} ", c.summary(base)),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let conflicted = conflict.map(|(c, _)| c.files()).unwrap_or_default();
     let ai_label = if ai.is_some_and(|r| r.forwarded) {
         "ai (sent)"
     } else {
@@ -511,7 +521,11 @@ pub fn render(
                 .iter()
                 .filter(|p| p.is_some_and(|(f, _)| f == fi))
                 .count();
-            let mut spans = vec![Span::raw(base.to_string())];
+            let mut spans = vec![if conflicted.contains(x.name.as_str()) {
+                Span::styled(format!("⚠ {base}"), Style::new().fg(Color::Red))
+            } else {
+                Span::raw(base.to_string())
+            }];
             if n > 0 {
                 spans.push(Span::styled(
                     format!(" 💬{n}"),

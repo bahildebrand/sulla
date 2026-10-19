@@ -48,6 +48,10 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   or when the bead goes back to running for another reason.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
+- Each poll runs `git merge-tree` on every open bead's committed branch against base and against
+  every other open bead branch. Beads that would conflict show `⚠` on their card. The zoomed card
+  and the Review header name what they conflict with, and conflicting files are marked `⚠` in
+  the Review file list. Uncommitted worktree changes are not checked.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
 - Killing an agent holds its bead in Pending until released with `s`.
 - `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the bead's worktree. Agents keep

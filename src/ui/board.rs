@@ -16,6 +16,14 @@ fn badge(app: &App, b: &Bead) -> Span<'static> {
         .map_or(Span::raw(""), review::verdict_badge)
 }
 
+fn conflict(app: &App, b: &Bead) -> Span<'static> {
+    if app.conflicts.contains_key(&b.id) {
+        Span::styled("⚠ ", Style::new().fg(Color::Red))
+    } else {
+        Span::raw("")
+    }
+}
+
 fn marker(app: &App, b: &Bead) -> Span<'static> {
     if b.state() == Some(State::Reviewing) {
         let color = match app.agents.get(&agent::review_id(&b.id)) {
@@ -88,6 +96,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 ListItem::new(vec![
                     Line::from(vec![
                         marker(app, b),
+                        conflict(app, b),
                         badge(app, b),
                         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
                         Span::raw(b.title.clone()),
@@ -123,6 +132,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     let mut lines = vec![Line::from(vec![
         marker(app, b),
+        conflict(app, b),
         badge(app, b),
         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
         Span::raw(b.title.clone()).bold(),
@@ -149,6 +159,17 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     }
     meta.retain(|m| !m.is_empty());
     lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(Color::Cyan));
+    if let Some(c) = app.conflicts.get(&b.id) {
+        let files: Vec<&str> = c.files().into_iter().collect();
+        lines.push(
+            Line::from(format!(
+                "    ⚠ {}: {}",
+                c.summary(&app.base),
+                files.join(", ")
+            ))
+            .fg(Color::Red),
+        );
+    }
     lines.push(activity(app, b, Utc::now()));
     let max = width.saturating_sub(4).max(1);
     for l in b

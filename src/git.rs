@@ -263,6 +263,56 @@ impl Git {
             && self.ref_exists(&merged_ref(id, "head"))
     }
 
+    pub fn rev(&self, r: &str) -> Result<String> {
+        Ok(run(&self.repo, &["rev-parse", "--verify", r])?
+            .trim()
+            .to_string())
+    }
+
+    pub fn bead_branches(&self) -> Result<Vec<(String, String)>> {
+        let out = run(
+            &self.repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname:strip=3) %(objectname)",
+                "refs/heads/sulla/",
+            ],
+        )?;
+        Ok(out
+            .lines()
+            .filter_map(|l| l.split_once(' '))
+            .map(|(id, sha)| (id.to_string(), sha.to_string()))
+            .collect())
+    }
+
+    pub fn merge_conflicts(&self, a: &str, b: &str) -> Result<Vec<String>> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args([
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                a,
+                b,
+            ])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        match out.status.code() {
+            Some(0) => Ok(Vec::new()),
+            Some(1) if !stdout.trim().is_empty() => {
+                let mut files: Vec<String> = stdout.lines().skip(1).map(str::to_string).collect();
+                files.dedup();
+                Ok(files)
+            }
+            _ => bail!(
+                "git merge-tree {a} {b}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
     fn ref_exists(&self, r: &str) -> bool {
         run(&self.repo, &["rev-parse", "--verify", "--quiet", r]).is_ok()
     }

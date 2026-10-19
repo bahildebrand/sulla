@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use crate::agent;
 use crate::app::Event;
 use crate::beads::{Bead, Beads, State};
+use crate::conflicts::{Conflict, Scanner};
 use crate::git::{DiffStat, Git};
 
 pub struct Snapshot {
@@ -13,6 +14,7 @@ pub struct Snapshot {
     pub ready: Vec<Bead>,
     pub blocked: HashMap<String, Vec<String>>,
     pub diffstats: HashMap<String, DiffStat>,
+    pub conflicts: HashMap<String, Conflict>,
 }
 
 fn diffstats(git: &Git, base: &str, all: &[Bead]) -> HashMap<String, DiffStat> {
@@ -37,17 +39,28 @@ pub fn spawn_poller(
 ) -> Sender<()> {
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
     std::thread::spawn(move || {
+        let mut scanner = Scanner::default();
         loop {
             let taken = Instant::now();
             let snap = beads
                 .list_all()
                 .and_then(|all| {
+                    let open: HashSet<String> = all
+                        .iter()
+                        .filter(|b| b.status != "closed")
+                        .map(|b| b.id.clone())
+                        .collect();
+                    let conflicts = scanner.scan(&git, &base, &open).unwrap_or_else(|e| {
+                        tracing::warn!("conflict scan: {e:#}");
+                        HashMap::new()
+                    });
                     Ok(Snapshot {
                         taken,
                         diffstats: diffstats(&git, &base, &all),
                         all,
                         ready: beads.ready()?,
                         blocked: beads.blocked()?,
+                        conflicts,
                     })
                 })
                 .map_err(|e| e.to_string());

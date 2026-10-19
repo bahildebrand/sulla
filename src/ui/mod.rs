@@ -32,6 +32,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 title,
                 app.slot_location(&d.id).as_deref(),
                 app.ai_reviews.get(&d.id),
+                app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
             )
         }
     }

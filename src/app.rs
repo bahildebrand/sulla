@@ -15,6 +15,7 @@ use crossterm::event::{
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::config::{AgentKind, Config, Trigger};
+use crate::conflicts::Conflict;
 use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::notify::Notifier;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
@@ -109,6 +110,7 @@ pub struct App {
     ready: Vec<Bead>,
     pub blocked: HashMap<String, Vec<String>>,
     pub diffstats: HashMap<String, DiffStat>,
+    pub conflicts: HashMap<String, Conflict>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
     notifier: Notifier,
@@ -173,6 +175,7 @@ impl App {
             ready: Vec::new(),
             blocked: HashMap::new(),
             diffstats: HashMap::new(),
+            conflicts: HashMap::new(),
             agents: HashMap::new(),
             failed: HashSet::new(),
             view: View::Board,
@@ -387,6 +390,7 @@ impl App {
                 self.ready = s.ready;
                 self.blocked = s.blocked;
                 self.diffstats = s.diffstats;
+                self.conflicts = s.conflicts;
                 let all = &self.all;
                 self.ai_reviews.retain(|id, r| {
                     all.iter().any(|b| {
