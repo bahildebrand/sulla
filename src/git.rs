@@ -291,6 +291,7 @@ impl Git {
             .arg(&self.repo)
             .args([
                 "merge-tree",
+                "-z",
                 "--write-tree",
                 "--name-only",
                 "--no-messages",
@@ -302,7 +303,12 @@ impl Git {
         match out.status.code() {
             Some(0) => Ok(Vec::new()),
             Some(1) if !stdout.trim().is_empty() => {
-                let mut files: Vec<String> = stdout.lines().skip(1).map(str::to_string).collect();
+                let mut files: Vec<String> = stdout
+                    .split('\0')
+                    .skip(1)
+                    .take_while(|f| !f.is_empty())
+                    .map(str::to_string)
+                    .collect();
                 files.dedup();
                 Ok(files)
             }

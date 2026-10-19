@@ -138,6 +138,8 @@ mod tests {
         wt("x-1", "a.txt", "one\n");
         wt("x-2", "b.txt", "two\n");
         wt("x-3", "b.txt", "three\n");
+        wt("x-2", "é x.txt", "two\n");
+        wt("x-3", "é x.txt", "three\n");
         wt("x-4", "c.txt", "clean\n");
         wt("x-5", "b.txt", "closed\n");
         commit(&dir, "a.txt", "main\n");
@@ -151,14 +153,9 @@ mod tests {
         assert_eq!(c["x-1"].base, ["a.txt"]);
         assert!(c["x-1"].others.is_empty());
         assert!(c["x-2"].base.is_empty());
-        assert_eq!(
-            c["x-2"].others,
-            [("x-3".to_string(), vec!["b.txt".to_string()])]
-        );
-        assert_eq!(
-            c["x-3"].others,
-            [("x-2".to_string(), vec!["b.txt".to_string()])]
-        );
+        let both = vec!["b.txt".to_string(), "é x.txt".to_string()];
+        assert_eq!(c["x-2"].others, [("x-3".to_string(), both.clone())]);
+        assert_eq!(c["x-3"].others, [("x-2".to_string(), both)]);
         assert_eq!(c["x-1"].summary("main"), "conflicts with main");
         assert!(!c.contains_key("x-4"));
         assert_eq!(s.cache.len(), 10);
