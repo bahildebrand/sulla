@@ -387,6 +387,7 @@ impl App {
         };
         let beads = Beads::new(&repo);
         beads.connect();
+        let started = Instant::now();
         let refresh = scheduler::spawn_poller(
             beads.clone(),
             git.clone(),
@@ -472,7 +473,7 @@ impl App {
             pending: None,
             count: None,
             esc_at: None,
-            last_mutation: Instant::now(),
+            last_mutation: started,
             tx,
             refresh,
             bd_jobs,

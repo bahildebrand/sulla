@@ -17,6 +17,7 @@ pub use serve::{NO_TELEMETRY, beads_dir, dolt_port, metadata, server_mode, start
 pub const ACTOR: &str = "sulla";
 const STATE_DIM: &str = "sulla";
 pub const STATE_EVENT_PREFIX: &str = "State change: sulla → ";
+const DOLT_JOURNAL: &str = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Bead {
@@ -383,19 +384,32 @@ impl Beads {
     }
 
     pub fn stamp(&self) -> Option<Vec<u8>> {
-        let mut dbs: Vec<PathBuf> =
-            std::fs::read_dir(self.repo.join(".beads").join("embeddeddolt"))
-                .ok()?
-                .filter_map(|e| Some(e.ok()?.path().join(".dolt").join("noms").join("manifest")))
-                .filter(|m| m.is_file())
-                .collect();
+        let beads = self.repo.join(".beads");
+        let mut dbs: Vec<(PathBuf, bool)> = [("embeddeddolt", false), ("dolt", true)]
+            .into_iter()
+            .filter_map(|(dir, server)| Some((std::fs::read_dir(beads.join(dir)).ok()?, server)))
+            .flat_map(|(entries, server)| {
+                entries
+                    .filter_map(move |e| Some((e.ok()?.path().join(".dolt").join("noms"), server)))
+            })
+            .filter(|(noms, _)| noms.join("manifest").is_file())
+            .collect();
         if dbs.is_empty() {
             return None;
         }
         dbs.sort();
         let mut stamp = Vec::new();
-        for m in dbs {
-            stamp.extend(std::fs::read(m).ok()?);
+        for (noms, server) in dbs {
+            stamp.extend(std::fs::read(noms.join("manifest")).ok()?);
+            if server && let Ok(journal) = std::fs::metadata(noms.join(DOLT_JOURNAL)) {
+                let modified = journal
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?;
+                stamp.extend(journal.len().to_le_bytes());
+                stamp.extend(modified.as_nanos().to_le_bytes());
+            }
         }
         Some(stamp)
     }
@@ -837,7 +851,34 @@ mod tests {
         assert_eq!(a.as_deref(), Some(b"root-a".as_slice()));
         assert_eq!(beads.stamp(), a);
         std::fs::write(noms.join("manifest"), "root-b").unwrap();
+        let b = beads.stamp();
+        assert_ne!(b, a);
+        touch(&noms.join(DOLT_JOURNAL), 1);
+        assert_eq!(beads.stamp(), b);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stamp_tracks_server_journal() {
+        let dir = std::env::temp_dir().join(format!("sulla-stamp-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let beads = Beads::new(&dir);
+        let noms = dir.join(".beads/dolt/db/.dolt/noms");
+        std::fs::create_dir_all(dir.join(".beads/dolt/.dolt")).unwrap();
+        std::fs::create_dir_all(&noms).unwrap();
+        std::fs::write(noms.join("manifest"), "root-a").unwrap();
+        assert_eq!(beads.stamp().as_deref(), Some(b"root-a".as_slice()));
+        touch(&noms.join(DOLT_JOURNAL), 1);
+        let a = beads.stamp();
+        assert_eq!(beads.stamp(), a);
+        touch(&noms.join(DOLT_JOURNAL), 2);
         assert_ne!(beads.stamp(), a);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn touch(path: &Path, secs: u64) {
+        let f = std::fs::File::create(path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
     }
 }
