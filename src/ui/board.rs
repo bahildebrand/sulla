@@ -12,6 +12,7 @@ use crate::app::App;
 use crate::beads::{Bead, Column, State};
 use crate::checks::Check;
 use crate::pr::Checks;
+use crate::scheduler;
 use crate::ui::review;
 
 fn badge(app: &App, b: &Bead) -> Span<'static> {
@@ -288,16 +289,22 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     if !labels.is_empty() {
         meta.push(labels.join(", "));
     }
-    let mut blockers = b.open_blockers();
-    if let Some(ids) = app.blocked.get(&b.id) {
-        for id in ids {
-            if !blockers.contains(&id.as_str()) {
-                blockers.push(id);
-            }
-        }
+    if let Some(p) = app.stacked_on.get(&b.id) {
+        meta.push(format!("stacked on {p}"));
     }
+    let blockers = scheduler::blockers(b, &app.blocked, &app.stacked_on);
     if !blockers.is_empty() {
         meta.push(format!("blocked by {}", blockers.join(", ")));
+    }
+    if let Some(d) = app.dependents.get(&b.id) {
+        if !d.blocks.is_empty() {
+            meta.push(format!("blocks {}", d.blocks.join(", ")));
+        }
+        match d.stacked.len() {
+            0 => {}
+            1 | 2 => meta.push(format!("stacked: {}", d.stacked.join(", "))),
+            n => meta.push(format!("{n} stacked")),
+        }
     }
     if let Some(loc) = app.slot_location(&b.id) {
         meta.push(loc);

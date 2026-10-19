@@ -204,6 +204,8 @@ pub struct App {
     pub blocked: HashMap<String, Vec<String>>,
     pub diffstats: HashMap<String, DiffStat>,
     pub conflicts: HashMap<String, Conflict>,
+    pub stacked_on: HashMap<String, String>,
+    pub dependents: HashMap<String, scheduler::Dependents>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
     pub backoff: Backoff,
@@ -314,6 +316,8 @@ impl App {
             blocked: HashMap::new(),
             diffstats: HashMap::new(),
             conflicts: HashMap::new(),
+            stacked_on: HashMap::new(),
+            dependents: HashMap::new(),
             agents: HashMap::new(),
             failed: HashSet::new(),
             backoff: Backoff::default(),
@@ -696,6 +700,8 @@ impl App {
                 self.blocked = s.blocked;
                 self.diffstats = s.diffstats;
                 self.conflicts = s.conflicts;
+                self.stacked_on = s.stacked_on;
+                self.dependents = scheduler::dependents(&self.all, &self.blocked, &self.stacked_on);
                 let all = &self.all;
                 self.ai_reviews.retain(|id, r| {
                     all.iter().any(|b| {

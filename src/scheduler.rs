@@ -17,6 +17,58 @@ pub struct Snapshot {
     pub blocked: HashMap<String, Vec<String>>,
     pub diffstats: HashMap<String, DiffStat>,
     pub conflicts: HashMap<String, Conflict>,
+    pub stacked_on: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Dependents {
+    pub blocks: Vec<String>,
+    pub stacked: Vec<String>,
+}
+
+pub fn blockers<'a>(
+    b: &'a Bead,
+    blocked: &'a HashMap<String, Vec<String>>,
+    stacked_on: &HashMap<String, String>,
+) -> Vec<&'a str> {
+    let mut out = b.open_blockers();
+    for id in blocked.get(&b.id).into_iter().flatten() {
+        if !out.contains(&id.as_str()) {
+            out.push(id);
+        }
+    }
+    let parent = stacked_on.get(&b.id);
+    out.retain(|id| parent.is_none_or(|p| p != id));
+    out
+}
+
+pub fn dependents(
+    all: &[Bead],
+    blocked: &HashMap<String, Vec<String>>,
+    stacked_on: &HashMap<String, String>,
+) -> HashMap<String, Dependents> {
+    let mut map: HashMap<String, Dependents> = HashMap::new();
+    let open: HashSet<&str> = all
+        .iter()
+        .filter(|b| b.status != "closed")
+        .map(|b| b.id.as_str())
+        .collect();
+    for b in all.iter().filter(|b| open.contains(b.id.as_str())) {
+        for id in blockers(b, blocked, stacked_on) {
+            map.entry(id.to_string())
+                .or_default()
+                .blocks
+                .push(b.id.clone());
+        }
+        if let Some(p) = stacked_on.get(&b.id) {
+            map.entry(p.clone()).or_default().stacked.push(b.id.clone());
+        }
+    }
+    for d in map.values_mut() {
+        d.blocks.sort();
+        d.stacked.sort();
+    }
+    map
 }
 
 fn diffstats(git: &Git, base: &str, all: &[Bead]) -> HashMap<String, DiffStat> {
@@ -63,6 +115,7 @@ pub fn spawn_poller(
                         ready: beads.ready()?,
                         blocked: beads.blocked()?,
                         conflicts,
+                        stacked_on: git.stacks().into_iter().collect(),
                     })
                 })
                 .map_err(|e| e.to_string());
@@ -501,6 +554,58 @@ mod tests {
             .map(|b| b.id.as_str())
             .collect();
         assert_eq!(ids, ["on-rev"]);
+    }
+
+    #[test]
+    fn dependents_reverse_blockers_and_stacks() {
+        let t = "2026-01-01T00:00:00Z";
+        let mut dep = bead("dep", 1, t, &[]);
+        dep.dependencies = vec![
+            crate::beads::Dependency {
+                id: "a".into(),
+                status: "open".into(),
+                dependency_type: "blocks".into(),
+            },
+            crate::beads::Dependency {
+                id: "x".into(),
+                status: "closed".into(),
+                dependency_type: "blocks".into(),
+            },
+        ];
+        let mut done = bead("done", 1, t, &[]);
+        done.status = "closed".into();
+        let all = vec![
+            bead("a", 1, t, &[]),
+            bead("b", 1, t, &[]),
+            dep,
+            bead("s1", 1, t, &[]),
+            bead("s2", 1, t, &[]),
+            done,
+        ];
+        let blocked = HashMap::from([
+            ("dep".to_string(), vec!["a".to_string(), "b".to_string()]),
+            ("s1".to_string(), vec!["a".to_string()]),
+            ("s2".to_string(), vec!["a".to_string()]),
+            ("done".to_string(), vec!["a".to_string()]),
+        ]);
+        let stacked_on = HashMap::from([
+            ("s1".to_string(), "a".to_string()),
+            ("s2".to_string(), "a".to_string()),
+        ]);
+        let map = dependents(&all, &blocked, &stacked_on);
+        assert_eq!(
+            map.get("a"),
+            Some(&Dependents {
+                blocks: vec!["dep".into()],
+                stacked: vec!["s1".into(), "s2".into()],
+            })
+        );
+        assert_eq!(
+            map.get("b").map(|d| &d.blocks),
+            Some(&vec!["dep".to_string()])
+        );
+        assert!(!map.contains_key("x"));
+        assert!(blockers(&all[3], &blocked, &stacked_on).is_empty());
     }
 
     #[test]
