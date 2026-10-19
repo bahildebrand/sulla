@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use color_eyre::{Result, eyre::eyre};
 use portable_pty::CommandBuilder;
+use serde_json::{Value, json};
 
 use super::{Outcome, Prepare, Sandbox};
 use crate::agent::Launch;
@@ -102,6 +104,29 @@ impl Cli {
             ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn feed<S: AsRef<std::ffi::OsStr>>(&self, args: &[S], input: &str) -> Result<()> {
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| eyre!("{} has no stdin", self.bin))?
+            .write_all(input.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(eyre!(
+                "{} exec: {}",
+                self.bin,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
     }
 
     fn query(&self, path: &str) -> Result<serde_json::Value> {
@@ -428,6 +453,29 @@ impl Driver {
         });
     }
 
+    fn seed_claude(&self, name: &str) -> Result<()> {
+        let path = claude_config(&self.cfg, &self.host.home);
+        let path = path.to_string_lossy();
+        let uid = self.host.uid.to_string();
+        let gid = self.host.gid.to_string();
+        let user = ["exec", name, "--user", &uid, "--group", &gid, "--"];
+        let read = [&user[..], &["cat", &path]].concat();
+        let mut v = match self.run(&read) {
+            Err(_) => json!({}),
+            Ok(s) => match serde_json::from_str::<Value>(&s) {
+                Ok(v) if v.is_object() => v,
+                _ => return Err(eyre!("{path} is not a JSON object, leaving it alone")),
+            },
+        };
+        if !trust_claude(&mut v, &self.repo) {
+            return Ok(());
+        }
+        tracing::info!("incus: seeding {path} in {name}");
+        let script = "umask 077 && cat > \"$1.sulla\" && mv \"$1.sulla\" \"$1\"";
+        let write = [&user[..], &["sh", "-c", script, "sh", &path]].concat();
+        self.cli.feed(&write, &serde_json::to_string_pretty(&v)?)
+    }
+
     fn prepare(&self, slot: usize, id: &str) -> Result<()> {
         let name = self.name(slot);
         tracing::info!("incus: preparing {name} for {id}");
@@ -441,6 +489,9 @@ impl Driver {
                 .map_err(|e| self.idmap_error(e))?;
         }
         self.wait_ready(&name)?;
+        if let Err(e) = self.seed_claude(&name) {
+            tracing::warn!("incus: seeding Claude config in {name} failed: {e:#}");
+        }
         self.beads_proxy(&name)?;
         tracing::info!("incus: {name} ready");
         self.refresh_address(slot);
@@ -673,6 +724,33 @@ fn session_root(cfg: &IncusConfig, home: &str, kind: AgentKind) -> Option<PathBu
         .then_some(root)
 }
 
+fn claude_config(cfg: &IncusConfig, home: &str) -> PathBuf {
+    match cfg.env.get(sessions::env_var(AgentKind::Claude)) {
+        Some(dir) => PathBuf::from(expand_home(dir, home)).join(".claude.json"),
+        None => Path::new(home).join(".claude.json"),
+    }
+}
+
+fn trust_claude(v: &mut Value, repo: &Path) -> bool {
+    let mut changed = false;
+    if v["hasCompletedOnboarding"] != true {
+        v["hasCompletedOnboarding"] = true.into();
+        changed = true;
+    }
+    if !v["projects"].is_object() {
+        v["projects"] = json!({});
+    }
+    let project = &mut v["projects"][repo.to_string_lossy().as_ref()];
+    if !project.is_object() {
+        *project = json!({});
+    }
+    if project["hasTrustDialogAccepted"] != true {
+        project["hasTrustDialogAccepted"] = true.into();
+        changed = true;
+    }
+    changed
+}
+
 fn expand_home(path: &str, home: &str) -> String {
     match path.strip_prefix('~') {
         Some("") => home.to_string(),
@@ -824,6 +902,48 @@ mod tests {
         assert_eq!(session_root(&cfg, "/h", AgentKind::Claude), None);
         cfg.mounts.clear();
         assert_eq!(session_root(&cfg, "/h", AgentKind::Copilot), None);
+    }
+
+    #[test]
+    fn claude_config_follows_config_dir() {
+        let mut cfg = IncusConfig::default();
+        assert_eq!(claude_config(&cfg, "/h"), PathBuf::from("/h/.claude.json"));
+        cfg.env
+            .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude/alt".into());
+        assert_eq!(
+            claude_config(&cfg, "/h"),
+            PathBuf::from("/h/.claude/alt/.claude.json")
+        );
+    }
+
+    #[test]
+    fn trust_claude_skips_onboarding_and_trusts_repo() {
+        let repo = Path::new("/home/blake/git/memfault");
+        let mut v = json!({});
+        assert!(trust_claude(&mut v, repo));
+        assert_eq!(v["hasCompletedOnboarding"], true);
+        assert_eq!(
+            v["projects"]["/home/blake/git/memfault"]["hasTrustDialogAccepted"],
+            true
+        );
+        assert!(!trust_claude(&mut v, repo));
+    }
+
+    #[test]
+    fn trust_claude_keeps_existing_settings() {
+        let repo = Path::new("/r");
+        let mut v = json!({
+            "numStartups": 3,
+            "projects": {
+                "/r": {"allowedTools": ["x"]},
+                "/other": {"hasTrustDialogAccepted": false}
+            }
+        });
+        assert!(trust_claude(&mut v, repo));
+        assert_eq!(v["numStartups"], 3);
+        assert_eq!(v["projects"]["/r"]["allowedTools"], json!(["x"]));
+        assert_eq!(v["projects"]["/r"]["hasTrustDialogAccepted"], true);
+        assert_eq!(v["projects"]["/other"]["hasTrustDialogAccepted"], false);
     }
 
     #[test]
