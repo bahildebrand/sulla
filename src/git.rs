@@ -270,6 +270,10 @@ impl Git {
         .to_string())
     }
 
+    pub fn dirty(&self, id: &str) -> Result<String> {
+        run(&self.worktree_path(id), &["status", "--porcelain"])
+    }
+
     pub fn was_merged(&self, id: &str) -> bool {
         !self.worktree_path(id).join(".git").exists()
             && self.ref_exists(&merged_ref(id, "base"))

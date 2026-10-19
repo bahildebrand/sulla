@@ -172,7 +172,7 @@ const HELP: &[(&str, &str)] = &[
         "m",
         "rebase + fast-forward merge (blocked unless checks pass)",
     ),
-    ("M", "force merge despite failing or running checks"),
+    ("M", "force merge despite failing, stale or running checks"),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),

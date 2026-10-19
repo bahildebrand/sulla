@@ -1,7 +1,9 @@
 mod incus;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
+use std::process::Command;
 
 use color_eyre::Result;
 use portable_pty::CommandBuilder;
@@ -49,6 +51,26 @@ pub trait Sandbox: Send {
     fn address(&self, _slot: usize) -> Option<String> {
         None
     }
+    fn isolated(&self) -> bool {
+        false
+    }
+    fn command(
+        &self,
+        _slot: usize,
+        cwd: &Path,
+        argv: &[OsString],
+        env: &[(String, String)],
+    ) -> Command {
+        host_command(cwd, argv, env)
+    }
+}
+
+pub fn host_command(cwd: &Path, argv: &[OsString], env: &[(String, String)]) -> Command {
+    let mut c = Command::new(&argv[0]);
+    c.args(&argv[1..])
+        .current_dir(cwd)
+        .envs(env.iter().cloned());
+    c
 }
 
 pub struct Worktree;

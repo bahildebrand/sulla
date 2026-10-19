@@ -497,6 +497,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     }
     if let Some(c) = check {
         let color = match c.status {
+            Status::Queued => Color::DarkGray,
             Status::Running => Color::Yellow,
             Status::Pass => Color::Green,
             Status::Fail => Color::Red,

@@ -121,6 +121,7 @@ pub struct App {
     pub parked_review: Option<Diff>,
     pub ai_reviews: HashMap<String, AiReview>,
     pub checks: HashMap<String, Check>,
+    check_runs: u64,
     pub mode: Mode,
     pub col: usize,
     pub zoom: bool,
@@ -185,6 +186,7 @@ impl App {
             parked_review: None,
             ai_reviews: HashMap::new(),
             checks: HashMap::new(),
+            check_runs: 0,
             mode: Mode::Normal,
             col: 0,
             zoom: false,
@@ -431,15 +433,7 @@ impl App {
                 self.schedule();
             }
             Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
-            Event::CheckDone(d) => {
-                if let Some(c) = self.checks.get_mut(&d.id)
-                    && c.head == d.head
-                    && c.status == checks::Status::Running
-                {
-                    c.finish(d.ok);
-                    self.status = format!("{}: {}", d.id, c.summary());
-                }
-            }
+            Event::CheckDone(d) => self.check_done(d),
         }
     }
 
@@ -734,6 +728,17 @@ impl App {
         })
     }
 
+    fn check_key(&self, id: &str) -> Result<checks::Key> {
+        Ok(checks::Key {
+            head: self.git.head(id)?,
+            dirty: self.git.dirty(id)?,
+        })
+    }
+
+    fn check_log(&self, id: &str) -> PathBuf {
+        checks::log_path(&self.repo.join(".sulla").join("checks"), id)
+    }
+
     fn sync_checks(&mut self) {
         let stale: Vec<String> = self
             .checks
@@ -757,40 +762,88 @@ impl App {
             if !self.git.worktree_path(&id).join(".git").exists() {
                 continue;
             }
-            let Ok(head) = self.git.head(&id) else {
+            let Ok(key) = self.check_key(&id) else {
                 continue;
             };
-            if self.checks.get(&id).is_none_or(|c| c.head != head) {
-                self.start_check(&id, &head);
+            if self.checks.get(&id).is_some_and(|c| c.key == key) {
+                continue;
+            }
+            self.stop_check(&id);
+            if let Some(c) = Check::restore(self.check_log(&id), &key) {
+                self.checks.insert(id, c);
+            } else if !self.sandbox.isolated() || self.slots.get(&id).is_some() {
+                self.enqueue_check(&id, key, false);
             }
         }
+        self.pump_checks();
     }
 
-    fn start_check(&mut self, id: &str, head: &str) {
+    fn enqueue_check(&mut self, id: &str, key: checks::Key, host: bool) {
+        self.stop_check(id);
+        self.check_runs += 1;
+        let c = Check::queued(key, self.check_log(id), self.check_runs, host);
+        self.checks.insert(id.to_string(), c);
+    }
+
+    fn pump_checks(&mut self) {
+        if self
+            .checks
+            .values()
+            .any(|c| c.status == checks::Status::Running)
+        {
+            return;
+        }
+        let Some(id) = self
+            .checks
+            .iter()
+            .filter(|(_, c)| c.status == checks::Status::Queued)
+            .min_by_key(|(_, c)| c.queued)
+            .map(|(id, _)| id.clone())
+        else {
+            return;
+        };
         let Some(cmd) = self.check_cmd() else {
             return;
         };
-        self.stop_check(id);
-        let log = self
-            .repo
-            .join(".sulla")
-            .join("checks")
-            .join(format!("{id}.log"));
-        let dir = self.git.worktree_path(id);
-        let c = Check::start(
-            id,
-            head,
-            &cmd,
-            &dir,
-            log.clone(),
-            self.cfg.kache,
-            self.tx.clone(),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!("check for {id} failed to start: {e:#}");
-            Check::failed(head, log, &e.to_string())
-        });
-        self.checks.insert(id.to_string(), c);
+        let dir = self.git.worktree_path(&id);
+        let mut env = vec![("SULLA_BEAD".to_string(), id.clone())];
+        if self.cfg.kache {
+            env.push(("RUSTC_WRAPPER".into(), "kache".into()));
+        }
+        let argv: Vec<std::ffi::OsString> = ["sh", "-c", &cmd].map(Into::into).into();
+        let host = self.checks[&id].host;
+        let command = if !self.sandbox.isolated() || host {
+            Some(sandbox::host_command(&dir, &argv, &env))
+        } else {
+            self.slots
+                .get(&id)
+                .map(|slot| self.sandbox.command(slot, &dir, &argv, &env))
+        };
+        let tx = self.tx.clone();
+        let c = self.checks.get_mut(&id).unwrap();
+        let r = match command {
+            Some(command) => c.launch(&id, command, tx),
+            None => Err(eyre!(
+                "no sandbox container for {id}, T runs checks on the host"
+            )),
+        };
+        if let Err(e) = r {
+            tracing::warn!("check for {id} did not start: {e:#}");
+            c.fail(&e.to_string());
+            self.pump_checks();
+        }
+    }
+
+    fn check_done(&mut self, d: checks::Done) {
+        let key = self.check_key(&d.id).ok();
+        if let Some(c) = self.checks.get_mut(&d.id)
+            && c.run == d.run
+            && c.status == checks::Status::Running
+        {
+            c.finish(d.ok, key);
+            self.status = format!("{}: {}", d.id, c.summary());
+        }
+        self.pump_checks();
     }
 
     fn stop_check(&mut self, id: &str) {
@@ -808,11 +861,21 @@ impl App {
             self.status = format!("{id} is not in review");
             return;
         }
-        let r = self.git.head(id);
-        if let Some(head) = self.report(r) {
-            self.start_check(id, &head);
-            self.status = format!("checks for {id} restarted");
-        }
+        let r = self.check_key(id);
+        let Some(key) = self.report(r) else {
+            return;
+        };
+        let host = self.sandbox.isolated() && self.slots.get(id).is_none();
+        self.enqueue_check(id, key, host);
+        self.pump_checks();
+        self.status = format!(
+            "checks for {id} queued{}",
+            if host {
+                " on the host, no container"
+            } else {
+                ""
+            }
+        );
     }
 
     fn check_blocker(&self, id: &str) -> Option<String> {
@@ -820,16 +883,23 @@ impl App {
         if !self.git.worktree_path(id).join(".git").exists() {
             return None;
         }
-        let Some(c) = self.checks.get(id) else {
-            return Some("checks have not run".into());
+        let key = match self.check_key(id) {
+            Ok(k) => k,
+            Err(_) => return Some("worktree state is unreadable".into()),
         };
-        if c.status == checks::Status::Running {
-            return Some("checks are still running".into());
+        if !key.dirty.is_empty() {
+            return Some("the worktree has uncommitted changes".into());
         }
-        if self.git.head(id).is_ok_and(|h| h != c.head) {
-            return Some("checks are stale".into());
+        let Some(c) = self.checks.get(id) else {
+            return Some("checks have not run (T runs them)".into());
+        };
+        match c.status {
+            checks::Status::Queued => Some("checks are queued".into()),
+            checks::Status::Running => Some("checks are still running".into()),
+            _ if c.key != key => Some("checks are stale".into()),
+            checks::Status::Fail => Some("checks failed".into()),
+            _ => None,
         }
-        (c.status == checks::Status::Fail).then(|| "checks failed".into())
     }
 
     fn show_check(&mut self, id: String) {
@@ -1249,6 +1319,9 @@ impl App {
     }
 
     fn kill(&mut self, id: &str) {
+        if agent::reviewed_bead(id).is_none() {
+            self.stop_check(id);
+        }
         self.remove_agent(id, Outcome::Killed);
         if id == CHAT_ID {
             self.chat_session = None;

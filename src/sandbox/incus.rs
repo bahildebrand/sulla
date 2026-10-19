@@ -419,6 +419,7 @@ impl Sandbox for Incus {
             &cwd,
             &env,
             cmd.get_argv(),
+            true,
         );
         let mut out = CommandBuilder::from_argv(argv);
         out.cwd(&cwd);
@@ -464,6 +465,37 @@ impl Sandbox for Incus {
 
     fn address(&self, slot: usize) -> Option<String> {
         self.addrs.lock().unwrap().get(&slot).cloned()
+    }
+
+    fn isolated(&self) -> bool {
+        true
+    }
+
+    fn command(
+        &self,
+        slot: usize,
+        cwd: &Path,
+        argv: &[OsString],
+        env: &[(String, String)],
+    ) -> Command {
+        let env = exec_env(
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            &self.host,
+            &self.cfg.env,
+        );
+        let cwd = cwd.to_string_lossy();
+        let argv = exec_argv(
+            &self.cfg.bin,
+            &self.name(slot),
+            &self.host,
+            &cwd,
+            &env,
+            argv,
+            false,
+        );
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        c
     }
 }
 
@@ -561,6 +593,7 @@ fn exec_argv(
     cwd: &str,
     env: &[(String, String)],
     argv: &[OsString],
+    tty: bool,
 ) -> Vec<OsString> {
     let mut out: Vec<OsString> = [
         bin,
@@ -572,7 +605,7 @@ fn exec_argv(
         &host.gid.to_string(),
         "--cwd",
         cwd,
-        "-t",
+        if tty { "-t" } else { "-T" },
     ]
     .into_iter()
     .map(OsString::from)
@@ -680,6 +713,7 @@ mod tests {
             "/repo/.sulla/worktrees/x-1",
             &[("A".into(), "1".into()), ("B".into(), "x y".into())],
             cmd.get_argv(),
+            true,
         );
         let argv: Vec<_> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
@@ -706,6 +740,8 @@ mod tests {
                 "do it",
             ]
         );
+        let argv = exec_argv("incus", "n", &host(), "/w", &[], &["sh".into()], false);
+        assert!(argv.contains(&"-T".into()) && !argv.contains(&"-t".into()));
     }
 
     #[test]

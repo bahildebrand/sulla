@@ -46,11 +46,15 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   Comments whose line is no longer in the diff move to their file header, or to the first file
   when the file is gone. They are cleared when a new AI review starts, when you send feedback,
   or when the bead goes back to running for another reason.
-- With `check` set, sulla runs it with `sh -c` in the bead worktree on the host (also with the
-  incus sandbox) whenever a bead in Review has a new branch head, killing any run on an older
-  head. Output goes to `.sulla/checks/<bead>.log`. Cards show `⟳chk`, `✓chk` or `✗chk` and the
-  Review header shows the result and duration. `m` refuses to merge while checks are failing,
-  running, stale or missing. `M` force merges anyway. `t` shows the output, `T` reruns.
+- With `check` set, sulla runs it with `sh -c` in the bead worktree whenever a bead in Review
+  has a new branch head or `git status --porcelain`, killing any run on an older state. Only one
+  check runs at a time, the rest queue. With `sandbox = "incus"` it runs inside the bead's
+  container. If the bead has no container (e.g. after a restart) nothing starts automatically and
+  `T` runs it on the host. Output goes to `.sulla/checks/<bead>.log` and the result to
+  `<bead>.json`, reused on restart when head and status still match. Cards show `…chk`, `⟳chk`,
+  `✓chk` or `✗chk` and the Review header shows the result and duration. `m` refuses to merge
+  while checks are failing, queued, running, stale or missing, or the worktree has uncommitted
+  changes. `M` force merges anyway. `t` shows the output, `T` reruns.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
 - Each poll runs `git merge-tree` on every open bead's committed branch against base and against
