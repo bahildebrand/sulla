@@ -108,16 +108,37 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Relation {
+    None,
+    Ancestor,
+    Descendant,
+}
+
+fn relation(chain: Option<&(String, scheduler::Chain)>, b: &Bead) -> Relation {
+    match chain {
+        Some((_, c)) if c.ancestors.contains(&b.id) => Relation::Ancestor,
+        Some((_, c)) if c.descendants.contains(&b.id) => Relation::Descendant,
+        _ => Relation::None,
+    }
+}
+
 fn count(app: &App, shown: usize, total: usize) -> String {
-    if app.filter.is_active() {
+    if app.is_filtered() {
         format!("{shown}/{total}")
     } else {
         shown.to_string()
     }
 }
 
-fn headline(app: &App, b: &Bead, base: Style) -> Line<'static> {
+fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
+    let (glyph, base) = match rel {
+        Relation::Ancestor => ("▲", base.fg(Color::LightYellow)),
+        Relation::Descendant => ("▼", base.fg(Color::LightMagenta)),
+        Relation::None => (" ", base),
+    };
     let mut spans = vec![
+        Span::styled(glyph, base.bold()),
         marker(app, b),
         conflict(app, b),
         badge(app, b),
@@ -200,6 +221,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
     let cols = app.columns();
     let totals = app.all_columns().map(|c| c.len());
+    let chain = app.selected_chain();
     let now = Utc::now();
     let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
     for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
@@ -207,7 +229,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let active = i == app.col;
         let items: Vec<ListItem> = beads
             .iter()
-            .map(|b| ListItem::new(vec![headline(app, b, Style::new()), activity(app, b, now)]))
+            .map(|b| {
+                ListItem::new(vec![
+                    headline(app, b, Style::new(), relation(chain.as_ref(), b)),
+                    activity(app, b, now),
+                ])
+            })
             .collect();
         let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
         let border = if active {
@@ -282,8 +309,8 @@ fn scroll_hints(
     }
 }
 
-fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
-    let mut lines = vec![headline(app, b, Style::new().bold())];
+fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
+    let mut lines = vec![headline(app, b, Style::new().bold(), rel)];
     let mut meta = vec![b.issue_type.clone(), b.status.clone()];
     let labels: Vec<&str> = b.labels.iter().map(String::as_str).collect();
     if !labels.is_empty() {
@@ -367,7 +394,11 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
     let col = Column::ALL[i];
     let beads = &cols[i];
     let width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = beads.iter().map(|b| card(app, b, width)).collect();
+    let chain = app.selected_chain();
+    let items: Vec<ListItem> = beads
+        .iter()
+        .map(|b| card(app, b, width, relation(chain.as_ref(), b)))
+        .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let nav: Vec<Span> = Column::ALL
         .iter()

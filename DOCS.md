@@ -262,6 +262,12 @@ list say with what. Uncommitted changes are not checked.
   parent is not repeated under `blocked by`), `blocked by <ids>` for other unmet blockers,
   `blocks <ids>` for open beads waiting on it, and `stacked: <ids>` (or `<n> stacked` past two)
   for beads stacked on it.
+- The selected card's chain is highlighted in every column: its transitive blockers and stack
+  parents get a yellow `▲` and title, and beads transitively blocked by or stacked on it get a
+  magenta `▼` and title. Dependency cycles are walked once.
+- `L` toggles a chain filter that shows only the selected bead, its ancestors and its descendants
+  across columns. The status bar shows `CHAIN <id>` and column counts read `shown/total` while it
+  is on. `L` again (or `Esc`) restores the normal board. It combines with the `/` filter.
 - `!` (or `:health`) opens a health panel: probes `bd`, the agent CLI, `kache` and `incus`
   (including `incus query /1.0`), plus `gh` (including `gh auth status`) when `workflow = "pr"`,
   shows the last bd poll error, and explains why nothing is

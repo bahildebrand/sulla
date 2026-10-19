@@ -234,6 +234,7 @@ pub struct App {
     pub col: usize,
     pub zoom: bool,
     pub filter: Filter,
+    pub chain_filter: Option<String>,
     pub rows: [usize; Column::ALL.len()],
     pub status: String,
     rebuilt: Option<String>,
@@ -337,6 +338,7 @@ impl App {
             col: 0,
             zoom: false,
             filter: Filter::default(),
+            chain_filter: None,
             rows: [0; Column::ALL.len()],
             status: String::new(),
             rebuilt: None,
@@ -382,7 +384,33 @@ impl App {
                 c.retain(|b| self.filter.matches(b));
             }
         }
+        if let Some(id) = &self.chain_filter {
+            let chain = self.chain(id);
+            for c in &mut cols {
+                c.retain(|b| b.id == *id || chain.contains(&b.id));
+            }
+        }
         cols
+    }
+
+    pub fn is_filtered(&self) -> bool {
+        self.filter.is_active() || self.chain_filter.is_some()
+    }
+
+    pub fn chain(&self, id: &str) -> scheduler::Chain {
+        scheduler::chain(
+            id,
+            &self.all,
+            &self.blocked,
+            &self.stacked_on,
+            &self.dependents,
+        )
+    }
+
+    pub fn selected_chain(&self) -> Option<(String, scheduler::Chain)> {
+        let id = self.selected()?.id;
+        let chain = self.chain(&id);
+        Some((id, chain))
     }
 
     pub fn all_columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
@@ -2217,13 +2245,34 @@ impl App {
     }
 
     fn set_filter(&mut self, query: &str) {
+        let filter = Filter::parse(query);
+        self.refilter(|app| app.filter = filter);
+    }
+
+    fn toggle_chain_filter(&mut self) {
+        if let Some(id) = self.chain_filter.clone() {
+            self.refilter(|app| app.chain_filter = None);
+            self.status = format!("chain filter for {id} cleared");
+            return;
+        }
+        let Some(b) = self.selected() else {
+            self.status = "no bead selected".into();
+            return;
+        };
+        let id = b.id;
+        self.refilter(|app| app.chain_filter = Some(id.clone()));
+        let n: usize = self.columns().iter().map(Vec::len).sum();
+        self.status = format!("chain of {id}: {n} bead(s), L clears");
+    }
+
+    fn refilter(&mut self, apply: impl FnOnce(&mut Self)) {
         let cols = self.columns();
         let selected: Vec<Option<String>> = cols
             .iter()
             .zip(self.rows)
             .map(|(c, r)| c.get(r).map(|b| b.id.clone()))
             .collect();
-        self.filter = Filter::parse(query);
+        apply(self);
         let rows: Vec<usize> = self
             .columns()
             .iter()
@@ -2957,6 +3006,8 @@ impl App {
                 self.set_filter("");
                 self.status = "filter cleared".into();
             }
+            KeyCode::Esc if self.chain_filter.is_some() => self.toggle_chain_filter(),
+            KeyCode::Char('L') => self.toggle_chain_filter(),
             KeyCode::Char('/') => {
                 let q = self.filter.query.clone();
                 self.mode = Mode::Input {

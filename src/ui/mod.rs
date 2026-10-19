@@ -135,6 +135,10 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         spans.push(tag("FILTER", Color::Yellow));
         spans.push(Span::raw(format!(" /{} ", app.filter.query)));
     }
+    if let Some(id) = &app.chain_filter {
+        spans.push(tag("CHAIN", Color::Yellow));
+        spans.push(Span::raw(format!(" {id} ")));
+    }
     if app.paused {
         spans.push(tag("PAUSED", Color::Yellow));
         spans.push(Span::raw(" "));
@@ -173,6 +177,10 @@ const HELP: &[(&str, &str)] = &[
         "filter: words match title/id, label:x (l:x), p:1 p:0-2 p:1,3",
     ),
     ("Esc", "clear filter (when not zoomed)"),
+    (
+        "L",
+        "toggle chain filter: only the selected bead, its blockers/parents (▲) and dependents (▼)",
+    ),
     (
         "Enter / p / r",
         "open / progress (reviewer if reviewing) / review",

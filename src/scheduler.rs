@@ -71,6 +71,67 @@ pub fn dependents(
     map
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub struct Chain {
+    pub ancestors: HashSet<String>,
+    pub descendants: HashSet<String>,
+}
+
+impl Chain {
+    pub fn contains(&self, id: &str) -> bool {
+        self.ancestors.contains(id) || self.descendants.contains(id)
+    }
+}
+
+fn walk<'a>(start: &'a str, next: impl Fn(&str) -> Vec<&'a str>) -> HashSet<String> {
+    let mut seen: HashSet<&str> = HashSet::from([start]);
+    let mut stack = vec![start];
+    while let Some(id) = stack.pop() {
+        for n in next(id) {
+            if seen.insert(n) {
+                stack.push(n);
+            }
+        }
+    }
+    seen.remove(start);
+    seen.into_iter().map(String::from).collect()
+}
+
+pub fn chain(
+    id: &str,
+    all: &[Bead],
+    blocked: &HashMap<String, Vec<String>>,
+    stacked_on: &HashMap<String, String>,
+    dependents: &HashMap<String, Dependents>,
+) -> Chain {
+    let beads: HashMap<&str, &Bead> = all.iter().map(|b| (b.id.as_str(), b)).collect();
+    let ancestors = walk(id, |id| {
+        let mut out: Vec<&str> = match beads.get(id) {
+            Some(b) => blockers(b, blocked, stacked_on),
+            None => blocked
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect(),
+        };
+        out.extend(stacked_on.get(id).map(String::as_str));
+        out
+    });
+    let descendants = walk(id, |id| {
+        dependents
+            .get(id)
+            .into_iter()
+            .flat_map(|d| d.blocks.iter().chain(&d.stacked))
+            .map(String::as_str)
+            .collect()
+    });
+    Chain {
+        ancestors,
+        descendants,
+    }
+}
+
 fn diffstats(git: &Git, base: &str, all: &[Bead]) -> HashMap<String, DiffStat> {
     all.iter()
         .filter(|b| b.status != "closed")
@@ -653,6 +714,38 @@ mod tests {
         };
         assert_eq!(ids(true), ["on-pr", "on-rev"]);
         assert_eq!(ids(false), ["on-rev"]);
+    }
+
+    #[test]
+    fn chain_walks_ancestors_and_descendants_with_cycle_guard() {
+        let t = "2026-01-01T00:00:00Z";
+        let all: Vec<Bead> = ["root", "mid", "leaf", "stack", "side", "x", "y"]
+            .iter()
+            .map(|id| bead(id, 1, t, &[]))
+            .collect();
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let blocked = HashMap::from([
+            ("mid".to_string(), ids(&["root"])),
+            ("leaf".to_string(), ids(&["mid", "side"])),
+            ("x".to_string(), ids(&["y"])),
+            ("y".to_string(), ids(&["x"])),
+        ]);
+        let stacked_on = HashMap::from([("stack".to_string(), "leaf".to_string())]);
+        let deps = dependents(&all, &blocked, &stacked_on);
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+
+        let c = chain("mid", &all, &blocked, &stacked_on, &deps);
+        assert_eq!(c.ancestors, set(&["root"]));
+        assert_eq!(c.descendants, set(&["leaf", "stack"]));
+        assert!(!c.contains("side") && !c.contains("mid"));
+
+        let c = chain("stack", &all, &blocked, &stacked_on, &deps);
+        assert_eq!(c.ancestors, set(&["leaf", "mid", "side", "root"]));
+        assert!(c.descendants.is_empty());
+
+        let c = chain("x", &all, &blocked, &stacked_on, &deps);
+        assert_eq!(c.ancestors, set(&["y"]));
+        assert_eq!(c.descendants, set(&["y"]));
     }
 
     #[test]
