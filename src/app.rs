@@ -1697,9 +1697,17 @@ impl App {
         let base = self.pr_base(&id);
         let remote = &self.cfg.pr.remote;
         let br = git::branch(&id);
-        let msg = match self.bead(&id).and_then(|b| b.label("pr")) {
-            Some(n) => format!("Force push {br} to {remote} and update PR #{n}? y/n"),
-            None => format!("Push {br} to {remote} and open a PR against {base}? y/n"),
+        let msg = match (self.cfg.pr.tool, self.bead(&id).and_then(|b| b.label("pr"))) {
+            (PrTool::Gh, Some(n)) => format!("Force push {br} to {remote} and update PR #{n}? y/n"),
+            (PrTool::Gh, None) => {
+                format!("Push {br} to {remote} and open a PR against {base}? y/n")
+            }
+            (PrTool::Graphite, Some(n)) => {
+                format!("Submit {br} with Graphite onto {base} and update PR #{n}? y/n")
+            }
+            (PrTool::Graphite, None) => {
+                format!("Submit {br} with Graphite and open a PR against {base}? y/n")
+            }
         };
         let n = self.review_of(&id).map_or(0, Diff::rejected_hunks);
         let msg = if n > 0 {
@@ -1726,16 +1734,21 @@ impl App {
             .git
             .commit_pending(id, &msg)
             .and_then(|_| self.git.drop_rejected(id, &self.base, &msg, &rejection))
-            .and_then(|_| self.git.push(id, &self.cfg.pr.remote, old.is_some()))
-            .and_then(|_| {
-                pr::create(
-                    &self.repo,
-                    &git::branch(id),
-                    &base,
-                    &bead.title,
-                    &pr::body(id, &bead.description),
-                    self.cfg.pr.draft,
-                )
+            .and_then(|_| match self.cfg.pr.tool {
+                PrTool::Gh => self
+                    .git
+                    .push(id, &self.cfg.pr.remote, old.is_some())
+                    .and_then(|_| {
+                        pr::create(
+                            &self.repo,
+                            &git::branch(id),
+                            &base,
+                            &bead.title,
+                            &pr::body(id, &bead.description),
+                            self.cfg.pr.draft,
+                        )
+                    }),
+                PrTool::Graphite => self.submit_graphite(id, &base, &bead),
             });
         let Some(created) = self.report(r) else {
             return self.mutated();
@@ -1763,6 +1776,26 @@ impl App {
             }
         }
         self.mutated();
+    }
+
+    fn submit_graphite(&self, id: &str, base: &str, bead: &Bead) -> Result<pr::Pr> {
+        let dir = self.git.worktree_path(id);
+        let br = git::branch(id);
+        let existed = pr::find(&self.repo, &br)?.is_some();
+        graphite::track(&dir, &br, base)?;
+        graphite::submit(&dir, self.cfg.pr.draft)?;
+        let Some(created) = pr::find(&self.repo, &br)? else {
+            bail!("gt submit opened no PR for {br}");
+        };
+        if !existed {
+            pr::edit(
+                &self.repo,
+                created.number,
+                &bead.title,
+                &pr::body(id, &bead.description),
+            )?;
+        }
+        Ok(created)
     }
 
     fn reply_revised(&mut self, id: &str, number: u64) {

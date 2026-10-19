@@ -136,6 +136,19 @@ its agent and reviewer stop, leaving the worktree and session for later rounds. 
 force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`. With
 `workflow = "local"`, `P` only shows a status message.
 
+With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of `git push` and
+`gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
+rejected hunks, sulla runs `gt track sulla/<bead> --parent <parent> --no-interactive` in the bead's
+worktree, where the parent is the stack parent's branch or base as above. Re-tracking only updates
+Graphite's metadata and never rebases. It then runs
+`gt submit --no-interactive --no-edit --no-ai --no-stack` (plus `--draft` when `draft = true`),
+which pushes the branch and its downstack and opens or updates their PRs, never touching branches
+stacked above it. The PR is looked up with `gh pr list --head sulla/<bead>`, and when it was just
+created its title and body are set from the bead with `gh pr edit`. The rest (labels, Awaiting PR,
+watching, revising and merge detection) is the same as with `gh`. A stacked bead's parent must
+already be tracked by Graphite, which it is when the parent was also published with Graphite.
+Only sulla runs `gt`; agents never push or submit.
+
 ### Watching PRs
 
 With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR every

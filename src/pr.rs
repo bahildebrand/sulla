@@ -106,6 +106,11 @@ pub fn create(
     }
 }
 
+pub fn edit(repo: &Path, number: u64, title: &str, body: &str) -> Result<()> {
+    let n = number.to_string();
+    gh(repo, &["pr", "edit", &n, "--title", title, "--body", body]).map(|_| ())
+}
+
 pub fn body(id: &str, description: &str) -> String {
     let description = description.trim();
     if description.is_empty() {
