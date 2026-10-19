@@ -1191,7 +1191,8 @@ impl App {
         let prompt = prompt.or_else(|| {
             (!resume).then(|| {
                 let preset = presets::for_bead(&self.cfg.presets, &bead);
-                agent::task_prompt(&bead, parent.as_deref(), preset)
+                let task = agent::task_prompt(&bead, parent.as_deref(), preset);
+                agent::with_system(task, self.cfg.system_prompt.as_deref())
             })
         });
         let (kind, model) = agent::selection(&bead, self.cfg.agent);
@@ -1272,7 +1273,10 @@ impl App {
         }
         tracing::warn!("session of {id} is gone and has no backup, rebuilding it");
         let preset = presets::for_bead(&self.cfg.presets, bead);
-        let task = agent::task_prompt(bead, parent, preset);
+        let task = agent::with_system(
+            agent::task_prompt(bead, parent, preset),
+            self.cfg.system_prompt.as_deref(),
+        );
         let pr = bead.label("pr").map(|n| {
             n.parse()
                 .ok()
@@ -1347,9 +1351,9 @@ impl App {
             bead: true,
             worktree,
             resume: false,
-            prompt: Some(agent::review_prompt(
-                &bead,
-                &self.git.upstream(&bead.id, &self.base),
+            prompt: Some(agent::with_system(
+                agent::review_prompt(&bead, &self.git.upstream(&bead.id, &self.base)),
+                self.cfg.system_prompt.as_deref(),
             )),
             model,
         };
@@ -2058,7 +2062,12 @@ impl App {
             bead: false,
             worktree: self.repo.clone(),
             resume,
-            prompt: (!resume).then(|| agent::chat_prompt(&self.base, self.cfg.max_agents)),
+            prompt: (!resume).then(|| {
+                agent::with_system(
+                    agent::chat_prompt(&self.base, self.cfg.max_agents),
+                    self.cfg.system_prompt.as_deref(),
+                )
+            }),
             model: None,
         };
         let cmd = agent::command(self.backend(self.cfg.agent), &launch, self.cfg.kache, None);

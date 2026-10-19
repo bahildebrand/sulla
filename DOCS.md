@@ -77,6 +77,10 @@ closing it without merging, unstacks its children so they keep its commits in th
 - `preset:<name>` adds approach guidance to the prompt. Built-ins: `bugfix`, `feature`,
   `refactor`, `tests`, `docs`. `[presets]` in config overrides or adds more. The `n` popup sets
   agent and preset labels.
+- `system_prompt` in config holds your own instructions, appended to every prompt sulla starts
+  an agent with: bead tasks, AI reviews, rebuilt PR sessions and `c` conversations. Set it in
+  `.sulla/config.toml` for repo-specific rules, or globally for rules that apply everywhere.
+  Edits apply after restarting sulla, and agents keep the prompt they were started with.
 - `c` opens a conversation agent in the main checkout, not tied to a bead and not counted toward
   `max_agents`. It is primed to plan work and create beads (staged in Backlog, wired with
   `bd dep add`, released on your go). `X` ends it, `C` starts fresh.

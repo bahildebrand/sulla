@@ -55,6 +55,9 @@ check = "cargo test && cargo clippy" # pre-merge check, unset by default
 agent = "copilot" # or "claude"
 sandbox = "worktree" # or "incus"
 workflow = "local"   # or "pr" to land work through GitHub pull requests
+system_prompt = """
+Use pnpm, not npm. Run `make lint` before committing.
+"""
 
 [copilot]
 bin = "copilot"

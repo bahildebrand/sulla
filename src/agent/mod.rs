@@ -101,6 +101,16 @@ pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str
     )
 }
 
+pub fn with_system(prompt: String, system: Option<&str>) -> String {
+    match system.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!(
+            "{prompt}\n\nRepository instructions from the user. Follow them throughout this \
+             session:\n{s}"
+        ),
+        None => prompt,
+    }
+}
+
 pub fn review_id(bead_id: &str) -> String {
     format!("{bead_id}{REVIEW_SUFFIX}")
 }
@@ -1049,6 +1059,15 @@ mod tests {
         let b: Bead = serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
         let p = task_prompt(&b, None, Some(("bugfix", "reproduce first")));
         assert!(p.contains("Approach (bugfix): reproduce first"));
+    }
+
+    #[test]
+    fn system_prompt_is_appended_when_set() {
+        assert_eq!(with_system("task".into(), None), "task");
+        assert_eq!(with_system("task".into(), Some("  \n ")), "task");
+        let p = with_system("task".into(), Some("  use pnpm, not npm\n"));
+        assert!(p.starts_with("task\n\n"));
+        assert!(p.ends_with(":\nuse pnpm, not npm"));
     }
 
     #[test]

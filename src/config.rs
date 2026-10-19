@@ -13,6 +13,7 @@ pub struct Config {
     pub base_branch: Option<String>,
     pub kache: bool,
     pub check: Option<String>,
+    pub system_prompt: Option<String>,
     pub agent: AgentKind,
     pub sandbox: SandboxKind,
     pub copilot: CopilotConfig,
@@ -233,6 +234,7 @@ impl Default for Config {
             base_branch: None,
             kache: true,
             check: None,
+            system_prompt: None,
             agent: AgentKind::default(),
             sandbox: SandboxKind::default(),
             copilot: CopilotConfig::default(),
@@ -371,6 +373,23 @@ mod tests {
         assert_eq!(cfg.max_agents, 9);
         assert_eq!(cfg.incus.memory, "4GiB");
         assert_eq!(cfg.incus.golden, "sulla-golden");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn system_prompt_is_optional_and_repo_overrides_global() {
+        assert!(Config::default().system_prompt.is_none());
+        let d = tempdir("system");
+        let g = write(&d, "global.toml", "system_prompt = \"global rules\"");
+        let r = write(
+            &d,
+            "repo.toml",
+            "system_prompt = \"\"\"\nrepo rules\n\"\"\"",
+        );
+        let cfg = Config::load_from(Some(&g), &d.join("nope.toml")).unwrap();
+        assert_eq!(cfg.system_prompt.as_deref(), Some("global rules"));
+        let cfg = Config::load_from(Some(&g), &r).unwrap();
+        assert_eq!(cfg.system_prompt.as_deref(), Some("repo rules\n"));
         std::fs::remove_dir_all(d).unwrap();
     }
 
