@@ -149,6 +149,24 @@ watching, revising and merge detection) is the same as with `gh`. A stacked bead
 already be tracked by Graphite, which it is when the parent was also published with Graphite.
 Only sulla runs `gt`; agents never push or submit.
 
+sulla rebases stacks itself, so with `tool = "graphite"` it keeps Graphite's metadata in step:
+
+- Whenever a branch is restacked (a parent merged locally, its PR merged, or a closed parent was
+  swept) or unstacked (its parent closed without merging, or was discarded or retried), sulla
+  re-tracks it with `gt track` onto its new parent: the stack parent's branch while that parent is
+  open and Awaiting PR, else base. Branches still waiting to restack are re-tracked too. `gt` never
+  rebases anything.
+- A restacked branch that is Awaiting PR, whose rebase succeeded and whose worktree is clean, is
+  then re-submitted with `gt submit` from its worktree so its PR base and commits update.
+- When a bead is closed or discarded and its branch removed, sulla first runs
+  `gt untrack sulla/<bead> --force`, ignoring errors when it was not tracked. Graphite untracks its
+  children too, and they are re-tracked as above once restacked.
+- When a revised Awaiting PR bead is published again, its Awaiting PR children are restacked onto
+  the new parent tip, then re-tracked and re-submitted.
+
+Failures show in the status line as `could not update Graphite for <bead>` and successful
+re-submits as `resubmitted <bead> with Graphite`. With `tool = "gh"` none of this runs.
+
 ### Watching PRs
 
 With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR every

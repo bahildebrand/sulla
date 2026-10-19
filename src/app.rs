@@ -163,6 +163,8 @@ struct Restacked {
     moved: Vec<String>,
     deferred: Vec<String>,
     stuck: Vec<String>,
+    resubmitted: Vec<String>,
+    gt_failed: Vec<String>,
 }
 
 impl Restacked {
@@ -181,6 +183,18 @@ impl Restacked {
             s.push_str(&format!(
                 ", could not restack {} (rebased at merge)",
                 self.stuck.join(", ")
+            ));
+        }
+        if !self.resubmitted.is_empty() {
+            s.push_str(&format!(
+                ", resubmitted {} with Graphite",
+                self.resubmitted.join(", ")
+            ));
+        }
+        if !self.gt_failed.is_empty() {
+            s.push_str(&format!(
+                ", could not update Graphite for {}",
+                self.gt_failed.join(", ")
             ));
         }
         s
@@ -1683,11 +1697,13 @@ impl App {
         };
     }
 
+    fn awaiting_pr(&self, id: &str) -> bool {
+        self.bead(id)
+            .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
+    }
+
     fn pr_parent(&self, id: &str) -> Option<String> {
-        self.git.stack_parent(id).filter(|p| {
-            self.bead(p)
-                .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
-        })
+        self.git.stack_parent(id).filter(|p| self.awaiting_pr(p))
     }
 
     fn pr_base(&self, id: &str) -> String {
@@ -1758,6 +1774,7 @@ impl App {
         let msg = format!("{id}: {}", bead.title);
         let rejection = self.review_of(id).map(Diff::rejection).unwrap_or_default();
         let old = bead.label("pr").map(String::from);
+        let republished = old.is_some();
         let r = self
             .git
             .commit_pending(id, &msg)
@@ -1799,6 +1816,16 @@ impl App {
             self.parked_review = None;
             self.view = View::Board;
             self.status = format!("published {id} as PR #{} {}", created.number, created.url);
+            if republished && self.graphite() {
+                let children = self
+                    .git
+                    .children(id)
+                    .into_iter()
+                    .filter(|c| self.awaiting_pr(c))
+                    .collect();
+                let r = self.restack_synced(children, self.base.clone(), Some(id));
+                self.status.push_str(&r.summary());
+            }
             if let Some(tx) = &self.pr_refresh {
                 let _ = tx.send(());
             }
@@ -1925,6 +1952,7 @@ impl App {
         self.remove_agent(&agent::review_id(id), Outcome::Merged);
         self.remove_agent(id, Outcome::Merged);
         let children = self.git.children(id);
+        self.untrack(id);
         let r = self.git.retire(id, &self.base);
         if self.report(r).is_none() {
             return self.mutated();
@@ -2588,6 +2616,8 @@ impl App {
     fn discard(&mut self, id: &str) {
         self.stop_check(id);
         self.remove_agent(id, Outcome::Discarded);
+        let children = self.git.children(id);
+        self.untrack(id);
         let r = self
             .git
             .discard(id)
@@ -2596,6 +2626,9 @@ impl App {
         if self.report(r).is_some() {
             self.status = format!("discarded {id}, held in Pending (s to release)");
         }
+        let mut r = Restacked::default();
+        self.sync_graphite(&mut r, &children, None);
+        self.status.push_str(&r.summary());
         self.view = View::Board;
         self.mutated();
     }
@@ -2614,6 +2647,8 @@ impl App {
         self.remove_agent(id, Outcome::Discarded);
         self.failed.remove(id);
         let entry = format!("Retry after discarded attempt: {note}");
+        let children = self.git.children(id);
+        self.untrack(id);
         let r = self
             .git
             .remove(id)
@@ -2624,6 +2659,9 @@ impl App {
         if self.report(r).is_some() {
             self.status = format!("retrying {id} from scratch with note");
         }
+        let mut r = Restacked::default();
+        self.sync_graphite(&mut r, &children, None);
+        self.status.push_str(&r.summary());
         self.view = View::Board;
         self.mutated();
     }
@@ -2639,6 +2677,7 @@ impl App {
         }
         if self.git.was_merged(id) {
             self.remove_agent(id, Outcome::Merged);
+            self.untrack(id);
             self.status = match self.close_merged(id) {
                 Ok(()) => format!("{id} was already merged, closed bead"),
                 Err(e) => format!("{id} was already merged but bd close failed: {e}"),
@@ -2656,7 +2695,11 @@ impl App {
         let r = self
             .git
             .drop_rejected(id, &self.base, &msg, &rejection)
-            .and_then(|_| self.git.merge(id, &self.base, &msg));
+            .and_then(|_| self.git.land(id, &self.base, &msg))
+            .and_then(|_| {
+                self.untrack(id);
+                self.git.remove(id)
+            });
         let outcome = if r.is_ok() {
             Outcome::Merged
         } else {
@@ -2699,7 +2742,16 @@ impl App {
         self.restack_onto(queue, self.base.clone())
     }
 
-    fn restack_onto(&mut self, mut queue: Vec<String>, onto: String) -> Restacked {
+    fn restack_onto(&mut self, queue: Vec<String>, onto: String) -> Restacked {
+        self.restack_synced(queue, onto, None)
+    }
+
+    fn restack_synced(
+        &mut self,
+        mut queue: Vec<String>,
+        onto: String,
+        published: Option<&str>,
+    ) -> Restacked {
         let mut r = Restacked::default();
         while let Some(c) = queue.pop() {
             let fp = self.git.fingerprint(&c);
@@ -2723,7 +2775,64 @@ impl App {
                 }
             }
         }
+        self.sync_graphite(&mut r, &[], published);
         r
+    }
+
+    fn graphite(&self) -> bool {
+        self.cfg.workflow == Workflow::Pr && self.cfg.pr.tool == PrTool::Graphite
+    }
+
+    fn untrack(&self, id: &str) {
+        if !self.graphite() {
+            return;
+        }
+        if let Err(e) = graphite::untrack(&self.repo, &git::branch(id)) {
+            tracing::debug!("gt untrack {id}: {e:#}");
+        }
+    }
+
+    fn sync_graphite(&self, r: &mut Restacked, unstacked: &[String], published: Option<&str>) {
+        if !self.graphite() {
+            return;
+        }
+        let unmoved: Vec<String> = r
+            .deferred
+            .iter()
+            .chain(&r.stuck)
+            .chain(unstacked)
+            .cloned()
+            .collect();
+        let steps = graphite::plan(
+            self.cfg.pr.tool,
+            &self.base,
+            &r.moved,
+            &unmoved,
+            |id| self.git.stack_parent(id),
+            |id| published == Some(id) || self.awaiting_pr(id),
+            |id| self.git.dirty(id).is_ok_and(|s| s.trim().is_empty()),
+        );
+        for step in steps {
+            let (id, res) = match step {
+                graphite::Step::Track { id, parent } => {
+                    let res = graphite::track(&self.repo, &git::branch(&id), &parent);
+                    (id, res)
+                }
+                graphite::Step::Submit(id) => {
+                    let res = graphite::submit(&self.git.worktree_path(&id), self.cfg.pr.draft);
+                    if res.is_ok() {
+                        r.resubmitted.push(id.clone());
+                    }
+                    (id, res)
+                }
+            };
+            if let Err(e) = res {
+                tracing::warn!("graphite sync of {id} failed: {e:#}");
+                if !r.gt_failed.contains(&id) {
+                    r.gt_failed.push(id);
+                }
+            }
+        }
     }
 
     fn sweep_stacks(&mut self) {
@@ -2731,6 +2840,7 @@ impl App {
         self.restack_stuck
             .retain(|id, _| stacks.iter().any(|(c, _)| c == id));
         let mut seeds = Vec::new();
+        let mut unstacked = Vec::new();
         for (child, parent) in stacks {
             if self.bead(&parent).is_none_or(|b| b.status != "closed") {
                 continue;
@@ -2738,15 +2848,20 @@ impl App {
             if self.git.unmerged_branch(&parent, &self.base) {
                 tracing::info!("{parent} closed without merging, unstacking {child}");
                 self.git.unstack(&child);
+                unstacked.push(child);
                 continue;
             }
             seeds.push(child);
         }
-        if seeds.is_empty() {
-            return;
-        }
-        let r = self.restack_from(seeds);
-        if !r.moved.is_empty() || !r.stuck.is_empty() {
+        let mut r = if seeds.is_empty() {
+            Restacked::default()
+        } else {
+            self.restack_from(seeds)
+        };
+        let mut u = Restacked::default();
+        self.sync_graphite(&mut u, &unstacked, None);
+        r.gt_failed.extend(u.gt_failed);
+        if !r.moved.is_empty() || !r.stuck.is_empty() || !r.gt_failed.is_empty() {
             self.status = r.summary().trim_start_matches(", ").to_string();
         }
     }

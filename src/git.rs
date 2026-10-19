@@ -456,7 +456,13 @@ impl Git {
         Self::commit_all(&wt, &format!("Drop changes rejected in review of {id}"))
     }
 
+    #[cfg(test)]
     pub fn merge(&self, id: &str, base: &str, message: &str) -> Result<()> {
+        self.land(id, base, message)?;
+        self.remove(id)
+    }
+
+    pub fn land(&self, id: &str, base: &str, message: &str) -> Result<()> {
         let wt = self.worktree_path(id);
         let br = branch(id);
         if !wt.join(".git").exists() {
@@ -498,8 +504,7 @@ impl Git {
             &self.repo,
             &["update-ref", &merged_ref(id, "head"), &merged_head],
         )?;
-        self.unstack(id);
-        self.remove(id)
+        Ok(())
     }
 
     pub fn push(&self, id: &str, remote: &str, force: bool) -> Result<()> {
