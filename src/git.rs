@@ -282,7 +282,8 @@ impl Git {
         if !wt.join(".git").exists() {
             return Ok(None);
         }
-        let mb = run(&wt, &["merge-base", base, "HEAD"])?;
+        let up = self.upstream(id, base);
+        let mb = run(&wt, &["merge-base", &up, "HEAD"])?;
         let mut s = DiffStat::default();
         for l in run(&wt, &["diff", "--numstat", "--no-ext-diff", mb.trim()])?.lines() {
             let mut cols = l.split('\t');
@@ -605,6 +606,7 @@ mod tests {
 
         let diff = g.diff("c", "main").unwrap();
         assert!(diff.contains("c.txt") && !diff.contains("p.txt"), "{diff}");
+        assert_eq!(g.diff_stat("c", "main").unwrap().unwrap().files, 1);
         assert!(!g.log("c", "main").unwrap().contains("p.txt"));
 
         commit(&p, "p2.txt");
