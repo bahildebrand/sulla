@@ -249,6 +249,24 @@ impl Beads {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    pub fn stamp(&self) -> Option<Vec<u8>> {
+        let mut dbs: Vec<PathBuf> =
+            std::fs::read_dir(self.repo.join(".beads").join("embeddeddolt"))
+                .ok()?
+                .filter_map(|e| Some(e.ok()?.path().join(".dolt").join("noms").join("manifest")))
+                .filter(|m| m.is_file())
+                .collect();
+        if dbs.is_empty() {
+            return None;
+        }
+        dbs.sort();
+        let mut stamp = Vec::new();
+        for m in dbs {
+            stamp.extend(std::fs::read(m).ok()?);
+        }
+        Some(stamp)
+    }
+
     fn json(&self, args: &[&str]) -> Result<Vec<Bead>> {
         let out = self.run(args)?;
         if out.trim().is_empty() {
@@ -560,5 +578,23 @@ mod tests {
         let held = bead(r#"{"id":"a","title":"t","status":"open","labels":["sulla:held"]}"#);
         assert_eq!(held.state(), Some(State::Held));
         assert_eq!(held.column(now, 3), Some(Column::Pending));
+    }
+
+    #[test]
+    fn stamp_tracks_embedded_manifests() {
+        let dir = std::env::temp_dir().join(format!("sulla-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let beads = Beads::new(&dir);
+        assert_eq!(beads.stamp(), None);
+        let noms = dir.join(".beads/embeddeddolt/db/.dolt/noms");
+        std::fs::create_dir_all(&noms).unwrap();
+        assert_eq!(beads.stamp(), None);
+        std::fs::write(noms.join("manifest"), "root-a").unwrap();
+        let a = beads.stamp();
+        assert_eq!(a.as_deref(), Some(b"root-a".as_slice()));
+        assert_eq!(beads.stamp(), a);
+        std::fs::write(noms.join("manifest"), "root-b").unwrap();
+        assert_ne!(beads.stamp(), a);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -145,6 +145,34 @@ fn diffstats(git: &Git, base: &str, all: &[Bead]) -> HashMap<String, DiffStat> {
         .collect()
 }
 
+pub const FULL_REFRESH: Duration = Duration::from_secs(60);
+
+struct BdData {
+    all: Vec<Bead>,
+    ready: Vec<Bead>,
+    blocked: HashMap<String, Vec<String>>,
+}
+
+struct BdCache {
+    stamp: Vec<u8>,
+    fetched: Instant,
+    data: BdData,
+}
+
+impl BdCache {
+    fn fresh(&self, stamp: Option<&[u8]>, now: Instant) -> bool {
+        stamp == Some(self.stamp.as_slice()) && now.duration_since(self.fetched) < FULL_REFRESH
+    }
+}
+
+fn fetch(beads: &Beads) -> color_eyre::Result<BdData> {
+    Ok(BdData {
+        all: beads.list_all()?,
+        ready: beads.ready()?,
+        blocked: beads.blocked()?,
+    })
+}
+
 pub fn spawn_poller(
     beads: Beads,
     git: Git,
@@ -155,39 +183,65 @@ pub fn spawn_poller(
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
     std::thread::spawn(move || {
         let mut scanner = Scanner::default();
+        let mut cache: Option<BdCache> = None;
+        let mut forced = true;
         loop {
             let taken = Instant::now();
-            let snap = beads
-                .list_all()
-                .and_then(|all| {
-                    let open: HashSet<String> = all
-                        .iter()
-                        .filter(|b| b.status != "closed")
-                        .map(|b| b.id.clone())
-                        .collect();
-                    let conflicts = scanner.scan(&git, &base, &open).unwrap_or_else(|e| {
-                        tracing::warn!("conflict scan: {e:#}");
-                        HashMap::new()
-                    });
-                    Ok(Snapshot {
-                        taken,
-                        diffstats: diffstats(&git, &base, &all),
-                        all,
-                        ready: beads.ready()?,
-                        blocked: beads.blocked()?,
-                        conflicts,
-                        stacked_on: git.stacks().into_iter().collect(),
-                    })
-                })
-                .map_err(|e| e.to_string());
-            if tx.send(Event::Snapshot(snap)).is_err() {
-                return;
+            let stamp = beads.stamp();
+            let reuse = !forced
+                && cache
+                    .as_ref()
+                    .is_some_and(|c| c.fresh(stamp.as_deref(), taken));
+            if !reuse {
+                cache = None;
+                match fetch(&beads) {
+                    Ok(data) => {
+                        cache = Some(BdCache {
+                            stamp: stamp.unwrap_or_default(),
+                            fetched: taken,
+                            data,
+                        });
+                    }
+                    Err(e) => {
+                        if tx.send(Event::Snapshot(Err(e.to_string()))).is_err() {
+                            return;
+                        }
+                    }
+                }
             }
-            match refresh_rx.recv_timeout(every) {
-                Ok(()) => while refresh_rx.try_recv().is_ok() {},
-                Err(RecvTimeoutError::Timeout) => {}
+            if let Some(c) = &cache {
+                let d = &c.data;
+                let open: HashSet<String> = d
+                    .all
+                    .iter()
+                    .filter(|b| b.status != "closed")
+                    .map(|b| b.id.clone())
+                    .collect();
+                let conflicts = scanner.scan(&git, &base, &open).unwrap_or_else(|e| {
+                    tracing::warn!("conflict scan: {e:#}");
+                    HashMap::new()
+                });
+                let snap = Snapshot {
+                    taken,
+                    diffstats: diffstats(&git, &base, &d.all),
+                    all: d.all.clone(),
+                    ready: d.ready.clone(),
+                    blocked: d.blocked.clone(),
+                    conflicts,
+                    stacked_on: git.stacks().into_iter().collect(),
+                };
+                if tx.send(Event::Snapshot(Ok(snap))).is_err() {
+                    return;
+                }
+            }
+            forced = match refresh_rx.recv_timeout(every) {
+                Ok(()) => {
+                    while refresh_rx.try_recv().is_ok() {}
+                    true
+                }
+                Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => return,
-            }
+            };
         }
     });
     refresh_tx
@@ -768,5 +822,23 @@ mod tests {
             .map(|b| b.id.as_str())
             .collect();
         assert_eq!(ids, ["run", "rev", "idle"]);
+    }
+
+    #[test]
+    fn bd_cache_is_fresh_until_the_stamp_changes_or_it_ages_out() {
+        let fetched = Instant::now();
+        let c = BdCache {
+            stamp: b"root-a".to_vec(),
+            fetched,
+            data: BdData {
+                all: Vec::new(),
+                ready: Vec::new(),
+                blocked: HashMap::new(),
+            },
+        };
+        assert!(c.fresh(Some(b"root-a"), fetched + Duration::from_secs(2)));
+        assert!(!c.fresh(Some(b"root-b"), fetched + Duration::from_secs(2)));
+        assert!(!c.fresh(None, fetched + Duration::from_secs(2)));
+        assert!(!c.fresh(Some(b"root-a"), fetched + FULL_REFRESH));
     }
 }

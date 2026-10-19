@@ -286,6 +286,12 @@ list say with what. Uncommitted changes are not checked.
 
 ## Board
 
+- The board refreshes every `poll_secs` (default 2). Git state (diff stats, conflicts, stacks) is
+  reread every time, but with embedded Dolt the `bd list`, `bd ready` and `bd blocked` calls only
+  run when the database manifest under `.beads/embeddeddolt` has changed since the last read,
+  after sulla's own writes, and at least once a minute. Each `bd` call takes the embedded
+  database lock, so polling it constantly slowed down every other `bd` command. Other backends
+  are polled every time.
 - Cards show time in state, the worktree diff stat (`+adds -dels Nf`) and the last line of agent
   output.
 - The card meta line shows dependencies by id: `stacked on <parent>` for a stacked bead (that
