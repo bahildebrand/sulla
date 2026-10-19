@@ -14,108 +14,10 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 
 ## How it works
 
-- Ready beads are claimed in priority order until `max_agents` agents are in progress.
-- Each agent runs `copilot --yolo` (or `claude --dangerously-skip-permissions` with `agent = "claude"`) in a PTY inside `.sulla/worktrees/<bead>` on branch
-  `sulla/<bead>`, with `RUSTC_WRAPPER=kache`.
-- Raw PTY output of every bead agent is appended to `.sulla/logs/<bead>.log` (AI reviewers to
-  `<bead>~review.log`), so transcripts survive crashes, merges and restarts. `l` in the inspect
-  popup renders the last 5000 lines.
-- Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`, `sulla:review`, `sulla:held`.
-- Each board card shows an activity line: time in the current state, the worktree diff stat
-  (`+adds -dels Nf`, refreshed every poll), and the last line of agent output.
-- Beads in Backlog are never auto scheduled. Pick Backlog or Pending in the new bead popup, `B` moves a bead to Backlog, `s` releases it to Pending and `S` releases the whole Backlog.
-  The scheduler only starts Pending beads whose dependencies are closed. Blocked beads show `⊘`.
-- Stacked beads: a Pending bead whose only open blocker is in Review (or under AI review) is
-  started on a branch forked from the blocker's branch instead of base. The fork point is kept in
-  `refs/sulla/stack/<bead>`, so its diff, log and AI review only show its own commits. It still
-  cannot be merged until the blocker is closed. When the blocker is merged (or closed outside
-  sulla after landing in base) its stacked children are rebased onto base, and their children
-  onto the new branches, down the chain. Children with a live agent or AI reviewer are rebased
-  once it stops. A child with uncommitted changes or conflicts is left stacked and retried once
-  its HEAD or working tree changes, or rebased onto base when it is merged. Discarding a bead, or closing it without merging, unstacks its
-  children so they keep its commits in their diff.
-- `A` on a blocked bead without a worktree does not launch it unless it can be stacked. It is
-  released to Pending and the scheduler starts it once its blockers close.
-- Agents are told to run `bd set-state <bead> sulla=review` when done.
-- `V` on a bead in Review starts an AI reviewer agent in the same worktree with a fresh session.
-  The bead is labeled `sulla:reviewing` and shown in In Progress with `◎` while it runs. The
-  reviewer posts line-anchored comments as a JSON bead comment and moves the bead back to
-  Review. It shares the implementer's slot when the implementer still holds one, so it can start
-  even when every slot is busy. Otherwise it takes its own slot and counts toward `max_agents`.
-  Resets of a shared slot wait until both agents are gone. `p` watches it, `X` stops it and
-  returns the bead to Review. Reviewing beads without a live reviewer on restart go back to Review.
-- When a reviewer moves its bead back to Review, sulla reads the newest bead comment
-  (`bd comments <bead> --json`) and parses the review JSON (a code fence around it is fine). Each
-  comment is anchored to the matching diff line, exactly as if you had commented on that line.
-  Comments that cannot be anchored become file-level comments on their file, or on `COMMIT_MSG`
-  when the file is not in the diff. With verdict `changes` and at least one comment, the
-  comments are sent to the implementer in the same JSON format as your own `S` feedback and the
-  bead goes back to In Progress. With `approve` (or no comments) it stays in Review. Missing or
-  unparseable output leaves the bead in Review with a status message.
-- The board card and the Review header show `✓ai` (approve) or `✎ai` (changes). In the Review
-  view AI comments appear inline in cyan, prefixed `ai:` (or `ai (sent):` once forwarded). All
-  of them can be kept, edited with `C`, deleted with `x`, and sent with `S` along with your own.
-  Comments whose line is no longer in the diff move to their file header, or to the first file
-  when the file is gone. They are cleared when a new AI review starts, when you send feedback,
-  or when the bead goes back to running for another reason.
-- With `check` set, sulla runs it with `sh -c` in the bead worktree whenever a bead in Review
-  has a new branch head or `git status --porcelain`, killing any run on an older state. Only one
-  check runs at a time, the rest queue. With `sandbox = "incus"` it runs inside the bead's
-  container. If the bead has no container (e.g. after a restart) nothing starts automatically and
-  `T` runs it on the host. Output goes to `.sulla/checks/<bead>.log` and the result to
-  `<bead>.json`, reused on restart when head and status still match. Cards show `…chk`, `⟳chk`,
-  `✓chk` or `✗chk` and the Review header shows the result and duration. `m` refuses to merge
-  while checks are failing, queued, running, stale or missing, or the worktree has uncommitted
-  changes. `M` force merges anyway. `t` shows the output, `T` reruns.
-- Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
-  branch are removed and the bead is closed.
-- In Review, `n` rejects the hunk under the cursor and `y` accepts it again, then the cursor
-  jumps to the next hunk, like `git add -p`. On a file header, or with `N`/`Y`, the whole file
-  is rejected or accepted. Rejected hunks are dimmed, and the file list marks files `±` (partly
-  rejected) or `✗` (fully rejected). On merge, pending changes are committed, the rejected
-  hunks are reverse-applied (binary files are restored from the fork point) and committed as
-  `Drop changes rejected in review of <bead>`, then the normal merge runs. If the worktree moved
-  on and a rejected hunk no longer applies, the merge stops and `R` reloads the diff, keeping
-  rejections whose content is unchanged. Checks do not rerun on the trimmed result.
-- Each poll runs `git merge-tree` on every open bead's committed branch against base and against
-  every other open bead branch. Beads that would conflict show `⚠` on their card. The zoomed card
-  and the Review header name what they conflict with, and conflicting files are marked `⚠` in
-  the Review file list. Uncommitted worktree changes are not checked.
-- Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
-- Retrying (`F`) discards the same way but asks why the last attempt failed, appends that to the bead's notes, and returns the bead to Pending. The agent prompt includes the bead's notes, so the next attempt sees every retry note.
-- Killing an agent holds its bead in Pending until released with `s`.
-- A bead picks its agent with an `agent:copilot` or `agent:claude` label and its model with
-  `model:<name>`, overriding `agent` and the backend's `model` from config. Its AI reviewer uses
-  the same agent and model. Without labels the config defaults apply.
-- A `preset:<name>` label adds approach guidance to the agent prompt. Built-in presets are
-  `bugfix`, `feature`, `refactor`, `tests` and `docs`; `[presets]` in config overrides them or
-  adds new ones. The `n` popup sets the agent and preset labels for you.
-- `[budget]` caps each agent run in minutes and/or tokens (input + output, as on the card). A
-  bead overrides it with labels `budget:minutes=45` or `budget:tokens=500k` (`k`/`M` suffixes,
-  `0` = unlimited). The clock and token count start when the bead enters running and restart
-  each time it goes back to running (feedback, release, relaunch). When a run goes over, sulla
-  kills the agent and holds the bead with the reason as its state change reason. The card shows
-  a red `⏸` and the reason, a `budget` notification fires, and `s` releases it for a fresh run.
-  Running beads show `budget 12/30m 150.0k/500.0k tok` on the zoomed card and in `i` inspect.
-- When an agent's recent output shows a 429, rate limit, or quota error, sulla stops launching
-  new agents for 1 minute, doubling on repeat hits up to 30 minutes. Running agents are left
-  alone. The status bar shows `RATE LIMITED` with the time left, and `:resume` lifts it early.
-- `!` on the board (or `:health`) opens a health panel. It probes `bd`, the agent CLI, `kache`
-  and `incus` (`--version`, plus `incus query /1.0` for the daemon), shows the last bd poll error,
-  and says why the scheduler is not starting work: paused, rate limited, slots full, failed
-  starts, all blocked, backlog only, or nothing open. `r` rechecks.
-- `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the bead's worktree. Agents keep
-  running meanwhile, so edits may conflict with a live agent.
-- Agents still marked running or in review when sulla restarts are resumed via their agent
-  session, so review beads keep their slots ahead of pending work.
-- `c` opens a conversation agent in the main checkout, not tied to any bead. Its first prompt
-  explains the sulla states and how to create beads (staged in Backlog, wired with `bd dep add`,
-  released to Pending on your go), so you can plan work and have it fill the queue. It does not
-  count toward `max_agents`. `X` ends it, `C` starts a fresh one.
-- Token usage is read from the agent's session files (`~/.copilot/session-state/<id>/events.jsonl`
-  or `~/.claude/projects/*/<id>.jsonl`). Each bead sums its implementer and AI reviewer sessions,
-  shown on the zoomed card and in `i` inspect. Copilot reports cost in AI credits (`cr`), Claude
-  in USD when its transcript includes it. The status bar shows usage since sulla started.
+Ready beads are claimed in priority order, up to `max_agents` at once. Each agent works in its own
+worktree on `sulla/<bead>`, then moves the bead to Review, where you (or an AI reviewer) comment,
+run checks and merge. See [DOCS.md](DOCS.md) for the full lifecycle, stacking, budgets, AI review
+and checks.
 
 ## Keys
 
@@ -219,7 +121,7 @@ Bell-based waiting detection relies on the agent ringing the bell. For Claude Co
 
 `sandbox` picks where bead agents run:
 
-- `"worktree"` (default): agents run on the host in their worktree, as described above.
+- `"worktree"` (default): agents run on the host in their worktree.
 - `"incus"`: each agent slot gets its own long-lived Incus system container with its own
   network namespace and Docker daemon, so several agents can run the same `docker compose` stack
   (Postgres, ClickHouse, a web app on the same ports) without conflicts.
