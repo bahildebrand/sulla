@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use color_eyre::{Result, eyre::eyre};
 use portable_pty::CommandBuilder;
 
-use super::{Outcome, Sandbox};
+use super::{Outcome, Prepare, Sandbox};
 use crate::agent::Launch;
 use crate::beads;
 use crate::config::{AgentKind, IncusConfig};
@@ -154,14 +154,22 @@ impl Resetter {
     }
 }
 
-pub struct Incus {
+#[derive(Clone)]
+struct Driver {
     cfg: IncusConfig,
     repo: PathBuf,
     host: Host,
     cli: Cli,
-    counts: HashMap<usize, u32>,
-    resets: HashMap<usize, JoinHandle<Result<Reset>>>,
     addrs: Arc<Mutex<HashMap<usize, String>>>,
+}
+
+type Counts = Arc<Mutex<HashMap<usize, u32>>>;
+
+pub struct Incus {
+    driver: Driver,
+    counts: Counts,
+    resets: HashMap<usize, JoinHandle<Result<Reset>>>,
+    busy: HashMap<usize, Arc<Mutex<()>>>,
 }
 
 impl Incus {
@@ -185,24 +193,46 @@ impl Incus {
         let cli = Cli {
             bin: cfg.bin.clone(),
         };
-        let me = Self {
+        let driver = Driver {
             cfg,
             repo,
             host,
             cli,
-            counts: HashMap::new(),
-            resets: HashMap::new(),
             addrs: Arc::default(),
         };
-        if !me.exists(&me.cfg.golden) {
+        if !driver.exists(&driver.cfg.golden) {
             return Err(eyre!(
                 "incus sandbox: golden instance `{}` does not exist, build it first or set [incus] golden",
-                me.cfg.golden
+                driver.cfg.golden
             ));
         }
-        Ok(me)
+        Ok(Self {
+            driver,
+            counts: Counts::default(),
+            resets: HashMap::new(),
+            busy: HashMap::new(),
+        })
     }
 
+    fn settle(&mut self, slot: usize) {
+        if let Some(h) = self.resets.remove(&slot) {
+            settle(h, &self.driver.name(slot), slot, &self.counts);
+        }
+    }
+}
+
+fn settle(h: JoinHandle<Result<Reset>>, name: &str, slot: usize, counts: &Counts) {
+    match h.join() {
+        Ok(Ok(Reset::Hard)) => {
+            counts.lock().unwrap().insert(slot, 0);
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!("incus: resetting {name} failed: {e:#}"),
+        Err(_) => tracing::warn!("incus: reset thread for {name} panicked"),
+    }
+}
+
+impl Driver {
     fn name(&self, slot: usize) -> String {
         container_name(&self.cfg.prefix, &self.repo, slot)
     }
@@ -274,21 +304,6 @@ impl Incus {
         }
         tracing::info!("incus: forwarding {addr} in {name} to the host Dolt server");
         self.run(&proxy_args(name, &addr)).map(drop)
-    }
-
-    fn settle(&mut self, slot: usize) {
-        let Some(h) = self.resets.remove(&slot) else {
-            return;
-        };
-        let name = self.name(slot);
-        match h.join() {
-            Ok(Ok(Reset::Hard)) => {
-                self.counts.insert(slot, 0);
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!("incus: resetting {name} failed: {e:#}"),
-            Err(_) => tracing::warn!("incus: reset thread for {name} panicked"),
-        }
     }
 
     fn idmap_error(&self, e: color_eyre::Report) -> color_eyre::Report {
@@ -412,17 +427,10 @@ impl Incus {
             tracing::warn!("incus: no IPv4 on eth0 for {name}");
         });
     }
-}
 
-impl Sandbox for Incus {
-    fn name(&self) -> &str {
-        "incus"
-    }
-
-    fn prepare(&mut self, slot: usize, launch: &Launch) -> Result<()> {
-        self.settle(slot);
+    fn prepare(&self, slot: usize, id: &str) -> Result<()> {
         let name = self.name(slot);
-        tracing::info!("incus: preparing {name} for {}", launch.id);
+        tracing::info!("incus: preparing {name} for {id}");
         if !self.exists(&name) {
             self.create(&name)?;
         }
@@ -438,20 +446,42 @@ impl Sandbox for Incus {
         self.refresh_address(slot);
         Ok(())
     }
+}
+
+impl Sandbox for Incus {
+    fn name(&self) -> &str {
+        "incus"
+    }
+
+    fn prepare(&mut self, slot: usize, id: &str) -> Prepare {
+        let reset = self.resets.remove(&slot);
+        let busy = self.busy.entry(slot).or_default().clone();
+        let counts = self.counts.clone();
+        let driver = self.driver.clone();
+        let id = id.to_string();
+        Box::new(move || {
+            let _busy = busy.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(h) = reset {
+                settle(h, &driver.name(slot), slot, &counts);
+            }
+            driver.prepare(slot, &id)
+        })
+    }
 
     fn wrap(&self, slot: usize, launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {
         let cwd = cmd
             .get_cwd()
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|| launch.worktree.to_string_lossy().into_owned());
-        let env = exec_env(cmd.iter_extra_env_as_str(), &self.host, &self.cfg.env);
+        let d = &self.driver;
+        let env = exec_env(cmd.iter_extra_env_as_str(), &d.host, &d.cfg.env);
         let argv = exec_argv(
-            &self.cfg.bin,
-            &self.name(slot),
-            &self.host,
+            &d.cfg.bin,
+            &d.name(slot),
+            &d.host,
             &cwd,
             &env,
-            &init_argv(self.cfg.init.as_deref(), cmd.get_argv()),
+            &init_argv(d.cfg.init.as_deref(), cmd.get_argv()),
             true,
         );
         let mut out = CommandBuilder::from_argv(argv);
@@ -460,24 +490,28 @@ impl Sandbox for Incus {
     }
 
     fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()> {
-        let name = self.name(slot);
+        let d = &self.driver;
+        let name = d.name(slot);
         tracing::info!("incus: {id} finished on {name} ({outcome:?})");
         if outcome == Outcome::Exited {
             return Ok(());
         }
         self.settle(slot);
-        self.addrs.lock().unwrap().remove(&slot);
-        let count = self.counts.entry(slot).or_insert(0);
+        let d = &self.driver;
+        d.addrs.lock().unwrap().remove(&slot);
+        let mut counts = self.counts.lock().unwrap();
+        let count = counts.entry(slot).or_insert(0);
         *count += 1;
         let job = Resetter {
-            cli: self.cli.clone(),
+            cli: d.cli.clone(),
             name: name.clone(),
-            snapshot: self.cfg.snapshot.clone(),
-            script: light_script(self.host.uid, self.cfg.reset_volumes),
+            snapshot: d.cfg.snapshot.clone(),
+            script: light_script(d.host.uid, d.cfg.reset_volumes),
             outcome,
             count: *count,
-            reset_every: self.cfg.reset_every,
+            reset_every: d.cfg.reset_every,
         };
+        drop(counts);
         let h = std::thread::Builder::new()
             .name(format!("reset-{name}"))
             .spawn(move || job.run())?;
@@ -493,11 +527,11 @@ impl Sandbox for Incus {
     }
 
     fn instance(&self, slot: usize) -> Option<String> {
-        Some(self.name(slot))
+        Some(self.driver.name(slot))
     }
 
     fn address(&self, slot: usize) -> Option<String> {
-        self.addrs.lock().unwrap().get(&slot).cloned()
+        self.driver.addrs.lock().unwrap().get(&slot).cloned()
     }
 
     fn isolated(&self) -> bool {
@@ -505,7 +539,7 @@ impl Sandbox for Incus {
     }
 
     fn session_root(&self, kind: AgentKind, _host: &Path) -> Option<PathBuf> {
-        session_root(&self.cfg, &self.host.home, kind)
+        session_root(&self.driver.cfg, &self.driver.host.home, kind)
     }
 
     fn command(
@@ -515,15 +549,15 @@ impl Sandbox for Incus {
         argv: &[OsString],
         env: &[(String, String)],
     ) -> Command {
-        self.exec(slot, cwd, argv, env, false)
+        self.driver.exec(slot, cwd, argv, env, false)
     }
 
     fn shell(&self, slot: usize, cwd: &Path, env: &[(String, String)]) -> Command {
-        self.exec(slot, cwd, &["bash".into()], env, true)
+        self.driver.exec(slot, cwd, &["bash".into()], env, true)
     }
 }
 
-impl Incus {
+impl Driver {
     fn exec(
         &self,
         slot: usize,

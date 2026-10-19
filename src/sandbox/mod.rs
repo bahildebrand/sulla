@@ -39,9 +39,11 @@ impl Outcome {
     }
 }
 
+pub type Prepare = Box<dyn FnOnce() -> Result<()> + Send>;
+
 pub trait Sandbox: Send {
     fn name(&self) -> &str;
-    fn prepare(&mut self, slot: usize, launch: &Launch) -> Result<()>;
+    fn prepare(&mut self, slot: usize, id: &str) -> Prepare;
     fn wrap(&self, slot: usize, launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder>;
     fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()>;
     fn shutdown(&mut self);
@@ -93,8 +95,8 @@ impl Sandbox for Worktree {
         "worktree"
     }
 
-    fn prepare(&mut self, _slot: usize, _launch: &Launch) -> Result<()> {
-        Ok(())
+    fn prepare(&mut self, _slot: usize, _id: &str) -> Prepare {
+        Box::new(|| Ok(()))
     }
 
     fn wrap(&self, _slot: usize, _launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {

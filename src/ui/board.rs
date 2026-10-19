@@ -89,9 +89,16 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
     spans
 }
 
+fn starting(app: &App, b: &Bead) -> bool {
+    app.is_starting(&b.id) || app.is_starting(&agent::review_id(&b.id))
+}
+
 fn marker(app: &App, b: &Bead) -> Span<'static> {
     if let Some((_, s)) = stall_of(app, b) {
         return stall_marker(s);
+    }
+    if starting(app, b) {
+        return Span::styled("◌ ", Style::new().fg(Color::Green));
     }
     if b.state() == Some(State::Reviewing) {
         let color = match app.agents.get(&agent::review_id(&b.id)) {
@@ -219,7 +226,9 @@ fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
     } else {
         b.id.clone()
     };
-    if let Some(l) = app.agents.get(&id).and_then(|a| a.last_line()) {
+    if starting(app, b) {
+        spans.push(Span::raw(" · starting").dim());
+    } else if let Some(l) = app.agents.get(&id).and_then(|a| a.last_line()) {
         spans.push(Span::raw(format!(" · {l}")).dim());
     }
     Line::from(spans)

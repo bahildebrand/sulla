@@ -1,6 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
+use std::sync::{Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -307,6 +310,132 @@ impl Publish {
     }
 }
 
+struct Launching {
+    was: Option<State>,
+    stopped: bool,
+    after: Vec<Callback>,
+    job: JoinHandle<()>,
+}
+
+type Built = (Launch, Option<String>);
+
+static WORKTREES: Mutex<()> = Mutex::new(());
+
+struct Recover {
+    root: PathBuf,
+    kind: AgentKind,
+    in_pr: HashSet<String>,
+}
+
+struct Prelaunch {
+    bead: Bead,
+    resume: bool,
+    prompt: Option<String>,
+    model: Option<String>,
+    onto: Option<String>,
+    base: String,
+    repo: PathBuf,
+    git: Git,
+    presets: BTreeMap<String, String>,
+    system_prompt: Option<String>,
+    recover: Option<Recover>,
+}
+
+impl Prelaunch {
+    fn run(self) -> Result<Built> {
+        let id = self.bead.id.as_str();
+        let worktree = {
+            let _git = WORKTREES.lock().unwrap_or_else(PoisonError::into_inner);
+            let fresh =
+                !self.git.worktree_path(id).join(".git").exists() && !self.git.has_branch(id);
+            match self
+                .onto
+                .as_deref()
+                .filter(|p| fresh && self.git.has_branch(p))
+            {
+                Some(parent) => self.git.ensure_stacked_worktree(id, parent)?,
+                None => self.git.ensure_worktree(id, &self.base)?,
+            }
+        };
+        let parent = self.git.stack_parent(id);
+        let prompt = self
+            .prompt
+            .clone()
+            .or_else(|| (!self.resume).then(|| self.task(parent.as_deref())));
+        let (resume, prompt, rebuilt) = match &self.recover {
+            Some(r) => self.recover(r, parent.as_deref(), prompt),
+            None => (self.resume, prompt, None),
+        };
+        let launch = Launch {
+            session: agent::session_id(&self.repo, id),
+            id: id.to_string(),
+            bead: true,
+            worktree,
+            resume,
+            prompt,
+            model: self.model.clone(),
+        };
+        Ok((launch, rebuilt))
+    }
+
+    fn task(&self, parent: Option<&str>) -> String {
+        let preset = presets::for_bead(&self.presets, &self.bead);
+        agent::with_system(
+            agent::task_prompt(&self.bead, parent, preset),
+            self.system_prompt.as_deref(),
+        )
+    }
+
+    fn recover(
+        &self,
+        r: &Recover,
+        parent: Option<&str>,
+        prompt: Option<String>,
+    ) -> (bool, Option<String>, Option<String>) {
+        let id = &self.bead.id;
+        let session = agent::session_id(&self.repo, id);
+        let dest = sessions::backup_dir(&self.repo, id);
+        match sessions::ensure(&r.root, r.kind, &session, &dest) {
+            Ok(Resume::Live) => return (true, prompt, None),
+            Ok(Resume::Restored) => {
+                tracing::info!("restored session of {id} from {}", dest.display());
+                return (true, prompt, None);
+            }
+            Ok(Resume::Lost) => {}
+            Err(e) => {
+                tracing::warn!("restoring session of {id}: {e:#}");
+                return (true, prompt, None);
+            }
+        }
+        tracing::warn!("session of {id} is gone and has no backup, rebuilding it");
+        let task = self.task(parent);
+        let pr = self.bead.label("pr").map(|n| {
+            n.parse()
+                .ok()
+                .and_then(|n| pr::url(&self.repo, n).ok())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| format!("PR #{n}"))
+        });
+        let base = parent
+            .filter(|p| r.in_pr.contains(*p))
+            .map(git::branch)
+            .unwrap_or_else(|| self.base.clone());
+        let log = self.git.summary(id, &base).unwrap_or_else(|e| {
+            tracing::warn!("git log for {id}: {e:#}");
+            String::new()
+        });
+        let text = sessions::rebuild_prompt(&task, pr.as_deref(), &log, prompt.as_deref());
+        let msg = format!(
+            "{id}: agent session was lost, rebuilt a fresh one from the bead, PR and git log"
+        );
+        (false, Some(text), Some(msg))
+    }
+}
+
+fn stopped(id: &str) -> color_eyre::Report {
+    eyre!("{id} was stopped before its agent started")
+}
+
 pub struct App {
     pub cfg: Config,
     pub base: String,
@@ -367,6 +496,7 @@ pub struct App {
     bd_jobs: Sender<BdJob>,
     bd_pending: usize,
     starting: HashSet<String>,
+    launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
     term: (u16, u16),
     pub suspend: Option<Suspend>,
@@ -479,6 +609,7 @@ impl App {
             bd_jobs,
             bd_pending: 0,
             starting: HashSet::new(),
+            launching: HashMap::new(),
             publishing: HashSet::new(),
             term: (80, 24),
             suspend: None,
@@ -1006,7 +1137,7 @@ impl App {
     fn reconcile(&mut self) {
         self.reap_reviewers();
         self.sweep_stacks();
-        let known: HashSet<String> = self.agents.keys().chain(&self.starting).cloned().collect();
+        let known: HashSet<String> = self.busy().cloned().collect();
         let mut orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()
             .filter(|b| !self.failed.contains(&b.id))
@@ -1109,13 +1240,24 @@ impl App {
     fn free_slots(&self) -> usize {
         self.cfg
             .max_agents
-            .saturating_sub(self.running_count())
+            .saturating_sub(self.running_count() + self.launching.len())
             .min(self.slots.free(self.cfg.max_agents))
             .saturating_sub(self.starting.len())
     }
 
+    fn busy(&self) -> impl Iterator<Item = &String> {
+        self.agents
+            .keys()
+            .chain(&self.starting)
+            .chain(self.launching.keys())
+    }
+
+    pub fn is_starting(&self, id: &str) -> bool {
+        self.starting.contains(id) || self.launching.contains_key(id)
+    }
+
     fn picks(&self, free: usize) -> Vec<Bead> {
-        let busy: HashSet<String> = self.agents.keys().chain(&self.starting).cloned().collect();
+        let busy: HashSet<String> = self.busy().cloned().collect();
         let mut candidates = self.ready.clone();
         candidates.extend(
             scheduler::stackable(&self.all, &self.blocked, self.cfg.workflow == Workflow::Pr)
@@ -1222,10 +1364,16 @@ impl App {
 
     fn claimed(&mut self, id: String, r: Result<Bead>) {
         self.starting.remove(&id);
-        if self.agents.contains_key(&id) {
+        if self.agents.contains_key(&id) || self.launching.contains_key(&id) {
             return;
         }
-        let r = r.and_then(|b| self.launch_agent(&b, false, None));
+        match r {
+            Ok(b) => self.launch_agent(&b, false, None, move |app, r| app.started(id, r)),
+            Err(e) => self.started(id, Err(e)),
+        }
+    }
+
+    fn started(&mut self, id: String, r: Result<()>) {
         if self.report(r).is_some() {
             self.status = format!("started {id}");
         } else {
@@ -1379,20 +1527,26 @@ impl App {
             move |beads| Ok(beads.show(&bead.id).unwrap_or(bead)),
             move |app, r| {
                 app.starting.remove(&id);
-                let r = r.and_then(|b| {
-                    let stopped = app.bead(&id).is_none_or(|b| {
-                        let now = b.state();
-                        b.status == "closed"
-                            || (now != was && matches!(now, Some(State::Held | State::Backlog)))
-                    });
-                    if stopped {
-                        bail!("{id} was stopped before its agent started");
-                    }
-                    app.launch_or_prompt(&b, resume, prompt)
-                });
-                done(app, r);
+                match r {
+                    Ok(_) if app.launch_stopped(&id, was) => done(app, Err(stopped(&id))),
+                    Ok(b) => app.launch_or_prompt(&b, resume, prompt, done),
+                    Err(e) => done(app, Err(e)),
+                }
             },
         );
+    }
+
+    fn launch_stopped(&self, id: &str, was: Option<State>) -> bool {
+        if let Some(bead) = agent::reviewed_bead(id) {
+            return !self
+                .bead(bead)
+                .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Review));
+        }
+        self.bead(id).is_none_or(|b| {
+            let now = b.state();
+            b.status == "closed"
+                || (now != was && matches!(now, Some(State::Held | State::Backlog)))
+        })
     }
 
     fn launch_or_prompt(
@@ -1400,59 +1554,167 @@ impl App {
         bead: &Bead,
         resume: bool,
         prompt: Option<String>,
-    ) -> Result<()> {
+        done: impl FnOnce(&mut App, Result<()>) + Send + 'static,
+    ) {
+        if self.launching.contains_key(&bead.id) {
+            let was = self.bead(&bead.id).and_then(Bead::state);
+            let b = bead.clone();
+            self.after_launch(&bead.id, false, move |app| {
+                if app.launch_stopped(&b.id, was) {
+                    done(app, Err(stopped(&b.id)));
+                } else {
+                    app.launch_or_prompt(&b, resume, prompt, done);
+                }
+            });
+            return;
+        }
         match self.agents.get_mut(&bead.id) {
             Some(a) if a.alive => {
                 if let Some(p) = prompt {
                     a.send_prompt(&p);
                 }
-                Ok(())
+                done(self, Ok(()));
             }
-            _ => self.launch_agent(bead, resume, prompt),
+            _ => self.launch_agent(bead, resume, prompt, done),
         }
     }
 
-    fn launch_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
-        let fresh = !self.git.worktree_path(&bead.id).join(".git").exists()
-            && !self.git.has_branch(&bead.id);
-        let worktree = match self.stack_on(&bead.id).filter(|_| fresh) {
-            Some(parent) => self.git.ensure_stacked_worktree(&bead.id, &parent)?,
-            None => self.git.ensure_worktree(&bead.id, &self.base)?,
-        };
-        let parent = self.git.stack_parent(&bead.id);
-        let prompt = prompt.or_else(|| {
-            (!resume).then(|| {
-                let preset = presets::for_bead(&self.cfg.presets, bead);
-                let task = agent::task_prompt(bead, parent.as_deref(), preset);
-                agent::with_system(task, self.cfg.system_prompt.as_deref())
-            })
-        });
+    fn launch_agent(
+        &mut self,
+        bead: &Bead,
+        resume: bool,
+        prompt: Option<String>,
+        done: impl FnOnce(&mut App, Result<()>) + Send + 'static,
+    ) {
+        let id = bead.id.clone();
         let (kind, model) = agent::selection(bead, self.cfg.agent);
-        let slot = self
+        let Some(slot) = self
             .slots
-            .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
-            .ok_or_else(|| eyre!("no free agent slot for {}", bead.id))?;
-        let (resume, prompt) = if resume && self.cfg.workflow == Workflow::Pr {
-            self.recover_session(bead, kind, parent.as_deref(), prompt)
-        } else {
-            (resume, prompt)
+            .acquire_with(&id, &agent::review_id(&id), self.cfg.max_agents)
+        else {
+            return done(self, Err(eyre!("no free agent slot for {id}")));
         };
-        let launch = Launch {
-            session: agent::session_id(&self.repo, &bead.id),
-            id: bead.id.clone(),
-            bead: true,
-            worktree,
+        let on_pr = self.cfg.workflow == Workflow::Pr;
+        let recover = (resume && on_pr)
+            .then(|| self.session_root(kind))
+            .flatten()
+            .map(|root| Recover {
+                root,
+                kind,
+                in_pr: self
+                    .all
+                    .iter()
+                    .filter(|b| b.status != "closed" && b.state() == Some(State::Pr))
+                    .map(|b| b.id.clone())
+                    .collect(),
+            });
+        let job = Prelaunch {
+            bead: bead.clone(),
             resume,
             prompt,
             model,
+            onto: scheduler::stack_parent(&id, &self.blocked, &self.all, on_pr).map(String::from),
+            base: self.base.clone(),
+            repo: self.repo.clone(),
+            git: self.git.clone(),
+            presets: self.cfg.presets.clone(),
+            system_prompt: self.cfg.system_prompt.clone(),
+            recover,
         };
-        let r = self.spawn_sandboxed(slot, launch, kind);
-        if let Err(e) = r {
-            self.slots.release(&bead.id);
-            self.rebuilt = None;
-            return Err(e);
+        self.launch(id, slot, kind, move || job.run(), done);
+    }
+
+    fn launch(
+        &mut self,
+        id: String,
+        slot: usize,
+        kind: AgentKind,
+        build: impl FnOnce() -> Result<Built> + Send + 'static,
+        done: impl FnOnce(&mut App, Result<()>) + Send + 'static,
+    ) {
+        let prepare = self.sandbox.prepare(slot, &id);
+        let tx = self.tx.clone();
+        let key = id.clone();
+        let job = std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(AssertUnwindSafe(|| prepare().and_then(|()| build())))
+                .unwrap_or_else(|_| Err(eyre!("launching {key} panicked")));
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                app.launched(&key, slot, kind, r, done)
+            })));
+        });
+        let was = self
+            .bead(agent::reviewed_bead(&id).unwrap_or(&id))
+            .and_then(Bead::state);
+        self.launching.insert(
+            id,
+            Launching {
+                was,
+                stopped: false,
+                after: Vec::new(),
+                job,
+            },
+        );
+    }
+
+    fn launched(
+        &mut self,
+        id: &str,
+        slot: usize,
+        kind: AgentKind,
+        r: Result<Built>,
+        done: impl FnOnce(&mut App, Result<()>),
+    ) {
+        let Some(l) = self.launching.remove(id) else {
+            return;
+        };
+        let r = if l.stopped || self.launch_stopped(id, l.was) {
+            Err(stopped(id))
+        } else {
+            r.and_then(|(launch, rebuilt)| {
+                self.spawn_agent(slot, launch, kind)?;
+                if let Some(m) = rebuilt {
+                    self.status = m.clone();
+                    self.rebuilt = Some(m);
+                }
+                Ok(())
+            })
+        };
+        if r.is_err() {
+            self.slots.release(id);
+            self.finish(Some(slot), id, Outcome::Exited);
         }
-        Ok(())
+        done(self, r);
+        for f in l.after {
+            f(self);
+        }
+        self.mutated();
+    }
+
+    fn after_launch(
+        &mut self,
+        id: &str,
+        stop: bool,
+        f: impl FnOnce(&mut App) + Send + 'static,
+    ) -> bool {
+        let Some(l) = self.launching.get_mut(id) else {
+            return false;
+        };
+        l.stopped |= stop;
+        l.after.push(Box::new(f));
+        true
+    }
+
+    fn stop_launch_then(
+        &mut self,
+        id: &str,
+        what: &str,
+        f: impl FnOnce(&mut App) + Send + 'static,
+    ) -> bool {
+        if !self.after_launch(id, true, f) {
+            return false;
+        }
+        self.status = format!("{id} is still launching, will {what} once it stops");
+        true
     }
 
     fn session_root(&self, kind: AgentKind) -> Option<PathBuf> {
@@ -1478,57 +1740,6 @@ impl App {
         }
     }
 
-    fn recover_session(
-        &mut self,
-        bead: &Bead,
-        kind: AgentKind,
-        parent: Option<&str>,
-        prompt: Option<String>,
-    ) -> (bool, Option<String>) {
-        let Some(root) = self.session_root(kind) else {
-            return (true, prompt);
-        };
-        let id = &bead.id;
-        let session = agent::session_id(&self.repo, id);
-        let dest = sessions::backup_dir(&self.repo, id);
-        match sessions::ensure(&root, kind, &session, &dest) {
-            Ok(Resume::Live) => return (true, prompt),
-            Ok(Resume::Restored) => {
-                tracing::info!("restored session of {id} from {}", dest.display());
-                return (true, prompt);
-            }
-            Ok(Resume::Lost) => {}
-            Err(e) => {
-                tracing::warn!("restoring session of {id}: {e:#}");
-                return (true, prompt);
-            }
-        }
-        tracing::warn!("session of {id} is gone and has no backup, rebuilding it");
-        let preset = presets::for_bead(&self.cfg.presets, bead);
-        let task = agent::with_system(
-            agent::task_prompt(bead, parent, preset),
-            self.cfg.system_prompt.as_deref(),
-        );
-        let pr = bead.label("pr").map(|n| {
-            n.parse()
-                .ok()
-                .and_then(|n| pr::url(&self.repo, n).ok())
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| format!("PR #{n}"))
-        });
-        let log = self.git.summary(id, &self.pr_base(id)).unwrap_or_else(|e| {
-            tracing::warn!("git log for {id}: {e:#}");
-            String::new()
-        });
-        let text = sessions::rebuild_prompt(&task, pr.as_deref(), &log, prompt.as_deref());
-        let msg = format!(
-            "{id}: agent session was lost, rebuilt a fresh one from the bead, PR and git log"
-        );
-        self.status = msg.clone();
-        self.rebuilt = Some(msg);
-        (false, Some(text))
-    }
-
     fn rebuilt_status(&mut self) {
         if let Some(m) = self.rebuilt.take() {
             self.status = m;
@@ -1540,7 +1751,7 @@ impl App {
             return;
         };
         let rid = agent::review_id(id);
-        if self.agents.get(&rid).is_some_and(|a| a.alive) || self.starting.contains(&rid) {
+        if self.agents.get(&rid).is_some_and(|a| a.alive) || self.is_starting(&rid) {
             self.status = format!("reviewer for {id} is already running");
             return;
         }
@@ -1566,48 +1777,65 @@ impl App {
                     app.status = format!("{id} left review, ai review not started");
                     return;
                 }
-                let r = r.and_then(|b| app.launch_review(&b));
-                if app.report(r).is_some() {
-                    app.status = format!("ai review of {id} started (p to watch)");
+                match r {
+                    Ok(b) => app.launch_review(&b, move |app, r| {
+                        if app.report(r).is_some() {
+                            app.status = format!("ai review of {id} started (p to watch)");
+                        }
+                    }),
+                    Err(e) => {
+                        app.report(Err::<(), _>(e));
+                    }
                 }
             },
         );
     }
 
-    fn launch_review(&mut self, bead: &Bead) -> Result<()> {
+    fn launch_review(
+        &mut self,
+        bead: &Bead,
+        done: impl FnOnce(&mut App, Result<()>) + Send + 'static,
+    ) {
         let worktree = self.git.worktree_path(&bead.id);
         if !worktree.join(".git").exists() {
-            bail!("no worktree for {}", bead.id);
+            return done(self, Err(eyre!("no worktree for {}", bead.id)));
         }
         let rid = agent::review_id(&bead.id);
         self.remove_agent(&rid, Outcome::Killed);
         self.ai_reviews.remove(&bead.id);
         self.inject_ai(&bead.id);
-        let slot = self
-            .slots
-            .acquire_with(&rid, &bead.id, self.cfg.max_agents)
-            .ok_or_else(|| eyre!("no free agent slot for {rid}"))?;
-        let (kind, model) = agent::selection(bead, self.cfg.agent);
-        let launch = Launch {
-            session: agent::session_id(&self.repo, &rid),
-            id: rid.clone(),
-            bead: true,
-            worktree,
-            resume: false,
-            prompt: Some(agent::with_system(
-                agent::review_prompt(bead, &self.git.upstream(&bead.id, &self.base)),
-                self.cfg.system_prompt.as_deref(),
-            )),
-            model,
+        let Some(slot) = self.slots.acquire_with(&rid, &bead.id, self.cfg.max_agents) else {
+            return done(self, Err(eyre!("no free agent slot for {rid}")));
         };
-        if let Err(e) = self.spawn_sandboxed(slot, launch, kind) {
-            self.slots.release(&rid);
-            return Err(e);
-        }
-        self.edit_local(&bead.id, |b| b.set_state_label(Some(State::Reviewing)));
+        let (kind, model) = agent::selection(bead, self.cfg.agent);
+        let b = bead.clone();
+        let git = self.git.clone();
+        let base = self.base.clone();
+        let repo = self.repo.clone();
+        let system_prompt = self.cfg.system_prompt.clone();
+        let session = rid.clone();
+        let build = move || {
+            let prompt = agent::review_prompt(&b, &git.upstream(&b.id, &base));
+            let launch = Launch {
+                session: agent::session_id(&repo, &session),
+                id: session,
+                bead: true,
+                worktree,
+                resume: false,
+                prompt: Some(agent::with_system(prompt, system_prompt.as_deref())),
+                model,
+            };
+            Ok((launch, None))
+        };
         let id = bead.id.clone();
-        self.bd_run(move |beads| beads.set_state(&id, State::Reviewing));
-        Ok(())
+        self.launch(rid, slot, kind, build, move |app, r| {
+            if r.is_ok() {
+                app.edit_local(&id, |b| b.set_state_label(Some(State::Reviewing)));
+                let bead = id.clone();
+                app.bd_run(move |beads| beads.set_state(&bead, State::Reviewing));
+            }
+            done(app, r);
+        });
     }
 
     fn collect_ai_review(&mut self, id: &str, notify: bool) {
@@ -2229,6 +2457,10 @@ impl App {
     }
 
     fn pr_merged(&mut self, id: &str, number: u64) {
+        let key = id.to_string();
+        if self.stop_launch_then(id, "retire it", move |app| app.pr_merged(&key, number)) {
+            return;
+        }
         self.stop_check(id);
         self.remove_agent(&agent::review_id(id), Outcome::Merged);
         self.remove_agent(id, Outcome::Merged);
@@ -2271,15 +2503,15 @@ impl App {
     }
 
     fn agent_key(&self, id: &str) -> String {
-        if self.reviewing(id) {
-            agent::review_id(id)
+        let rid = agent::review_id(id);
+        if self.reviewing(id) || self.launching.contains_key(&rid) {
+            rid
         } else {
             id.to_string()
         }
     }
 
-    fn spawn_sandboxed(&mut self, slot: usize, launch: Launch, kind: AgentKind) -> Result<()> {
-        self.sandbox.prepare(slot, &launch)?;
+    fn spawn_agent(&mut self, slot: usize, launch: Launch, kind: AgentKind) -> Result<()> {
         let cmd = agent::command(self.backend(kind), &launch, self.cfg.kache, Some(slot));
         let cmd = self.sandbox.wrap(slot, &launch, cmd)?;
         self.insert_agent(cmd, launch.id, launch.prompt)
@@ -2288,6 +2520,9 @@ impl App {
     fn take_agent(&mut self, id: &str) -> Option<usize> {
         if let Some(mut a) = self.agents.remove(id) {
             a.kill();
+        }
+        if self.launching.contains_key(id) {
+            return None;
         }
         self.slots.release(id)
     }
@@ -2310,6 +2545,11 @@ impl App {
     }
 
     fn remove_agent(&mut self, id: &str, outcome: Outcome) {
+        if outcome != Outcome::Exited
+            && let Some(l) = self.launching.get_mut(id)
+        {
+            l.stopped = true;
+        }
         let slot = self.take_agent(id);
         self.finish(slot, id, outcome);
     }
@@ -2771,14 +3011,24 @@ impl App {
 
     fn request_quit(&mut self) {
         let live = self.agents.values().filter(|a| a.alive).count();
-        if live == 0 {
+        let launching = self.launching.len();
+        let mut msg = Vec::new();
+        if live > 0 {
+            msg.push(format!(
+                "{live} live agent(s) will be stopped and resumed next launch."
+            ));
+        }
+        if launching > 0 {
+            msg.push(format!(
+                "Quitting waits for {launching} agent launch(es) in progress."
+            ));
+        }
+        if msg.is_empty() {
             self.quit = true;
         } else {
             self.mode = Mode::Confirm {
                 action: Action::Quit,
-                msg: format!(
-                    "{live} live agent(s) will be stopped and resumed next launch. Quit? y/n"
-                ),
+                msg: format!("{} Quit? y/n", msg.join(" ")),
             };
         }
     }
@@ -2894,7 +3144,10 @@ impl App {
     }
 
     fn move_to_backlog(&mut self, bead: &Bead) {
-        if self.agents.contains_key(&bead.id) || bead.status == "closed" {
+        if self.agents.contains_key(&bead.id)
+            || self.is_starting(&bead.id)
+            || bead.status == "closed"
+        {
             return;
         }
         self.edit_local(&bead.id, |b| b.set_state_label(Some(State::Backlog)));
@@ -2929,6 +3182,10 @@ impl App {
     }
 
     fn discard(&mut self, id: &str) {
+        let key = id.to_string();
+        if self.stop_launch_then(id, "discard it", move |app| app.discard(&key)) {
+            return;
+        }
         self.stop_check(id);
         self.remove_agent(id, Outcome::Discarded);
         let children = self.git.children(id);
@@ -2958,6 +3215,10 @@ impl App {
     }
 
     fn delete(&mut self, id: &str) {
+        let key = id.to_string();
+        if self.stop_launch_then(id, "delete it", move |app| app.delete(&key)) {
+            return;
+        }
         self.stop_check(id);
         self.remove_agent(id, Outcome::Discarded);
         self.failed.remove(id);
@@ -2989,6 +3250,10 @@ impl App {
     }
 
     fn retry(&mut self, id: &str, note: &str) {
+        let (key, text) = (id.to_string(), note.to_string());
+        if self.stop_launch_then(id, "retry it", move |app| app.retry(&key, &text)) {
+            return;
+        }
         self.remove_agent(id, Outcome::Discarded);
         self.failed.remove(id);
         let entry = format!("Retry after discarded attempt: {note}");
@@ -3016,6 +3281,10 @@ impl App {
     }
 
     fn merge(&mut self, id: &str) {
+        let key = id.to_string();
+        if self.stop_launch_then(id, "merge it", move |app| app.merge(&key)) {
+            return;
+        }
         let blockers = self.beads.open_blockers(id);
         let Some(blockers) = self.report(blockers) else {
             return self.mutated();
@@ -3084,7 +3353,7 @@ impl App {
     fn live(&self, id: &str) -> bool {
         [id.to_string(), agent::review_id(id)]
             .iter()
-            .any(|k| self.agents.get(k).is_some_and(|a| a.alive))
+            .any(|k| self.agents.get(k).is_some_and(|a| a.alive) || self.launching.contains_key(k))
     }
 
     fn restack_from(&mut self, queue: Vec<String>) -> Restacked {
@@ -3279,7 +3548,7 @@ impl App {
         if self.agents.get(id).is_some_and(|a| a.alive) {
             return;
         }
-        if self.starting.contains(id) {
+        if self.is_starting(id) {
             self.status = format!("{id} is already starting");
             return;
         }
@@ -3841,6 +4110,11 @@ impl App {
         for a in self.agents.values_mut() {
             a.kill();
         }
+        for (id, l) in self.launching.drain() {
+            if l.job.join().is_err() {
+                tracing::warn!("launch of {id} panicked during shutdown");
+            }
+        }
         for c in self.checks.values_mut() {
             c.stop();
         }
@@ -3855,6 +4129,318 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::mpsc::Receiver;
+
+    use portable_pty::CommandBuilder;
+
+    use crate::config::ClaudeConfig;
+    use crate::sandbox::Prepare;
+
+    type Finished = Arc<Mutex<Vec<(usize, String, Outcome)>>>;
+
+    struct Gated {
+        gate: Arc<Mutex<()>>,
+        prepared: Arc<Mutex<Vec<String>>>,
+        finished: Finished,
+    }
+
+    impl Sandbox for Gated {
+        fn name(&self) -> &str {
+            "gated"
+        }
+
+        fn prepare(&mut self, _slot: usize, id: &str) -> Prepare {
+            let (gate, prepared, id) = (self.gate.clone(), self.prepared.clone(), id.to_string());
+            Box::new(move || {
+                drop(gate.lock().unwrap());
+                prepared.lock().unwrap().push(id);
+                Ok(())
+            })
+        }
+
+        fn wrap(
+            &self,
+            _slot: usize,
+            _launch: &Launch,
+            cmd: CommandBuilder,
+        ) -> Result<CommandBuilder> {
+            Ok(cmd)
+        }
+
+        fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()> {
+            self.finished
+                .lock()
+                .unwrap()
+                .push((slot, id.to_string(), outcome));
+            Ok(())
+        }
+
+        fn shutdown(&mut self) {}
+    }
+
+    struct Harness {
+        dir: PathBuf,
+        app: App,
+        rx: Receiver<Event>,
+        gate: Arc<Mutex<()>>,
+        prepared: Arc<Mutex<Vec<String>>>,
+        finished: Finished,
+    }
+
+    impl Harness {
+        fn new(name: &str, beads: &[(&str, Option<State>)]) -> Self {
+            let dir = std::env::temp_dir().join(format!("sulla-app-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}");
+            };
+            git(&["init", "-q", "-b", "main"]);
+            git(&["config", "user.email", "t@t"]);
+            git(&["config", "user.name", "t"]);
+            std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-qm", "init"]);
+            let cfg = Config {
+                max_agents: 2,
+                poll_secs: 3600,
+                kache: false,
+                agent: AgentKind::Claude,
+                claude: ClaudeConfig {
+                    bin: "true".into(),
+                    ..ClaudeConfig::default()
+                },
+                ..Config::default()
+            };
+            let (tx, rx) = channel();
+            let mut app = App::new(cfg, dir.clone(), tx).unwrap();
+            let gate = Arc::new(Mutex::new(()));
+            let prepared = Arc::new(Mutex::new(Vec::new()));
+            let finished = Finished::default();
+            app.sandbox = Box::new(Gated {
+                gate: gate.clone(),
+                prepared: prepared.clone(),
+                finished: finished.clone(),
+            });
+            app.all = beads
+                .iter()
+                .map(|(id, state)| {
+                    let mut b: Bead = serde_json::from_value(serde_json::json!({
+                        "id": id,
+                        "title": id,
+                        "status": "in_progress",
+                    }))
+                    .unwrap();
+                    b.set_state_label(*state);
+                    b
+                })
+                .collect();
+            Self {
+                dir,
+                app,
+                rx,
+                gate,
+                prepared,
+                finished,
+            }
+        }
+
+        fn bead(&self, id: &str) -> Bead {
+            self.app.bead(id).cloned().unwrap()
+        }
+
+        fn state(&self, id: &str) -> Option<State> {
+            self.bead(id).state()
+        }
+
+        fn pump(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !self.app.launching.is_empty()
+                || !self.app.starting.is_empty()
+                || self.app.bd_pending > 0
+            {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                let ev = self.rx.recv_timeout(wait).expect("launch did not finish");
+                if matches!(ev, Event::Finished(_)) {
+                    self.app.dispatch(ev);
+                }
+            }
+        }
+
+        fn prepared(&self) -> Vec<String> {
+            self.prepared.lock().unwrap().clone()
+        }
+
+        fn finished(&self) -> Vec<(usize, String, Outcome)> {
+            self.finished.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            self.app.shutdown();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    type Done = Arc<Mutex<Option<bool>>>;
+
+    fn recorder() -> (Done, impl FnOnce(&mut App, Result<()>) + Send + 'static) {
+        let done = Done::default();
+        let d = done.clone();
+        (done, move |_: &mut App, r: Result<()>| {
+            *d.lock().unwrap() = Some(r.is_ok());
+        })
+    }
+
+    #[test]
+    fn launch_reserves_slot_and_starts_agent_once_prepared() {
+        let mut h = Harness::new("launch", &[("t-1", Some(State::Running)), ("t-2", None)]);
+        h.app.ready = vec![h.bead("t-1"), h.bead("t-2")];
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        let called = Instant::now();
+        h.app.launch_agent(&bead, false, None, record);
+        assert!(called.elapsed() < Duration::from_secs(1));
+        assert!(h.app.is_starting("t-1"));
+        assert!(h.app.agents.is_empty());
+        assert_eq!(h.app.slots.get("t-1"), Some(0));
+        assert_eq!(h.app.free_slots(), 1);
+        let picks: Vec<String> = h.app.picks(2).into_iter().map(|b| b.id).collect();
+        assert_eq!(picks, ["t-2"]);
+        assert_eq!(*done.lock().unwrap(), None);
+        drop(held);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(true));
+        assert!(h.app.agents.contains_key("t-1"));
+        assert!(!h.app.is_starting("t-1"));
+        assert_eq!(h.app.slots.get("t-1"), Some(0));
+        assert!(h.app.git.worktree_path("t-1").join(".git").exists());
+        assert_eq!(h.prepared(), ["t-1"]);
+    }
+
+    #[test]
+    fn kill_while_launching_holds_bead_and_frees_slot() {
+        let mut h = Harness::new("kill", &[("t-1", Some(State::Running))]);
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_agent(&bead, false, None, record);
+        h.app.kill("t-1");
+        assert_eq!(h.state("t-1"), Some(State::Held));
+        assert_eq!(h.app.slots.get("t-1"), Some(0));
+        drop(held);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(false));
+        assert!(h.app.agents.is_empty());
+        assert_eq!(h.app.slots.get("t-1"), None);
+        assert_eq!(h.app.free_slots(), 2);
+        assert_eq!(h.finished(), [(0, "t-1".to_string(), Outcome::Exited)]);
+    }
+
+    #[test]
+    fn discard_while_launching_waits_for_the_job_then_discards() {
+        let mut h = Harness::new("discard", &[("t-1", Some(State::Running))]);
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_agent(&bead, false, None, record);
+        h.app.discard("t-1");
+        assert!(h.app.status.contains("still launching"), "{}", h.app.status);
+        drop(held);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(false));
+        assert!(h.app.agents.is_empty());
+        assert_eq!(h.app.slots.get("t-1"), None);
+        assert!(!h.app.git.worktree_path("t-1").exists());
+        assert!(!h.app.git.has_branch("t-1"));
+        assert_eq!(h.state("t-1"), Some(State::Held));
+    }
+
+    #[test]
+    fn feedback_while_launching_reuses_the_launch() {
+        let mut h = Harness::new("deliver", &[("t-1", Some(State::Running))]);
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_agent(&bead, false, None, record);
+        h.app.deliver("t-1", "also do this");
+        assert_eq!(h.app.slots.get("t-1"), Some(0));
+        drop(held);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(true));
+        assert!(h.app.agents.contains_key("t-1"));
+        assert_eq!(h.prepared(), ["t-1"]);
+    }
+
+    #[test]
+    fn quit_while_launching_waits_for_the_job_and_starts_nothing() {
+        let mut h = Harness::new("quit", &[("t-1", Some(State::Running))]);
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_agent(&bead, false, None, record);
+        h.app.request_quit();
+        assert!(!h.app.quit);
+        assert!(matches!(&h.app.mode, Mode::Confirm { msg, .. } if msg.contains("1 agent launch")));
+        drop(held);
+        h.app.shutdown();
+        assert_eq!(h.prepared(), ["t-1"]);
+        assert!(h.app.launching.is_empty());
+        assert!(h.app.agents.is_empty());
+        assert_eq!(*done.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn review_launch_marks_reviewing_when_it_starts() {
+        let mut h = Harness::new("review", &[("t-1", Some(State::Review))]);
+        h.app.git.ensure_worktree("t-1", "main").unwrap();
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_review(&bead, record);
+        let rid = agent::review_id("t-1");
+        assert!(h.app.is_starting(&rid));
+        assert_eq!(h.app.agent_key("t-1"), rid);
+        assert_eq!(h.state("t-1"), Some(State::Review));
+        drop(held);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(true));
+        assert!(h.app.agents.contains_key(&rid));
+        assert_eq!(h.state("t-1"), Some(State::Reviewing));
+    }
+
+    #[test]
+    fn review_launch_is_dropped_when_bead_leaves_review() {
+        let mut h = Harness::new("review-left", &[("t-1", Some(State::Review))]);
+        h.app.git.ensure_worktree("t-1", "main").unwrap();
+        let gate = h.gate.clone();
+        let held = gate.lock().unwrap();
+        let (done, record) = recorder();
+        let bead = h.bead("t-1");
+        h.app.launch_review(&bead, record);
+        h.app
+            .edit_local("t-1", |b| b.set_state_label(Some(State::Running)));
+        drop(held);
+        h.pump();
+        let rid = agent::review_id("t-1");
+        assert_eq!(*done.lock().unwrap(), Some(false));
+        assert!(!h.app.agents.contains_key(&rid));
+        assert_eq!(h.app.slots.get(&rid), None);
+    }
 
     #[test]
     fn bd_worker_runs_jobs_in_order_without_blocking_sender() {
