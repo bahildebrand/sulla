@@ -42,8 +42,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     status_line(f, status, app);
-    if matches!(app.mode, Mode::Help) {
-        help(f, app);
+    if let Mode::Help { scroll } = app.mode {
+        help(f, scroll);
     }
     if matches!(app.mode, Mode::Health) {
         health(f, app);
@@ -72,7 +72,11 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             tag("HEALTH", Color::Cyan),
             Span::raw(" r recheck, any other key closes").dim(),
         ],
-        Mode::Normal | Mode::Help => vec![
+        Mode::Help { .. } => vec![
+            tag("HELP", Color::Blue),
+            Span::raw(" j k / Ctrl-d Ctrl-u / gg G scroll, any other key closes").dim(),
+        ],
+        Mode::Normal => vec![
             tag("NORMAL", Color::Blue),
             Span::raw(format!(" {}", app.status)),
         ],
@@ -160,7 +164,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
 
 const HELP: &[(&str, &str)] = &[
     ("Global", ""),
-    ("?", "help"),
+    ("?", "help (j k / Ctrl-d Ctrl-u / gg G scroll)"),
     (
         "! / :health",
         "health of bd, agent, kache, incus and why nothing starts",
@@ -251,7 +255,11 @@ const HELP: &[(&str, &str)] = &[
     ("e", "open $EDITOR in bead worktree, reloads diff after"),
 ];
 
-fn help(f: &mut Frame, _app: &App) {
+pub fn help_max_scroll(height: u16) -> u16 {
+    (HELP.len() as u16 + 2).saturating_sub(height.saturating_sub(1))
+}
+
+fn help(f: &mut Frame, scroll: u16) {
     let lines: Vec<Line> = HELP
         .iter()
         .map(|(k, d)| {
@@ -262,15 +270,19 @@ fn help(f: &mut Frame, _app: &App) {
             }
         })
         .collect();
+    let [screen, _] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
     let [area] = Layout::vertical([Constraint::Length(lines.len() as u16 + 2)])
         .flex(Flex::Center)
-        .areas(f.area());
+        .areas(screen);
     let [area] = Layout::horizontal([Constraint::Length(80)])
         .flex(Flex::Center)
         .areas(area);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" sulla keys ")),
+        Paragraph::new(lines)
+            .scroll((scroll.min(help_max_scroll(f.area().height)), 0))
+            .block(Block::bordered().title(" sulla keys ")),
         area,
     );
 }

@@ -145,7 +145,9 @@ pub enum Mode {
         action: Action,
         msg: String,
     },
-    Help,
+    Help {
+        scroll: u16,
+    },
     Health,
     Inspect {
         id: String,
@@ -2169,7 +2171,10 @@ impl App {
             }
             return;
         }
-        if matches!(self.mode, Mode::Normal | Mode::Inspect { .. }) {
+        if matches!(
+            self.mode,
+            Mode::Normal | Mode::Inspect { .. } | Mode::Help { .. }
+        ) {
             let code = if up { KeyCode::Up } else { KeyCode::Down };
             self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
         }
@@ -2188,7 +2193,7 @@ impl App {
                     self.status = "cancelled".into();
                 }
             }
-            Mode::Help => {}
+            Mode::Help { scroll } => self.help_key(k, scroll),
             Mode::Health => {
                 if k.code == KeyCode::Char('r') {
                     self.open_health();
@@ -3085,7 +3090,7 @@ impl App {
         let pending = self.pending.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
-            KeyCode::Char('?') => return self.mode = Mode::Help,
+            KeyCode::Char('?') => return self.mode = Mode::Help { scroll: 0 },
             KeyCode::Char(':') => {
                 return self.mode = Mode::Input {
                     kind: InputKind::Command,
@@ -3176,6 +3181,26 @@ impl App {
                 scroll: 0,
             };
         }
+    }
+
+    fn help_key(&mut self, k: KeyEvent, mut scroll: u16) {
+        let pending = self.pending.take();
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let half = self.term.1 / 2;
+        let max = crate::ui::help_max_scroll(self.term.1);
+        match k.code {
+            KeyCode::Char('j') | KeyCode::Down => scroll = scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => scroll = scroll.saturating_add(half),
+            KeyCode::Char('u') if ctrl => scroll = scroll.saturating_sub(half),
+            KeyCode::Char('g') if pending == Some('g') => scroll = 0,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('G') => scroll = max,
+            _ => return,
+        }
+        self.mode = Mode::Help {
+            scroll: scroll.min(max),
+        };
     }
 
     fn inspect_key(&mut self, k: KeyEvent, id: String, text: String, mut scroll: u16) {
