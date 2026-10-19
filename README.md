@@ -47,6 +47,7 @@ kache = true
 check = "cargo test && cargo clippy" # pre-merge check, unset by default
 agent = "copilot" # or "claude"
 sandbox = "worktree" # or "incus"
+workflow = "local"   # or "pr" to land work through GitHub pull requests
 
 [copilot]
 bin = "copilot"
@@ -87,6 +88,13 @@ prompts = ["Do you want to", "No, and tell"] # screen text meaning a permission/
 [budget]
 minutes = 0               # max minutes per agent run, 0 = unlimited
 tokens = 0                # max input + output tokens per agent run, 0 = unlimited
+
+# GitHub pull request settings, used when workflow = "pr"
+[pr]
+remote = "origin"         # remote that sulla branches are pushed to
+draft = false             # open pull requests as drafts
+poll_secs = 120           # how often to poll open pull requests
+backup_sessions = true    # back up agent sessions so agents can resume on review comments
 
 [presets]                 # prompt guidance picked per bead with a preset:<name> label
 perf = "This is a performance change. Measure before and after and report the numbers."

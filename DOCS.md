@@ -24,6 +24,18 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - On restart, agents still running or in review are resumed via their agent session, so review
   beads keep their slots ahead of pending work.
 
+### Workflow
+
+`workflow = "local"` (the default) merges finished branches straight into the base branch as
+described above. `workflow = "pr"` opts a repo into landing work through GitHub pull requests via
+the `gh` CLI, configured by the `[pr]` table:
+
+- `remote` (default `"origin"`): remote that sulla branches are pushed to.
+- `draft` (default `false`): open pull requests as drafts.
+- `poll_secs` (default `120`): how often open pull requests are polled.
+- `backup_sessions` (default `true`): back up agent sessions so agents can resume on review
+  comments.
+
 ### Stacked beads
 
 A Pending bead whose only open blocker is in Review (or under AI review) starts on a branch forked
@@ -129,6 +141,7 @@ list say with what. Uncommitted changes are not checked.
 - Cards show time in state, the worktree diff stat (`+adds -dels Nf`) and the last line of agent
   output.
 - `!` (or `:health`) opens a health panel: probes `bd`, the agent CLI, `kache` and `incus`
-  (including `incus query /1.0`), shows the last bd poll error, and explains why nothing is
+  (including `incus query /1.0`), plus `gh` (including `gh auth status`) when `workflow = "pr"`,
+  shows the last bd poll error, and explains why nothing is
   starting (paused, rate limited, slots full, failed starts, all blocked, backlog only, or nothing
   open). `r` rechecks.

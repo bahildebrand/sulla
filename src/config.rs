@@ -21,6 +21,8 @@ pub struct Config {
     pub notify: NotifyConfig,
     pub stall: StallConfig,
     pub budget: BudgetConfig,
+    pub workflow: Workflow,
+    pub pr: PrConfig,
     pub presets: BTreeMap<String, String>,
 }
 
@@ -29,6 +31,34 @@ pub struct Config {
 pub struct BudgetConfig {
     pub minutes: u64,
     pub tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Workflow {
+    #[default]
+    Local,
+    Pr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PrConfig {
+    pub remote: String,
+    pub draft: bool,
+    pub poll_secs: u64,
+    pub backup_sessions: bool,
+}
+
+impl Default for PrConfig {
+    fn default() -> Self {
+        Self {
+            remote: "origin".into(),
+            draft: false,
+            poll_secs: 120,
+            backup_sessions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +223,8 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             stall: StallConfig::default(),
             budget: BudgetConfig::default(),
+            workflow: Workflow::default(),
+            pr: PrConfig::default(),
             presets: BTreeMap::new(),
         }
     }
@@ -342,5 +374,34 @@ mod tests {
         assert_eq!(Config::default().sandbox, SandboxKind::Worktree);
         let cfg: Config = toml::from_str("sandbox = \"incus\"").unwrap();
         assert_eq!(cfg.sandbox, SandboxKind::Incus);
+    }
+
+    #[test]
+    fn workflow_defaults_to_local() {
+        let cfg: Config = toml::from_str("max_agents = 2").unwrap();
+        assert_eq!(cfg.workflow, Workflow::Local);
+        assert_eq!(cfg.pr, PrConfig::default());
+        assert_eq!(cfg.pr.remote, "origin");
+        assert!(!cfg.pr.draft);
+        assert_eq!(cfg.pr.poll_secs, 120);
+        assert!(cfg.pr.backup_sessions);
+    }
+
+    #[test]
+    fn workflow_pr_parses_pr_table() {
+        let cfg: Config = toml::from_str(
+            "workflow = \"pr\"\n[pr]\nremote = \"upstream\"\ndraft = true\npoll_secs = 30\nbackup_sessions = false",
+        )
+        .unwrap();
+        assert_eq!(cfg.workflow, Workflow::Pr);
+        assert_eq!(
+            cfg.pr,
+            PrConfig {
+                remote: "upstream".into(),
+                draft: true,
+                poll_secs: 30,
+                backup_sessions: false,
+            }
+        );
     }
 }

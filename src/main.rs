@@ -9,6 +9,7 @@ mod filter;
 mod git;
 mod health;
 mod notify;
+mod pr;
 mod presets;
 mod sandbox;
 mod scheduler;

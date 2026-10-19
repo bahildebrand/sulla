@@ -16,12 +16,13 @@ use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall
 use crate::beads::{Bead, Beads, Column, State};
 use crate::budget::{self, Budget};
 use crate::checks::{self, Check};
-use crate::config::{AgentKind, Config, SandboxKind, Trigger};
+use crate::config::{AgentKind, Config, SandboxKind, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::health::{self, Probe, Tool};
 use crate::notify::Notifier;
+use crate::pr;
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Idle, Snapshot, fmt_duration};
@@ -933,6 +934,9 @@ impl App {
                 )
                 .also(&["query", "/1.0"]),
         ]);
+        if self.cfg.workflow == Workflow::Pr {
+            probes.push(pr::probe());
+        }
         health::spawn(probes, self.tx.clone());
         self.mode = Mode::Health;
     }
