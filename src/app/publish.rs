@@ -209,6 +209,32 @@ impl App {
         self.mutated();
     }
 
+    pub(super) fn open_pr(&mut self, id: &str) {
+        let Some(n) = self
+            .bead(id)
+            .and_then(|b| b.label("pr"))
+            .map(str::to_string)
+        else {
+            self.status = format!("{id} has no PR");
+            return;
+        };
+        let Ok(number) = n.parse::<u64>() else {
+            self.status = format!("{id} has an invalid PR label pr:{n}");
+            return;
+        };
+        self.status = format!("opening PR #{number} in the browser...");
+        let repo = self.repo.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = pr::browse(&repo, number);
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                if app.report(r).is_some() {
+                    app.status = format!("opened PR #{number} in the browser");
+                }
+            })));
+        });
+    }
+
     pub(super) fn awaiting_pr(&self, id: &str) -> bool {
         self.bead(id)
             .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))

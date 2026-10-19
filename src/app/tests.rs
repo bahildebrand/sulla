@@ -451,3 +451,13 @@ fn failed_parent_publish_skips_the_rest_of_the_stack() {
     assert_eq!(h.state("a"), review);
     assert_eq!(h.state("b"), review);
 }
+
+#[test]
+fn open_pr_needs_a_valid_pr_label() {
+    let mut h = Harness::new("open-pr", &[("a", Some(State::Pr)), ("b", Some(State::Pr))]);
+    h.app.all[1].labels.push("pr:x".into());
+    h.app.open_pr("a");
+    assert_eq!(h.app.status, "a has no PR");
+    h.app.open_pr("b");
+    assert_eq!(h.app.status, "b has an invalid PR label pr:x");
+}

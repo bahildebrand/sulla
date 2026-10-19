@@ -80,6 +80,11 @@ pub fn url(repo: &Path, number: u64) -> Result<String> {
     )
 }
 
+pub fn browse(repo: &Path, number: u64) -> Result<()> {
+    let n = number.to_string();
+    gh(repo, &["pr", "view", &n, "--web"]).map(|_| ())
+}
+
 pub fn create(
     repo: &Path,
     branch: &str,

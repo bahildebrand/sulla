@@ -488,6 +488,7 @@ impl App {
             KeyCode::Char('B') => self.move_to_backlog(&b),
             KeyCode::Char('A') => self.relaunch(&b.id),
             KeyCode::Char('U') => self.request_revise(&b),
+            KeyCode::Char('o') => self.open_pr(&b.id),
             KeyCode::Char('t') => self.show_check(b.id),
             KeyCode::Char('T') => self.rerun_check(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -595,6 +596,7 @@ impl App {
             KeyCode::Char('m') => self.request_merge(id, false),
             KeyCode::Char('M') => self.request_merge(id, true),
             KeyCode::Char('P') => self.request_publish(id),
+            KeyCode::Char('o') => self.open_pr(&id),
             KeyCode::Char('t') => self.show_check(id),
             KeyCode::Char('T') => self.rerun_check(&id),
             KeyCode::Char('s') => {
