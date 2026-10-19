@@ -164,7 +164,7 @@ impl NewBeadForm {
 pub enum Action {
     Kill(String),
     Merge(String),
-    Publish(String),
+    Publish(Vec<String>),
     ResolveConflicts(String),
     Discard(String),
     Delete(String),
@@ -2226,36 +2226,90 @@ impl App {
             return;
         }
         self.status = format!("checking blockers of {id}...");
-        let bead = id.clone();
+        let chain = self.publish_chain(&id);
+        let beads = chain.clone();
         self.bd(
-            move |beads| beads.open_blockers(&bead),
-            move |app, r| app.confirm_publish(id, r),
+            move |b| beads.iter().map(|id| b.open_blockers(id)).collect(),
+            move |app, r| app.confirm_publish(id, chain, r),
         );
     }
 
-    fn confirm_publish(&mut self, id: String, blockers: Result<Vec<String>>) {
+    fn stack_publishable(&self, id: &str) -> bool {
+        self.bead(id)
+            .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Review))
+            && self.git.has_branch(id)
+            && !self.publishing.contains(id)
+            && !self.review_of(id).is_some_and(Diff::all_rejected)
+    }
+
+    fn publish_chain(&self, id: &str) -> Vec<String> {
+        let mut chain = vec![id.to_string()];
+        while let Some(p) = chain.last().and_then(|c| self.git.stack_parent(c)) {
+            if chain.contains(&p) || self.awaiting_pr(&p) || !self.stack_publishable(&p) {
+                break;
+            }
+            chain.push(p);
+        }
+        chain.reverse();
+        chain
+    }
+
+    fn confirm_publish(
+        &mut self,
+        id: String,
+        chain: Vec<String>,
+        blockers: Result<Vec<Vec<String>>>,
+    ) {
         if self.status == format!("checking blockers of {id}...") {
             self.status.clear();
         }
-        let Some(mut blockers) = self.report(blockers) else {
+        let Some(blockers) = self.report(blockers) else {
             return;
         };
         if !matches!(self.mode, Mode::Normal) || self.focused_id().as_deref() != Some(&id) {
             return;
         }
-        let parent = self.pr_parent(&id);
-        blockers.retain(|b| Some(b) != parent.as_ref());
-        if !blockers.is_empty() {
+        if chain.iter().any(|c| self.publishing.contains(c)) {
             self.status = format!(
-                "cannot publish {id}: blocked by open {}",
-                blockers.join(", ")
+                "{} is being published, wait for it to finish",
+                chain.join(", ")
             );
             return;
         }
-        let base = self.pr_base(&id);
+        let parents =
+            std::iter::once(self.pr_parent(&chain[0])).chain(chain.iter().cloned().map(Some));
+        for ((bead, mut open), parent) in chain.iter().zip(blockers).zip(parents) {
+            open.retain(|b| Some(b) != parent.as_ref());
+            if open.is_empty() {
+                continue;
+            }
+            let open = open.join(", ");
+            self.status = if *bead == id {
+                format!("cannot publish {id}: blocked by open {open}")
+            } else {
+                format!("cannot publish {id}: {bead} below it is blocked by open {open}")
+            };
+            return;
+        }
+        let base = self.pr_base(&chain[0]);
         let remote = &self.cfg.pr.remote;
         let br = git::branch(&id);
         let msg = match (self.cfg.pr.tool, self.bead(&id).and_then(|b| b.label("pr"))) {
+            (tool, _) if chain.len() > 1 => {
+                let branches = chain
+                    .iter()
+                    .map(|c| git::branch(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match tool {
+                    PrTool::Gh => {
+                        format!("Push {branches} to {remote} as stacked PRs onto {base}? y/n")
+                    }
+                    PrTool::Graphite => {
+                        format!("Submit {branches} with Graphite as a stack onto {base}? y/n")
+                    }
+                }
+            }
             (PrTool::Gh, Some(n)) => format!("Force push {br} to {remote} and update PR #{n}? y/n"),
             (PrTool::Gh, None) => {
                 format!("Push {br} to {remote} and open a PR against {base}? y/n")
@@ -2267,7 +2321,10 @@ impl App {
                 format!("Submit {br} with Graphite and open a PR against {base}? y/n")
             }
         };
-        let n = self.review_of(&id).map_or(0, Diff::rejected_hunks);
+        let n: usize = chain
+            .iter()
+            .map(|c| self.review_of(c).map_or(0, Diff::rejected_hunks))
+            .sum();
         let msg = if n > 0 {
             format!("{n} rejected hunk(s) will be dropped. {msg}")
         } else {
@@ -2275,33 +2332,62 @@ impl App {
         };
         self.mode = Mode::Confirm {
             msg,
-            action: Action::Publish(id),
+            action: Action::Publish(chain),
         };
     }
 
-    fn publish(&mut self, id: &str) {
-        if !self.publishing.insert(id.to_string()) {
+    fn publish(&mut self, chain: Vec<String>) {
+        if chain.is_empty() || chain.iter().any(|id| self.publishing.contains(id)) {
             return;
         }
-        self.status = format!("publishing {id}...");
-        let rejection = self.review_of(id).map(Diff::rejection).unwrap_or_default();
-        let job = Publish {
-            id: id.to_string(),
-            base: self.pr_base(id),
-            stacked: self.pr_parent(id).is_some(),
-            trunk: self.base.clone(),
-            rejection,
-            pr: self.cfg.pr.clone(),
-            repo: self.repo.clone(),
-            git: self.git.clone(),
-            beads: self.beads.clone(),
-        };
+        self.status = format!("publishing {}...", chain.join(", "));
+        let mut base = self.pr_base(&chain[0]);
+        let mut stacked = self.pr_parent(&chain[0]).is_some();
+        let mut jobs = Vec::new();
+        for id in chain {
+            let rejection = self.review_of(&id).map(Diff::rejection).unwrap_or_default();
+            let next = git::branch(&id);
+            self.publishing.insert(id.clone());
+            jobs.push(Publish {
+                id,
+                base: std::mem::replace(&mut base, next),
+                stacked: std::mem::replace(&mut stacked, true),
+                trunk: self.base.clone(),
+                rejection,
+                pr: self.cfg.pr.clone(),
+                repo: self.repo.clone(),
+                git: self.git.clone(),
+                beads: self.beads.clone(),
+            });
+        }
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let id = job.id.clone();
-            let r = job.run();
-            let _ = tx.send(Event::Finished(Box::new(move |app| app.pushed(id, r))));
+            let mut jobs = jobs.into_iter();
+            while let Some(job) = jobs.next() {
+                let id = job.id.clone();
+                let r = job.run();
+                let failed = r.is_err();
+                let _ = tx.send(Event::Finished(Box::new(move |app| app.pushed(id, r))));
+                if failed {
+                    let rest: Vec<String> = jobs.map(|j| j.id).collect();
+                    if !rest.is_empty() {
+                        let _ = tx.send(Event::Finished(Box::new(move |app| {
+                            app.skipped_publish(rest)
+                        })));
+                    }
+                    return;
+                }
+            }
         });
+    }
+
+    fn skipped_publish(&mut self, rest: Vec<String>) {
+        for id in &rest {
+            self.publishing.remove(id);
+        }
+        self.status
+            .push_str(&format!(", did not publish {}", rest.join(", ")));
+        self.mutated();
     }
 
     fn pushed(&mut self, id: String, r: Result<(Bead, pr::Pr)>) {
@@ -3059,7 +3145,7 @@ impl App {
             Action::Quit => self.quit = true,
             Action::Kill(id) => self.kill(&id),
             Action::Merge(id) => self.merge(&id),
-            Action::Publish(id) => self.publish(&id),
+            Action::Publish(chain) => self.publish(chain),
             Action::ResolveConflicts(id) => self.resolve_conflicts(&id),
             Action::Discard(id) => self.discard(&id),
             Action::Delete(id) => self.delete(&id),
@@ -4273,6 +4359,28 @@ mod tests {
             }
         }
 
+        fn stack(&self, id: &str, parent: &str) {
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&self.dir)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}");
+            };
+            for b in [id, parent] {
+                if !self.app.git.has_branch(b) {
+                    git(&["branch", &git::branch(b)]);
+                }
+            }
+            git(&[
+                "update-ref",
+                &format!("refs/sulla/stack/{id}"),
+                &git::branch(parent),
+            ]);
+            git(&["config", &format!("sulla.{id}.parent"), parent]);
+        }
+
         fn prepared(&self) -> Vec<String> {
             self.prepared.lock().unwrap().clone()
         }
@@ -4463,5 +4571,102 @@ mod tests {
             assert!(matches!(ev, Event::Finished(_)));
         }
         assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    fn chain(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn publish_chain_takes_unpublished_review_parents() {
+        let review = Some(State::Review);
+        let h = Harness::new("chain", &[("a", review), ("b", review), ("c", review)]);
+        h.stack("b", "a");
+        h.stack("c", "b");
+        assert_eq!(h.app.publish_chain("c"), chain(&["a", "b", "c"]));
+        assert_eq!(h.app.publish_chain("a"), chain(&["a"]));
+    }
+
+    #[test]
+    fn publish_chain_stops_at_awaiting_or_unreviewed_parent() {
+        let h = Harness::new(
+            "chain-stop",
+            &[
+                ("a", Some(State::Pr)),
+                ("b", Some(State::Review)),
+                ("c", Some(State::Review)),
+                ("x", Some(State::Running)),
+                ("y", Some(State::Review)),
+            ],
+        );
+        h.stack("b", "a");
+        h.stack("c", "b");
+        h.stack("y", "x");
+        assert_eq!(h.app.publish_chain("c"), chain(&["b", "c"]));
+        assert_eq!(h.app.pr_base("b"), "sulla/a");
+        assert_eq!(h.app.publish_chain("y"), chain(&["y"]));
+    }
+
+    #[test]
+    fn confirm_publish_offers_the_whole_stack() {
+        let review = Some(State::Review);
+        let mut h = Harness::new("chain-confirm", &[("a", review), ("b", review)]);
+        h.stack("b", "a");
+        h.app.view = View::Progress("b".into());
+        let blockers = Ok(vec![vec![], vec!["a".to_string()]]);
+        h.app
+            .confirm_publish("b".into(), chain(&["a", "b"]), blockers);
+        let Mode::Confirm {
+            msg,
+            action: Action::Publish(c),
+        } = &h.app.mode
+        else {
+            panic!("no confirm, status: {}", h.app.status);
+        };
+        assert_eq!(c, &chain(&["a", "b"]));
+        assert!(msg.contains("sulla/a, sulla/b"), "{msg}");
+    }
+
+    #[test]
+    fn confirm_publish_names_blockers_below_in_the_stack() {
+        let review = Some(State::Review);
+        let mut h = Harness::new("chain-blocked", &[("a", review), ("b", review)]);
+        h.stack("b", "a");
+        h.app.view = View::Progress("b".into());
+        let blockers = Ok(vec![vec!["q".to_string()], vec!["a".to_string()]]);
+        h.app
+            .confirm_publish("b".into(), chain(&["a", "b"]), blockers);
+        assert!(matches!(h.app.mode, Mode::Normal));
+        assert_eq!(
+            h.app.status,
+            "cannot publish b: a below it is blocked by open q"
+        );
+        h.app
+            .confirm_publish("b".into(), chain(&["b"]), Ok(vec![vec!["a".to_string()]]));
+        assert_eq!(h.app.status, "cannot publish b: blocked by open a");
+    }
+
+    #[test]
+    fn failed_parent_publish_skips_the_rest_of_the_stack() {
+        let review = Some(State::Review);
+        let mut h = Harness::new("chain-fail", &[("a", review), ("b", review)]);
+        h.stack("b", "a");
+        h.app.publish(chain(&["a", "b"]));
+        assert!(h.app.publishing.contains("a") && h.app.publishing.contains("b"));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !h.app.publishing.is_empty() {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let ev = h.rx.recv_timeout(wait).expect("publish did not finish");
+            if matches!(ev, Event::Finished(_)) {
+                h.app.dispatch(ev);
+            }
+        }
+        assert!(
+            h.app.status.ends_with(", did not publish b"),
+            "{}",
+            h.app.status
+        );
+        assert_eq!(h.state("a"), review);
+        assert_eq!(h.state("b"), review);
     }
 }

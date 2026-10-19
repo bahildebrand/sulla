@@ -58,8 +58,9 @@ A Pending bead whose only open blocker is in Review (or under AI review) starts 
 from the blocker's branch. With `workflow = "pr"` it also stacks on a blocker that is Awaiting PR,
 so a chain of dependent beads becomes a chain of stacked PRs. The fork point is kept in
 `refs/sulla/stack/<bead>`, so its diff, log and AI review show only its own commits. It can be
-published while its blocker is Awaiting PR (the PR targets the blocker's branch), but it cannot
-merge locally until the blocker is closed.
+published while its blocker is Awaiting PR (the PR targets the blocker's branch), or together
+with blockers still in Review (see [Publishing](#publishing)), but it cannot merge locally until
+the blocker is closed.
 
 When the blocker merges (or is closed after landing in base), its children are rebased onto base,
 and their children onto the new branches, down the chain. Children with a live agent or reviewer
@@ -152,6 +153,17 @@ targets the parent's branch instead of base. The bead gets `pr:<number>`, moves 
 its agent and reviewer stop, leaving the worktree and session for later rounds. Publishing again
 force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`. With
 `workflow = "local"`, `P` only shows a status message.
+
+Publishing a stacked bead whose stack parent is still in Review publishes the stack below it too.
+sulla walks up the stack parents while each is open, in Review, has a branch and is not already
+being published, stopping at the first parent that is Awaiting PR (or at base). If no open blocker
+of any bead on that chain is left besides its own stack parent, the prompt names every branch
+(`Submit sulla/a, sulla/b with Graphite as a stack onto <base>?`) and they are published one after
+another from the bottom, each exactly as if `P` had been pressed on it once the one below was
+Awaiting PR: the bottom one targets the Awaiting PR parent's branch or base, every other one
+targets the branch below it. Rejected hunks in each bead's review are dropped. If one fails, the
+beads above it are not published and stay in Review. A stack parent in any other state (running,
+under AI review, held) still blocks the publish, and the status line names it.
 
 With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of `git push` and
 `gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
