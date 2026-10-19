@@ -4,10 +4,18 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 
+use crate::agent;
 use crate::app::App;
 use crate::beads::{Bead, Column, State};
 
 fn marker(app: &App, b: &Bead) -> Span<'static> {
+    if b.state() == Some(State::Reviewing) {
+        let color = match app.agents.get(&agent::review_id(&b.id)) {
+            Some(a) if a.alive => Color::Cyan,
+            _ => Color::Red,
+        };
+        return Span::styled("◎ ", Style::new().fg(color));
+    }
     match app.agents.get(&b.id) {
         Some(a) if a.alive => Span::styled("● ", Style::new().fg(Color::Green)),
         Some(_) => Span::styled("✗ ", Style::new().fg(Color::Red)),

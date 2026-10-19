@@ -16,6 +16,7 @@ use crate::app::Event;
 use crate::beads::Bead;
 
 pub const CHAT_ID: &str = "@chat";
+const REVIEW_SUFFIX: &str = "~review";
 
 const MAX_WHEEL_EVENTS: usize = 500;
 const LINES_PER_WHEEL: usize = 3;
@@ -53,6 +54,44 @@ pub fn task_prompt(bead: &Bead) -> String {
     )
 }
 
+pub fn review_id(bead_id: &str) -> String {
+    format!("{bead_id}{REVIEW_SUFFIX}")
+}
+
+pub fn reviewed_bead(agent_id: &str) -> Option<&str> {
+    agent_id.strip_suffix(REVIEW_SUFFIX)
+}
+
+pub fn review_prompt(bead: &Bead, base: &str) -> String {
+    let id = &bead.id;
+    let desc = if bead.description.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", bead.description.trim())
+    };
+    format!(
+        "You are reviewing work on bead {id}: {title}{desc}\n\n\
+         Another agent implemented this on branch sulla/{id}, which is checked out in this \
+         worktree. Inspect `git diff {base}...HEAD` and `git log {base}..HEAD`. Check \
+         correctness, bugs, edge cases, and whether the acceptance criteria above are met. Run \
+         the build and tests. Do NOT edit tracked files, commit, rebase, or change branches. \
+         Rust builds are cached with kache through RUSTC_WRAPPER, leave that alone.\n\n\
+         Leave line-anchored review comments the way a human reviewer does in sulla. Write a \
+         JSON file outside the worktree at /tmp/sulla-review-{id}.json with exactly this \
+         shape:\n\
+         {{\"verdict\":\"approve\"|\"changes\",\"comments\":[{{\"file\":\"path/relative/to/repo\",\
+         \"side\":\"new\"|\"old\"|\"file\",\"line\":<number or null>,\"comment\":\"actionable text\"}}]}}\n\
+         Use side \"new\" for added or context lines with the line number in the new file, \
+         \"old\" for removed lines with the line number in the old file, and \"file\" with \
+         line null for file-level remarks. Use file \"COMMIT_MSG\" for remarks about commit \
+         messages. Line numbers must match the diff. Use verdict \"approve\" only if nothing \
+         needs to change.\n\n\
+         Then post it with `bd comments add {id} -f /tmp/sulla-review-{id}.json`, run \
+         `bd set-state {id} sulla=review --reason \"ai review done\"`, and stop.",
+        title = bead.title,
+    )
+}
+
 pub fn chat_prompt(base: &str, max_agents: usize) -> String {
     format!(
         "You are a planning assistant inside sulla, a TUI that runs coding agents off a beads \
@@ -62,7 +101,8 @@ pub fn chat_prompt(base: &str, max_agents: usize) -> String {
          How sulla works:\n\
          - Board columns come from `sulla:<state>` labels: Backlog (`sulla:backlog`, never auto \
          scheduled), Pending (no sulla label, or `sulla:held` which waits for the user to \
-         release it), In Progress (`sulla:running`), Ready for Review (`sulla:review`), Done \
+         release it), In Progress (`sulla:running`, or `sulla:reviewing` while an AI reviewer \
+         checks it), Ready for Review (`sulla:review`), Done \
          (closed).\n\
          - Sulla claims ready Pending beads (open, no unmet blockers, not epics) in priority \
          order (P0 first, then oldest) and runs up to {max_agents} agents at once.\n\
@@ -81,8 +121,8 @@ pub fn chat_prompt(base: &str, max_agents: usize) -> String {
          - Inspect existing work with `bd list`, `bd ready`, and `bd show <id>`.\n\
          - When the user approves, release beads to Pending with \
          `bd update <id> --remove-label sulla:backlog`.\n\
-         - Never add or remove `sulla:running` or `sulla:review` labels, never claim beads, \
-         and never close beads. Sulla manages those.\n\n\
+         - Never add or remove `sulla:running`, `sulla:reviewing`, or `sulla:review` labels, \
+         never claim beads, and never close beads. Sulla manages those.\n\n\
          Reply with one short line saying you are ready, then wait for the user."
     )
 }
@@ -134,7 +174,10 @@ pub fn command(
     cmd.cwd(&launch.worktree);
     cmd.env("TERM", "xterm-256color");
     if launch.bead {
-        cmd.env("SULLA_BEAD", &launch.id);
+        cmd.env(
+            "SULLA_BEAD",
+            reviewed_bead(&launch.id).unwrap_or(&launch.id),
+        );
     }
     if let Some(slot) = slot {
         cmd.env("SULLA_SLOT", slot.to_string());
@@ -278,5 +321,13 @@ mod tests {
         assert_eq!(parts, [8, 4, 4, 4, 12]);
         assert_eq!(&a[14..15], "4");
         assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn review_id_round_trips() {
+        let r = review_id("x-1");
+        assert_eq!(r, "x-1~review");
+        assert_eq!(reviewed_bead(&r), Some("x-1"));
+        assert_eq!(reviewed_bead("x-1"), None);
     }
 }

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
+use crate::agent;
 use crate::app::Event;
 use crate::beads::{Bead, Beads, State};
 
@@ -63,8 +64,12 @@ pub fn pick<'a>(
 
 pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
     all.iter()
-        .filter(|b| b.status != "closed" && b.state() == Some(State::Running))
-        .filter(|b| !known.contains(&b.id))
+        .filter(|b| b.status != "closed")
+        .filter(|b| match b.state() {
+            Some(State::Running) => !known.contains(&b.id),
+            Some(State::Reviewing) => !known.contains(&agent::review_id(&b.id)),
+            _ => false,
+        })
         .collect()
 }
 
@@ -104,5 +109,21 @@ mod tests {
             .collect();
         assert_eq!(ids, ["old-p1", "new-p1"]);
         assert!(pick(&ready, &busy, &HashSet::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn reviewing_bead_is_orphaned_only_without_reviewer() {
+        let all = vec![
+            bead("run", 1, "2026-01-01T00:00:00Z", &["sulla:running"]),
+            bead("rev", 1, "2026-01-01T00:00:00Z", &["sulla:reviewing"]),
+            bead("live", 1, "2026-01-01T00:00:00Z", &["sulla:reviewing"]),
+            bead("done", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
+        ];
+        let known = HashSet::from(["rev".to_string(), agent::review_id("live")]);
+        let ids: Vec<_> = orphans(&all, &known)
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+        assert_eq!(ids, ["run", "rev"]);
     }
 }

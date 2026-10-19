@@ -78,6 +78,7 @@ impl Column {
 pub enum State {
     Backlog,
     Running,
+    Reviewing,
     Review,
     Held,
 }
@@ -87,6 +88,7 @@ impl State {
         match self {
             State::Backlog => "backlog",
             State::Running => "running",
+            State::Reviewing => "reviewing",
             State::Review => "review",
             State::Held => "held",
         }
@@ -100,6 +102,7 @@ impl Bead {
             .find_map(|l| match l.strip_prefix("sulla:")? {
                 "backlog" => Some(State::Backlog),
                 "running" => Some(State::Running),
+                "reviewing" => Some(State::Reviewing),
                 "review" => Some(State::Review),
                 "held" => Some(State::Held),
                 _ => None,
@@ -131,7 +134,7 @@ impl Bead {
         match self.state() {
             Some(State::Backlog) => Some(Column::Backlog),
             Some(State::Review) => Some(Column::Review),
-            Some(State::Running) => Some(Column::InProgress),
+            Some(State::Running | State::Reviewing) => Some(Column::InProgress),
             _ if self.status == "in_progress" => Some(Column::InProgress),
             _ => Some(Column::Pending),
         }
@@ -368,6 +371,15 @@ mod tests {
         );
         assert_eq!(b.dependencies[0].id, "x");
         assert_eq!(b.dependencies[0].dependency_type, "blocks");
+    }
+
+    #[test]
+    fn reviewing_bead_is_in_progress() {
+        let b =
+            bead(r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:reviewing"]}"#);
+        assert_eq!(b.state(), Some(State::Reviewing));
+        assert_eq!(State::Reviewing.as_str(), "reviewing");
+        assert_eq!(b.column(Utc::now(), 3), Some(Column::InProgress));
     }
 
     #[test]

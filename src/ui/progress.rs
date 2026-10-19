@@ -5,18 +5,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use tui_term::widget::PseudoTerminal;
 
-use crate::agent::CHAT_ID;
+use crate::agent::{self, CHAT_ID};
 use crate::app::{App, Mode};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
+    let reviewed = agent::reviewed_bead(id);
+    let bead = reviewed.unwrap_or(id);
     let title = app
         .all
         .iter()
-        .find(|b| b.id == id)
+        .find(|b| b.id == bead)
         .map(|b| b.title.as_str())
         .unwrap_or("");
     let mut spans = if id == CHAT_ID {
         vec![Span::raw(" conversation ").bold()]
+    } else if let Some(bead) = reviewed {
+        vec![
+            Span::raw(format!(" {bead} ")).bold(),
+            Span::styled("[ai review] ", Style::new().fg(Color::Cyan)),
+            Span::raw(format!("{title} ")),
+        ]
     } else {
         vec![
             Span::raw(format!(" {id} ")).bold(),

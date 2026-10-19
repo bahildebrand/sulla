@@ -17,12 +17,17 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Ready beads are claimed in priority order until `max_agents` agents are in progress.
 - Each agent runs `copilot --yolo` (or `claude --dangerously-skip-permissions` with `agent = "claude"`) in a PTY inside `.sulla/worktrees/<bead>` on branch
   `sulla/<bead>`, with `RUSTC_WRAPPER=kache`.
-- Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:review`, `sulla:held`.
+- Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`, `sulla:review`, `sulla:held`.
 - Beads in Backlog are never auto scheduled. Pick Backlog or Pending in the new bead popup, `B` moves a bead to Backlog, `s` releases it to Pending and `S` releases the whole Backlog.
   The scheduler only starts Pending beads whose dependencies are closed. Blocked beads show `⊘`.
 - `A` on a blocked bead without a worktree does not launch it. It is released to Pending and
   the scheduler starts it once its blockers close.
 - Agents are told to run `bd set-state <bead> sulla=review` when done.
+- `V` on a bead in Review starts an AI reviewer agent in the same worktree with a fresh session.
+  The bead is labeled `sulla:reviewing` and shown in In Progress with `◎` while it runs. The
+  reviewer posts line-anchored comments as a JSON bead comment and moves the bead back to
+  Review. It uses its own slot and counts toward `max_agents`. `p` watches it, `X` stops it and
+  returns the bead to Review. Reviewing beads without a live reviewer on restart go back to Review.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.
@@ -41,9 +46,9 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead, `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `R` mark review, `A` launch/resume, `q` quit |
+| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead, `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `R` mark review, `V` ai review, `A` launch/resume, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
-| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `m` merge, `s` send feedback, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
+| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `m` merge, `s` send feedback, `V` ai review, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:refresh` `:kill <id>` `:chat [new]` |
 
 ## Config

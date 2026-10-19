@@ -4,7 +4,10 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{
+    Result,
+    eyre::{bail, eyre},
+};
 use crossterm::event::{
     Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
@@ -239,10 +242,14 @@ impl App {
             .iter()
             .filter(|(id, a)| a.alive && id.as_str() != CHAT_ID)
             .filter(|(id, _)| {
-                !matches!(
-                    self.bead(id).and_then(|b| b.column(now, i64::MAX)),
-                    Some(Column::Review | Column::Done)
-                )
+                agent::reviewed_bead(id).is_some()
+                    || self.bead(id).is_none_or(|b| {
+                        b.state() != Some(State::Reviewing)
+                            && !matches!(
+                                b.column(now, i64::MAX),
+                                Some(Column::Review | Column::Done)
+                            )
+                    })
             })
             .count()
     }
@@ -325,7 +332,33 @@ impl App {
         }
     }
 
+    fn reap_reviewers(&mut self) {
+        let stale: Vec<String> = self
+            .agents
+            .keys()
+            .filter(|k| {
+                agent::reviewed_bead(k).is_some_and(|id| {
+                    !self.bead(id).is_some_and(|b| {
+                        b.status != "closed" && b.state() == Some(State::Reviewing)
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        for rid in stale {
+            tracing::info!("stopping reviewer {rid}");
+            self.remove_agent(&rid, Outcome::Killed);
+            if matches!(&self.view, View::Progress(v) if *v == rid) {
+                if matches!(self.mode, Mode::Insert) {
+                    self.mode = Mode::Normal;
+                }
+                self.view = View::Board;
+            }
+        }
+    }
+
     fn reconcile(&mut self) {
+        self.reap_reviewers();
         let known: HashSet<String> = self.agents.keys().cloned().collect();
         let orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()
@@ -333,6 +366,13 @@ impl App {
             .cloned()
             .collect();
         for b in orphans {
+            if b.state() == Some(State::Reviewing) {
+                tracing::info!("returning orphaned review {} to review", b.id);
+                let r = self.beads.set_state(&b.id, State::Review);
+                self.report(r);
+                self.mutated();
+                continue;
+            }
             if self.git.worktree_path(&b.id).join(".git").exists() {
                 tracing::info!("resuming orphaned agent {}", b.id);
                 let r = self.start_agent(&b, true, None);
@@ -404,6 +444,77 @@ impl App {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn start_review(&mut self, id: &str) {
+        let Some(b) = self.bead(id).cloned() else {
+            return;
+        };
+        if self
+            .agents
+            .get(&agent::review_id(id))
+            .is_some_and(|a| a.alive)
+        {
+            self.status = format!("reviewer for {id} is already running");
+            return;
+        }
+        if b.status == "closed" || b.state() != Some(State::Review) {
+            self.status = format!("{id} is not in review");
+            return;
+        }
+        if self.running_count() >= self.cfg.max_agents {
+            self.status = format!("all {} agent slots are busy", self.cfg.max_agents);
+            return;
+        }
+        let r = self.launch_review(&b);
+        if self.report(r).is_some() {
+            self.status = format!("ai review of {id} started (p to watch)");
+        }
+        self.mutated();
+    }
+
+    fn launch_review(&mut self, bead: &Bead) -> Result<()> {
+        let worktree = self.git.worktree_path(&bead.id);
+        if !worktree.join(".git").exists() {
+            bail!("no worktree for {}", bead.id);
+        }
+        let rid = agent::review_id(&bead.id);
+        self.remove_agent(&rid, Outcome::Killed);
+        let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
+        let slot = self
+            .slots
+            .acquire(&rid, self.cfg.max_agents)
+            .ok_or_else(|| eyre!("no free agent slot for {rid}"))?;
+        let launch = Launch {
+            session: agent::session_id(&self.repo, &rid),
+            id: rid.clone(),
+            bead: true,
+            worktree,
+            resume: false,
+            prompt: Some(agent::review_prompt(&bead, &self.base)),
+        };
+        let r = self
+            .beads
+            .set_state(&bead.id, State::Reviewing)
+            .and_then(|_| self.spawn_sandboxed(slot, launch));
+        if let Err(e) = r {
+            self.slots.release(&rid);
+            let _ = self.beads.set_state(&bead.id, State::Review);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn reviewing(&self, id: &str) -> bool {
+        self.bead(id).and_then(Bead::state) == Some(State::Reviewing)
+    }
+
+    fn agent_key(&self, id: &str) -> String {
+        if self.reviewing(id) {
+            agent::review_id(id)
+        } else {
+            id.to_string()
+        }
     }
 
     fn spawn_sandboxed(&mut self, slot: usize, launch: Launch) -> Result<()> {
@@ -740,6 +851,13 @@ impl App {
             };
             return;
         }
+        if let Some(bead) = agent::reviewed_bead(&self.agent_key(&id)) {
+            self.mode = Mode::Confirm {
+                msg: format!("Stop the reviewer of {bead} and return it to Review? y/n"),
+                action: Action::Kill(agent::review_id(bead)),
+            };
+            return;
+        }
         self.mode = Mode::Confirm {
             msg: format!("Kill agent {id} and hold the bead? y/n"),
             action: Action::Kill(id),
@@ -763,6 +881,16 @@ impl App {
             self.status = "conversation ended".into();
             self.view = View::Board;
             return;
+        }
+        if let Some(bead) = agent::reviewed_bead(id) {
+            let r = self.beads.set_state(bead, State::Review);
+            if self.report(r).is_some() {
+                self.status = format!("stopped reviewer of {bead}, back in Review");
+            }
+            if matches!(self.view, View::Progress(_)) {
+                self.view = View::Board;
+            }
+            return self.mutated();
         }
         let r = self
             .beads
@@ -944,6 +1072,10 @@ impl App {
 
     fn relaunch(&mut self, id: &str) {
         if self.agents.get(id).is_some_and(|a| a.alive) {
+            return;
+        }
+        if agent::reviewed_bead(id).is_some() || self.reviewing(id) {
+            self.status = format!("{id} is under ai review, X to stop it");
             return;
         }
         self.remove_agent(id, Outcome::Exited);
@@ -1146,7 +1278,7 @@ impl App {
             KeyCode::Char('g') if pending == Some('g') => scroll = 0,
             KeyCode::Char('g') => self.pending = Some('g'),
             KeyCode::Char('G') => scroll = max,
-            KeyCode::Char('p') => return self.open_progress(id),
+            KeyCode::Char('p') => return self.open_progress(self.agent_key(&id)),
             KeyCode::Char('r') => return self.open_review(id),
             _ => {}
         }
@@ -1163,11 +1295,12 @@ impl App {
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
                 Column::Review | Column::Done => self.open_review(b.id),
-                _ => self.open_progress(b.id),
+                _ => self.open_progress(self.agent_key(&b.id)),
             },
             KeyCode::Char('i') => self.inspect(b.id),
             KeyCode::Char('e') => self.request_edit(&b.id),
-            KeyCode::Char('p') => self.open_progress(b.id),
+            KeyCode::Char('p') => self.open_progress(self.agent_key(&b.id)),
+            KeyCode::Char('V') => self.start_review(&b.id),
             KeyCode::Char('r') => self.open_review(b.id),
             KeyCode::Char('X') => self.confirm_kill(b.id),
             KeyCode::Char('D') if Column::ALL[self.col] != Column::Done => {
@@ -1197,6 +1330,7 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pty_size().0 / 2) as isize;
         let chat = id == CHAT_ID;
+        let bead = agent::reviewed_bead(&id).unwrap_or(&id).to_string();
         let agent = self.agents.get_mut(&id);
         match (k.code, agent) {
             (KeyCode::Char('R' | 'r'), _) if chat => {}
@@ -1214,14 +1348,14 @@ impl App {
             (KeyCode::Char('g'), _) => self.pending = Some('g'),
             (KeyCode::Char('G'), Some(a)) => a.scroll(-(isize::MAX / 2)),
             (KeyCode::Char('X'), _) => self.confirm_kill(id),
-            (KeyCode::Char('R'), _) => self.mark_review(&id),
+            (KeyCode::Char('R'), _) => self.mark_review(&bead),
             (KeyCode::Char('r'), _) => {
-                if !self.back_to_review(id.clone()) {
-                    self.open_review(id);
+                if !self.back_to_review(bead.clone()) {
+                    self.open_review(bead);
                 }
             }
             (KeyCode::Char('A'), _) => self.relaunch(&id),
-            (KeyCode::Char('e'), _) => self.request_edit(&id),
+            (KeyCode::Char('e'), _) => self.request_edit(&bead),
             _ => {}
         }
     }
@@ -1277,6 +1411,7 @@ impl App {
                 };
             }
             KeyCode::Char('D') => self.confirm_discard(id),
+            KeyCode::Char('V') => self.start_review(&id),
             KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
             KeyCode::Char('i') => self.swap_to_agent(true),
             KeyCode::Char('R') => self.open_review(id),
