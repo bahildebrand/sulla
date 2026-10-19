@@ -66,6 +66,9 @@ pub trait Sandbox: Send {
     ) -> Command {
         host_command(cwd, argv, env)
     }
+    fn shell(&self, _slot: usize, cwd: &Path, env: &[(String, String)]) -> Command {
+        host_shell(cwd, env)
+    }
 }
 
 pub fn host_command(cwd: &Path, argv: &[OsString], env: &[(String, String)]) -> Command {
@@ -74,6 +77,13 @@ pub fn host_command(cwd: &Path, argv: &[OsString], env: &[(String, String)]) -> 
         .current_dir(cwd)
         .envs(env.iter().cloned());
     c
+}
+
+pub fn host_shell(cwd: &Path, env: &[(String, String)]) -> Command {
+    let shell = std::env::var_os("SHELL")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "sh".into());
+    host_command(cwd, &[shell], env)
 }
 
 pub struct Worktree;
@@ -197,6 +207,26 @@ mod tests {
         assert_eq!(Killed.worst(Exited), Killed);
         assert_eq!(Merged.worst(Discarded), Discarded);
         assert_eq!(Exited.worst(Exited), Exited);
+    }
+
+    #[test]
+    fn host_shell_runs_in_worktree_with_env() {
+        let env = [("SULLA_BEAD".to_string(), "x-1".to_string())];
+        let c = Worktree.shell(0, Path::new("/tmp/wt"), &env);
+        let shell = std::env::var_os("SHELL")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "sh".into());
+        assert_eq!(c.get_program(), shell);
+        assert_eq!(c.get_args().count(), 0);
+        assert_eq!(c.get_current_dir(), Some(Path::new("/tmp/wt")));
+        let envs: Vec<_> = c.get_envs().collect();
+        assert_eq!(
+            envs,
+            [(
+                std::ffi::OsStr::new("SULLA_BEAD"),
+                Some(std::ffi::OsStr::new("x-1"))
+            )]
+        );
     }
 
     #[test]

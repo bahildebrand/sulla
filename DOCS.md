@@ -86,6 +86,10 @@ closing it without merging, unstacks its children so they keep its commits in th
   `bd dep add`, released on your go). `X` ends it, `C` starts fresh.
 - `e` suspends sulla and opens `$VISUAL`, `$EDITOR` or `nvim` in the worktree. Agents keep
   running, so edits may conflict.
+- `E` suspends sulla and drops into a shell for the bead. With `sandbox = "incus"` it runs
+  `bash` in the bead's container (as your user, in the worktree, after `[incus] init`), otherwise `$SHELL`
+  in the worktree on the host. A bead with no container left gets a host shell. Exit the shell to
+  return, the review diff reloads like after `e`.
 
 ### Budgets
 

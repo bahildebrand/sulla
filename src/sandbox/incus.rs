@@ -483,6 +483,23 @@ impl Sandbox for Incus {
         argv: &[OsString],
         env: &[(String, String)],
     ) -> Command {
+        self.exec(slot, cwd, argv, env, false)
+    }
+
+    fn shell(&self, slot: usize, cwd: &Path, env: &[(String, String)]) -> Command {
+        self.exec(slot, cwd, &["bash".into()], env, true)
+    }
+}
+
+impl Incus {
+    fn exec(
+        &self,
+        slot: usize,
+        cwd: &Path,
+        argv: &[OsString],
+        env: &[(String, String)],
+        tty: bool,
+    ) -> Command {
         let env = exec_env(
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
             &self.host,
@@ -496,7 +513,7 @@ impl Sandbox for Incus {
             &cwd,
             &env,
             &init_argv(self.cfg.init.as_deref(), argv),
-            false,
+            tty,
         );
         let mut c = Command::new(&argv[0]);
         c.args(&argv[1..]);

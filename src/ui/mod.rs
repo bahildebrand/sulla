@@ -222,6 +222,7 @@ const HELP: &[(&str, &str)] = &[
         "bead timeline: time per state, review rounds, ai verdicts (h from inspect)",
     ),
     ("e", "open $EDITOR in bead worktree"),
+    ("E", "open a shell in the bead's container, or its worktree"),
     (
         "n",
         "new bead popup (title, description, priority, agent, preset, start state)",
@@ -251,6 +252,7 @@ const HELP: &[(&str, &str)] = &[
     ("j k / Ctrl-u Ctrl-d / gg G", "scroll"),
     ("X R r A", "kill / mark review / review / relaunch"),
     ("e", "open $EDITOR in bead worktree"),
+    ("E", "open a shell in the bead's container, or its worktree"),
     ("q / Esc", "back to review if opened from it, else board"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
@@ -280,6 +282,10 @@ const HELP: &[(&str, &str)] = &[
     ("i", "swap to agent view in insert mode"),
     ("R", "reload diff"),
     ("e", "open $EDITOR in bead worktree, reloads diff after"),
+    (
+        "E",
+        "open a shell in the bead's container or worktree, reloads diff after",
+    ),
 ];
 
 pub fn help_max_scroll(height: u16) -> u16 {

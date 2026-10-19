@@ -46,6 +46,23 @@ pub enum Event {
     Pr(String, u64, Result<PrStatus, String>),
 }
 
+pub enum Suspend {
+    Editor(PathBuf),
+    Shell {
+        cmd: std::process::Command,
+        place: String,
+    },
+}
+
+impl Suspend {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Suspend::Editor(_) => "editor",
+            Suspend::Shell { .. } => "shell",
+        }
+    }
+}
+
 pub enum View {
     Board,
     Progress(String),
@@ -263,7 +280,7 @@ pub struct App {
     tx: Sender<Event>,
     refresh: Sender<()>,
     term: (u16, u16),
-    pub pending_edit: Option<PathBuf>,
+    pub suspend: Option<Suspend>,
     pub paused: bool,
     pub health: Option<Vec<Tool>>,
     pub bd_error: Option<String>,
@@ -368,7 +385,7 @@ impl App {
             tx,
             refresh,
             term: (80, 24),
-            pending_edit: None,
+            suspend: None,
             paused: false,
             health: None,
             bd_error: None,
@@ -3081,17 +3098,49 @@ impl App {
             self.status = format!("no worktree for {id}");
             return;
         }
-        self.pending_edit = Some(path);
+        self.suspend = Some(Suspend::Editor(path));
         if self.agents.get(id).is_some_and(|a| a.alive) {
             self.status = format!("agent {id} is running, edits may conflict");
         }
     }
 
-    pub fn edit_finished(&mut self, r: std::io::Result<std::process::ExitStatus>) {
+    fn request_shell(&mut self, id: &str) {
+        if id == CHAT_ID {
+            return;
+        }
+        let dir = self.git.worktree_path(id);
+        if !dir.join(".git").exists() {
+            self.status = format!("no worktree for {id}");
+            return;
+        }
+        let mut env = vec![("SULLA_BEAD".to_string(), id.to_string())];
+        if self.cfg.kache {
+            env.push(("RUSTC_WRAPPER".into(), "kache".into()));
+        }
+        let slot = self.slots.get(id);
+        let (cmd, place) = match slot.and_then(|s| Some((s, self.sandbox.instance(s)?))) {
+            Some((slot, name)) => (
+                self.sandbox.shell(slot, &dir, &env),
+                format!("shell in {name} at {}", dir.display()),
+            ),
+            None => (
+                sandbox::host_shell(&dir, &env),
+                format!("shell in {}", dir.display()),
+            ),
+        };
+        if self.sandbox.isolated() && slot.is_none() {
+            self.status = format!("no container for {id}, shell runs on the host");
+        } else if self.agents.get(id).is_some_and(|a| a.alive) {
+            self.status = format!("agent {id} is running, edits may conflict");
+        }
+        self.suspend = Some(Suspend::Shell { cmd, place });
+    }
+
+    pub fn suspend_finished(&mut self, name: &str, r: std::io::Result<std::process::ExitStatus>) {
         match r {
             Ok(s) if s.success() => {}
-            Ok(s) => self.status = format!("editor exited with {s}"),
-            Err(e) => self.status = format!("editor failed: {e}"),
+            Ok(s) => self.status = format!("{name} exited with {s}"),
+            Err(e) => self.status = format!("{name} failed: {e}"),
         }
         let View::Review(d) = &mut self.view else {
             return;
@@ -3301,6 +3350,7 @@ impl App {
             KeyCode::Char('i') => self.inspect(b.id),
             KeyCode::Char('H') => self.show_timeline(b.id),
             KeyCode::Char('e') => self.request_edit(&b.id),
+            KeyCode::Char('E') => self.request_shell(&b.id),
             KeyCode::Char('p') => self.open_progress(self.agent_key(&b.id)),
             KeyCode::Char('V') => self.start_review(&b.id),
             KeyCode::Char('r') => self.open_review(b.id),
@@ -3362,6 +3412,7 @@ impl App {
             }
             (KeyCode::Char('A'), _) => self.relaunch(&id),
             (KeyCode::Char('e'), _) => self.request_edit(&bead),
+            (KeyCode::Char('E'), _) => self.request_shell(&bead),
             _ => {}
         }
     }
@@ -3442,6 +3493,7 @@ impl App {
             KeyCode::Char('i') => self.swap_to_agent(true),
             KeyCode::Char('R') => self.reload_review(id),
             KeyCode::Char('e') => self.request_edit(&id),
+            KeyCode::Char('E') => self.request_shell(&id),
             KeyCode::Char(c @ ('y' | 'n' | 'Y' | 'N')) => {
                 let accept = c.eq_ignore_ascii_case(&'y');
                 let ok = if c.is_ascii_uppercase() {

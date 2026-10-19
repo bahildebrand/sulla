@@ -37,7 +37,7 @@ use crossterm::event::{
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::DefaultTerminal;
 
-use app::{App, Event};
+use app::{App, Event, Suspend};
 use config::Config;
 
 #[derive(Parser)]
@@ -185,8 +185,9 @@ fn run(
         {
             app.handle(ev);
         }
-        if let Some(dir) = app.pending_edit.take() {
-            let r = suspend_for_editor(terminal, gate, &dir);
+        if let Some(s) = app.suspend.take() {
+            let name = s.name();
+            let r = suspend(terminal, gate, s);
             let size = terminal.size()?;
             app.on_resize(size.width, size.height);
             for ev in rx.try_iter().collect::<Vec<_>>() {
@@ -194,21 +195,24 @@ fn run(
                     app.handle(ev);
                 }
             }
-            app.edit_finished(r);
+            app.suspend_finished(name, r);
         }
     }
     Ok(())
 }
 
-fn suspend_for_editor(
-    terminal: &mut DefaultTerminal,
-    gate: &Gate,
-    dir: &Path,
-) -> std::io::Result<ExitStatus> {
+fn suspend(terminal: &mut DefaultTerminal, gate: &Gate, s: Suspend) -> std::io::Result<ExitStatus> {
     gate.pause();
     let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
-    let r = editor_command(&editor_spec(), dir).and_then(|mut c| c.status());
+    let cmd = match s {
+        Suspend::Editor(dir) => editor_command(&editor_spec(), &dir),
+        Suspend::Shell { cmd, place } => {
+            println!("sulla: {place}, exit to return");
+            Ok(cmd)
+        }
+    };
+    let r = cmd.and_then(|mut c| c.status());
     let _ = enable_raw_mode();
     let _ = crossterm::execute!(
         stdout(),
