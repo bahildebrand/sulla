@@ -114,6 +114,7 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
+    ("z / Esc", "zoom focused column / unzoom"),
     ("Enter / p / r", "open / progress / review"),
     ("i", "inspect bead (description, labels, deps)"),
     ("e", "open $EDITOR in bead worktree"),

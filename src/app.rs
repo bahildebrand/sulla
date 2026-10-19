@@ -107,6 +107,7 @@ pub struct App {
     pub parked_review: Option<Diff>,
     pub mode: Mode,
     pub col: usize,
+    pub zoom: bool,
     pub rows: [usize; Column::ALL.len()],
     pub status: String,
     pending: Option<char>,
@@ -161,6 +162,7 @@ impl App {
             parked_review: None,
             mode: Mode::Normal,
             col: 0,
+            zoom: false,
             rows: [0; Column::ALL.len()],
             status: String::new(),
             pending: None,
@@ -1107,6 +1109,8 @@ impl App {
             KeyCode::Char('g') if pending == Some('g') => *row = 0,
             KeyCode::Char('g') => self.pending = Some('g'),
             KeyCode::Char('G') => *row = len.saturating_sub(1),
+            KeyCode::Char('z') => self.zoom = !self.zoom,
+            KeyCode::Esc if self.zoom => self.zoom = false,
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('n') => {
                 self.mode = Mode::NewBead(NewBeadForm::default());
