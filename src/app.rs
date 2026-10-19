@@ -17,6 +17,7 @@ use crate::beads::{Bead, Beads, Column, State};
 use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, Trigger};
 use crate::conflicts::Conflict;
+use crate::filter::Filter;
 use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::notify::Notifier;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
@@ -42,6 +43,7 @@ pub enum View {
 
 pub enum InputKind {
     Command,
+    Search(String),
     Feedback(String),
     Comment,
     EditComment(usize),
@@ -159,6 +161,7 @@ pub struct App {
     pub mode: Mode,
     pub col: usize,
     pub zoom: bool,
+    pub filter: Filter,
     pub rows: [usize; Column::ALL.len()],
     pub status: String,
     pending: Option<char>,
@@ -229,6 +232,7 @@ impl App {
             mode: Mode::Normal,
             col: 0,
             zoom: false,
+            filter: Filter::default(),
             rows: [0; Column::ALL.len()],
             status: String::new(),
             pending: None,
@@ -261,6 +265,16 @@ impl App {
     }
 
     pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
+        let mut cols = self.all_columns();
+        if self.filter.is_active() {
+            for c in &mut cols {
+                c.retain(|b| self.filter.matches(b));
+            }
+        }
+        cols
+    }
+
+    pub fn all_columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
         let now = Utc::now();
         let mut cols: [Vec<&Bead>; Column::ALL.len()] = Default::default();
         for b in &self.all {
@@ -1280,6 +1294,9 @@ impl App {
     }
 
     fn input_key(&mut self, k: KeyEvent, kind: InputKind, mut buf: String) {
+        if let InputKind::Search(prev) = kind {
+            return self.search_key(k, prev, buf);
+        }
         match k.code {
             KeyCode::Esc => {}
             KeyCode::Enter => self.submit(kind, buf.trim().to_string()),
@@ -1300,6 +1317,61 @@ impl App {
             }
             _ => self.mode = Mode::Input { kind, buf },
         }
+    }
+
+    fn search_key(&mut self, k: KeyEvent, prev: String, mut buf: String) {
+        match k.code {
+            KeyCode::Esc => return self.set_filter(&prev),
+            KeyCode::Enter => {
+                self.set_filter(buf.trim());
+                return self.focus_match();
+            }
+            KeyCode::Backspace if buf.pop().is_none() => return self.set_filter(""),
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => buf.clear(),
+            KeyCode::Char(c) => buf.push(c),
+            _ => {}
+        }
+        self.set_filter(&buf);
+        self.mode = Mode::Input {
+            kind: InputKind::Search(prev),
+            buf,
+        };
+    }
+
+    fn set_filter(&mut self, query: &str) {
+        let cols = self.columns();
+        let selected: Vec<Option<String>> = cols
+            .iter()
+            .zip(self.rows)
+            .map(|(c, r)| c.get(r).map(|b| b.id.clone()))
+            .collect();
+        self.filter = Filter::parse(query);
+        let rows: Vec<usize> = self
+            .columns()
+            .iter()
+            .zip(&selected)
+            .map(|(c, sel)| {
+                sel.as_ref()
+                    .and_then(|id| c.iter().position(|b| b.id == *id))
+                    .unwrap_or(0)
+            })
+            .collect();
+        self.rows.copy_from_slice(&rows);
+        self.clamp();
+    }
+
+    fn focus_match(&mut self) {
+        if !self.filter.is_active() {
+            return;
+        }
+        let cols = self.columns();
+        let n: usize = cols.iter().map(Vec::len).sum();
+        if cols[self.col].is_empty()
+            && let Some(i) = cols.iter().position(|c| !c.is_empty())
+        {
+            self.col = i;
+        }
+        self.status = format!("{n} match(es) for /{}, Esc clears", self.filter.query);
     }
 
     fn new_bead_key(&mut self, k: KeyEvent, mut form: NewBeadForm) {
@@ -1364,6 +1436,7 @@ impl App {
         match kind {
             InputKind::Feedback(id) => self.feedback(&id, &text),
             InputKind::Command => self.command(&text),
+            InputKind::Search(_) => self.set_filter(&text),
             InputKind::Comment => {
                 if let View::Review(d) = &mut self.view {
                     if d.add_comment(&text) {
@@ -1919,6 +1992,17 @@ impl App {
             KeyCode::Char('G') => *row = len.saturating_sub(1),
             KeyCode::Char('z') => self.zoom = !self.zoom,
             KeyCode::Esc if self.zoom => self.zoom = false,
+            KeyCode::Esc if self.filter.is_active() => {
+                self.set_filter("");
+                self.status = "filter cleared".into();
+            }
+            KeyCode::Char('/') => {
+                let q = self.filter.query.clone();
+                self.mode = Mode::Input {
+                    kind: InputKind::Search(q.clone()),
+                    buf: q,
+                };
+            }
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('n') => {
                 self.mode = Mode::NewBead(NewBeadForm::default());

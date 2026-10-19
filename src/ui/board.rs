@@ -50,6 +50,52 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
     }
 }
 
+fn count(app: &App, shown: usize, total: usize) -> String {
+    if app.filter.is_active() {
+        format!("{shown}/{total}")
+    } else {
+        shown.to_string()
+    }
+}
+
+fn headline(app: &App, b: &Bead, base: Style) -> Line<'static> {
+    let mut spans = vec![
+        marker(app, b),
+        conflict(app, b),
+        badge(app, b),
+        check_badge(app, b),
+        Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
+    ];
+    spans.extend(highlighted(
+        &b.title,
+        &app.filter.highlights(&b.title),
+        base,
+    ));
+    spans.push(Span::raw(format!(" {}", b.id)).dim());
+    Line::from(spans)
+}
+
+fn highlighted(text: &str, marks: &[bool], base: Style) -> Vec<Span<'static>> {
+    let hit = base.fg(Color::Black).bg(Color::Yellow);
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut on = false;
+    for (c, &m) in text.chars().zip(marks) {
+        if m != on && !run.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if on { hit } else { base },
+            ));
+        }
+        on = m;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if on { hit } else { base }));
+    }
+    spans
+}
+
 fn elapsed(secs: i64) -> String {
     let s = secs.max(0);
     match s {
@@ -91,37 +137,24 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         return render_zoomed(f, area, app);
     }
     let cols = app.columns();
+    let totals = app.all_columns().map(|c| c.len());
     let now = Utc::now();
     let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
     for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
+        let count = count(app, beads.len(), totals[i]);
         let active = i == app.col;
         let items: Vec<ListItem> = beads
             .iter()
-            .map(|b| {
-                ListItem::new(vec![
-                    Line::from(vec![
-                        marker(app, b),
-                        conflict(app, b),
-                        badge(app, b),
-                        check_badge(app, b),
-                        Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
-                        Span::raw(b.title.clone()),
-                        Span::raw(format!(" {}", b.id)).dim(),
-                    ]),
-                    activity(app, b, now),
-                ])
-            })
+            .map(|b| ListItem::new(vec![headline(app, b, Style::new()), activity(app, b, now)]))
             .collect();
         let border = if active {
             Style::new().fg(Color::Cyan)
         } else {
             Style::new().dim()
         };
-        let block = Block::bordered().border_style(border).title(format!(
-            " {} ({}) ",
-            col.title(),
-            beads.len()
-        ));
+        let block = Block::bordered()
+            .border_style(border)
+            .title(format!(" {} ({count}) ", col.title()));
         let list = List::new(items).block(block).highlight_style(if active {
             Style::new()
                 .bg(Color::DarkGray)
@@ -136,15 +169,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
-    let mut lines = vec![Line::from(vec![
-        marker(app, b),
-        conflict(app, b),
-        badge(app, b),
-        check_badge(app, b),
-        Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
-        Span::raw(b.title.clone()).bold(),
-        Span::raw(format!(" {}", b.id)).dim(),
-    ])];
+    let mut lines = vec![headline(app, b, Style::new().bold())];
     let mut meta = vec![b.issue_type.clone(), b.status.clone()];
     let labels: Vec<&str> = b.labels.iter().map(String::as_str).collect();
     if !labels.is_empty() {
@@ -195,6 +220,7 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
 
 fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
     let cols = app.columns();
+    let totals = app.all_columns().map(|c| c.len());
     let i = app.col;
     let col = Column::ALL[i];
     let beads = &cols[i];
@@ -204,7 +230,11 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .flat_map(|(j, c)| {
-            let label = Span::raw(format!(" {} ({}) ", c.title(), cols[j].len()));
+            let label = Span::raw(format!(
+                " {} ({}) ",
+                c.title(),
+                count(app, cols[j].len(), totals[j])
+            ));
             let label = if j == i {
                 label.cyan().bold()
             } else {
@@ -219,7 +249,7 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .title(format!(
             " {} ({}) · zoom, z/Esc to exit ",
             col.title(),
-            beads.len()
+            count(app, beads.len(), totals[i])
         ))
         .title(nav);
     let list = List::new(items)

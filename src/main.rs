@@ -4,6 +4,7 @@ mod beads;
 mod checks;
 mod config;
 mod conflicts;
+mod filter;
 mod git;
 mod notify;
 mod sandbox;

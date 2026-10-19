@@ -88,6 +88,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         Mode::Input { kind, buf } => {
             let prompt = match kind {
                 InputKind::Command => ":".to_string(),
+                InputKind::Search(_) => "/".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
                 InputKind::Comment | InputKind::EditComment(_) => String::new(),
             };
@@ -115,6 +116,10 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         app.base
     );
     let mut spans = Vec::new();
+    if app.filter.is_active() {
+        spans.push(tag("FILTER", Color::Yellow));
+        spans.push(Span::raw(format!(" /{} ", app.filter.query)));
+    }
     if app.paused {
         spans.push(tag("PAUSED", Color::Yellow));
         spans.push(Span::raw(" "));
@@ -144,6 +149,11 @@ const HELP: &[(&str, &str)] = &[
     ("Board", ""),
     ("h j k l / gg G", "move"),
     ("z / Esc", "zoom focused column / unzoom"),
+    (
+        "/",
+        "filter: words match title/id, label:x (l:x), p:1 p:0-2 p:1,3",
+    ),
+    ("Esc", "clear filter (when not zoomed)"),
     (
         "Enter / p / r",
         "open / progress (reviewer if reviewing) / review",
