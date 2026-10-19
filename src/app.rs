@@ -592,7 +592,14 @@ impl App {
             return;
         }
         let busy: HashSet<String> = self.agents.keys().cloned().collect();
-        let picks: Vec<Bead> = scheduler::pick(&self.ready, &busy, &self.failed, free)
+        let mut candidates = self.ready.clone();
+        candidates.extend(
+            scheduler::stackable(&self.all, &self.blocked)
+                .into_iter()
+                .filter(|b| self.stack_on(&b.id).is_some())
+                .cloned(),
+        );
+        let picks: Vec<Bead> = scheduler::pick(&candidates, &busy, &self.failed, free)
             .into_iter()
             .cloned()
             .collect();
@@ -613,10 +620,23 @@ impl App {
         }
     }
 
+    fn stack_on(&self, id: &str) -> Option<String> {
+        scheduler::stack_parent(id, &self.blocked, &self.all)
+            .filter(|p| self.git.has_branch(p))
+            .map(String::from)
+    }
+
     fn start_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
-        let worktree = self.git.ensure_worktree(&bead.id, &self.base)?;
+        let fresh = !self.git.worktree_path(&bead.id).join(".git").exists()
+            && !self.git.has_branch(&bead.id);
+        let worktree = match self.stack_on(&bead.id).filter(|_| fresh) {
+            Some(parent) => self.git.ensure_stacked_worktree(&bead.id, &parent)?,
+            None => self.git.ensure_worktree(&bead.id, &self.base)?,
+        };
+        let parent = self.git.stack_parent(&bead.id);
         let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
-        let prompt = prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead)));
+        let prompt =
+            prompt.or_else(|| (!resume).then(|| agent::task_prompt(&bead, parent.as_deref())));
         let slot = self
             .slots
             .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
@@ -684,7 +704,10 @@ impl App {
             bead: true,
             worktree,
             resume: false,
-            prompt: Some(agent::review_prompt(&bead, &self.base)),
+            prompt: Some(agent::review_prompt(
+                &bead,
+                &self.git.upstream(&bead.id, &self.base),
+            )),
         };
         let r = self
             .beads
@@ -1568,9 +1591,38 @@ impl App {
                 Ok(()) => format!("merged {id} into {}", self.base),
                 Err(e) => format!("merged {id} into {} but bd close failed: {e}", self.base),
             };
+            let (moved, stuck) = self.restack_children(id);
+            if !moved.is_empty() {
+                self.status
+                    .push_str(&format!(", restacked {}", moved.join(", ")));
+            }
+            if !stuck.is_empty() {
+                self.status.push_str(&format!(
+                    ", restack conflicts in {} (rebased at merge)",
+                    stuck.join(", ")
+                ));
+            }
             self.view = View::Board;
         }
         self.mutated();
+    }
+
+    fn restack_children(&mut self, parent: &str) -> (Vec<String>, Vec<String>) {
+        let (mut moved, mut stuck) = (Vec::new(), Vec::new());
+        let mut queue = self.git.children(parent);
+        while let Some(c) = queue.pop() {
+            match self.git.restack(&c, &self.base) {
+                Ok(()) => {
+                    queue.extend(self.git.children(&c));
+                    moved.push(c);
+                }
+                Err(e) => {
+                    tracing::warn!("restack of {c} failed: {e:#}");
+                    stuck.push(c);
+                }
+            }
+        }
+        (moved, stuck)
     }
 
     fn close_merged(&self, id: &str) -> Result<()> {
@@ -1582,8 +1634,14 @@ impl App {
     }
 
     fn resolve_conflicts(&mut self, id: &str) {
+        let up = self.git.upstream(id, &self.base);
+        let rebase = if up == self.base {
+            format!("git rebase {up}")
+        } else {
+            format!("git rebase --onto {} {up}", self.base)
+        };
         let text = format!(
-            "Merging into {base} failed with conflicts. Run `git rebase {base}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or merge. When done, run `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait.",
+            "Merging into {base} failed with conflicts. Run `{rebase}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or merge. When done, run `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait.",
             base = self.base,
             id = id
         );
@@ -1636,7 +1694,10 @@ impl App {
             return;
         };
         let resume = self.git.worktree_path(id).join(".git").exists();
-        if !resume && let Some(by) = self.blocked.get(id) {
+        if !resume
+            && self.stack_on(id).is_none()
+            && let Some(by) = self.blocked.get(id)
+        {
             let by = by.join(", ");
             if matches!(b.state(), Some(State::Held | State::Backlog)) {
                 let r = self.beads.clear_state(&b);

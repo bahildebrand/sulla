@@ -59,6 +59,14 @@ fn merged_ref(id: &str, part: &str) -> String {
     format!("refs/sulla/merged/{id}/{part}")
 }
 
+fn stack_ref(id: &str) -> String {
+    format!("refs/sulla/stack/{id}")
+}
+
+fn parent_key(id: &str) -> String {
+    format!("sulla.{id}.parent")
+}
+
 impl Git {
     pub fn new(repo: PathBuf) -> Self {
         Self { repo }
@@ -96,6 +104,10 @@ impl Git {
         Ok(())
     }
 
+    pub fn has_branch(&self, id: &str) -> bool {
+        self.branch_exists(&branch(id))
+    }
+
     fn branch_exists(&self, name: &str) -> bool {
         run(
             &self.repo,
@@ -124,21 +136,117 @@ impl Git {
         Ok(path)
     }
 
+    pub fn ensure_stacked_worktree(&self, id: &str, parent: &str) -> Result<PathBuf> {
+        if self.worktree_path(id).join(".git").exists() || self.branch_exists(&branch(id)) {
+            return self.ensure_worktree(id, &branch(parent));
+        }
+        let tip = run(&self.repo, &["rev-parse", &branch(parent)])?
+            .trim()
+            .to_string();
+        let path = self.ensure_worktree(id, &tip)?;
+        run(&self.repo, &["update-ref", &stack_ref(id), &tip])?;
+        run(&self.repo, &["config", &parent_key(id), parent])?;
+        Ok(path)
+    }
+
+    pub fn stack_parent(&self, id: &str) -> Option<String> {
+        if !self.ref_exists(&stack_ref(id)) {
+            return None;
+        }
+        run(&self.repo, &["config", "--get", &parent_key(id)])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn children(&self, parent: &str) -> Vec<String> {
+        let Ok(out) = run(
+            &self.repo,
+            &["config", "--get-regexp", r"^sulla\..*\.parent$"],
+        ) else {
+            return Vec::new();
+        };
+        out.lines()
+            .filter_map(|l| {
+                let (k, v) = l.split_once(' ')?;
+                let id = k.strip_prefix("sulla.")?.strip_suffix(".parent")?;
+                (v.trim() == parent && self.ref_exists(&stack_ref(id))).then(|| id.to_string())
+            })
+            .collect()
+    }
+
+    fn unstack(&self, id: &str) {
+        let _ = run(&self.repo, &["update-ref", "-d", &stack_ref(id)]);
+        let _ = run(&self.repo, &["config", "--unset", &parent_key(id)]);
+    }
+
+    pub fn upstream(&self, id: &str, base: &str) -> String {
+        let r = stack_ref(id);
+        let head = if self.worktree_path(id).join(".git").exists() {
+            "HEAD".to_string()
+        } else {
+            branch(id)
+        };
+        let dir = if head == "HEAD" {
+            self.worktree_path(id)
+        } else {
+            self.repo.clone()
+        };
+        if self.ref_exists(&r) && run(&dir, &["merge-base", "--is-ancestor", &r, &head]).is_ok() {
+            r
+        } else {
+            base.to_string()
+        }
+    }
+
+    pub fn restack(&self, id: &str, base: &str) -> Result<()> {
+        let Some(parent) = self.stack_parent(id) else {
+            return Ok(());
+        };
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            bail!("no worktree for {id}");
+        }
+        let onto = if self.branch_exists(&branch(&parent)) {
+            branch(&parent)
+        } else {
+            base.to_string()
+        };
+        let from = self.upstream(id, base);
+        if let Err(e) = run(&wt, &["rebase", "--autostash", "--onto", &onto, &from]) {
+            let _ = run(&wt, &["rebase", "--abort"]);
+            return Err(RebaseConflict {
+                base: onto,
+                detail: e.to_string(),
+            }
+            .into());
+        }
+        if onto == base {
+            self.unstack(id);
+        } else {
+            let tip = run(&self.repo, &["rev-parse", &onto])?.trim().to_string();
+            run(&self.repo, &["update-ref", &stack_ref(id), &tip])?;
+        }
+        Ok(())
+    }
+
     pub fn diff(&self, id: &str, base: &str) -> Result<String> {
         let wt = self.worktree_path(id);
         let br = branch(id);
         if !wt.join(".git").exists() {
+            let up = self.upstream(id, base);
             return run(
                 &self.repo,
                 &[
                     "diff",
                     "--no-color",
                     "--no-ext-diff",
-                    &format!("{base}...{br}"),
+                    &format!("{up}...{br}"),
                 ],
             );
         }
-        let mb = run(&wt, &["merge-base", base, "HEAD"])?;
+        let up = self.upstream(id, base);
+        let mb = run(&wt, &["merge-base", &up, "HEAD"])?;
         let mut out = run(&wt, &["diff", "--no-color", "--no-ext-diff", mb.trim()])?;
         for f in run(&wt, &["ls-files", "--others", "--exclude-standard"])?.lines() {
             let o = Command::new("git")
@@ -178,10 +286,11 @@ impl Git {
 
     pub fn log(&self, id: &str, base: &str) -> Result<String> {
         let wt = self.worktree_path(id);
+        let up = self.upstream(id, base);
         if wt.join(".git").exists() {
-            Self::log_range(&wt, &format!("{base}..HEAD"))
+            Self::log_range(&wt, &format!("{up}..HEAD"))
         } else {
-            Self::log_range(&self.repo, &format!("{base}..{}", branch(id)))
+            Self::log_range(&self.repo, &format!("{up}..{}", branch(id)))
         }
     }
 
@@ -212,10 +321,11 @@ impl Git {
             run(&wt, &["add", "-A"])?;
             run(&wt, &["commit", "-m", message])?;
         }
-        if run(&wt, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim() == "0" {
-            bail!("{br} has no commits beyond {base}");
+        let up = self.upstream(id, base);
+        if run(&wt, &["rev-list", "--count", &format!("{up}..HEAD")])?.trim() == "0" {
+            bail!("{br} has no commits beyond {up}");
         }
-        if let Err(e) = run(&wt, &["rebase", base]) {
+        if let Err(e) = run(&wt, &["rebase", "--onto", base, &up]) {
             let _ = run(&wt, &["rebase", "--abort"]);
             return Err(RebaseConflict {
                 base: base.to_string(),
@@ -246,6 +356,7 @@ impl Git {
             &self.repo,
             &["update-ref", &merged_ref(id, "head"), &merged_head],
         )?;
+        self.unstack(id);
         self.remove(id)
     }
 
@@ -356,6 +467,7 @@ impl Git {
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
+        self.unstack(id);
         let wt = self.worktree_path(id);
         if wt.exists() {
             run(
@@ -439,6 +551,54 @@ mod tests {
                 .trim()
                 .is_empty()
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stacked_chain_restacks_after_parent_merges() {
+        let (dir, g) = scratch("stack");
+        let commit = |wt: &Path, f: &str| {
+            std::fs::write(wt.join(f), f).unwrap();
+            git(wt, &["add", f]);
+            git(wt, &["commit", "-qm", f]);
+        };
+        let p = g.ensure_worktree("p", "main").unwrap();
+        commit(&p, "p.txt");
+        let c = g.ensure_stacked_worktree("c", "p").unwrap();
+        assert_eq!(g.stack_parent("c").as_deref(), Some("p"));
+        commit(&c, "c.txt");
+        let gc = g.ensure_stacked_worktree("gc", "c").unwrap();
+        commit(&gc, "gc.txt");
+        std::fs::write(gc.join("wip.txt"), "wip").unwrap();
+        assert_eq!(g.children("p"), ["c"]);
+
+        let diff = g.diff("c", "main").unwrap();
+        assert!(diff.contains("c.txt") && !diff.contains("p.txt"), "{diff}");
+        assert!(!g.log("c", "main").unwrap().contains("p.txt"));
+
+        commit(&p, "p2.txt");
+        commit(&dir, "main.txt");
+        g.merge("p", "main", "p").unwrap();
+        g.restack("c", "main").unwrap();
+        assert_eq!(g.stack_parent("c"), None);
+        assert_eq!(g.upstream("c", "main"), "main");
+        assert_eq!(g.children("c"), ["gc"]);
+        g.restack("gc", "main").unwrap();
+        assert_eq!(g.stack_parent("gc").as_deref(), Some("c"));
+        assert!(gc.join("wip.txt").exists());
+        let diff = g.diff("gc", "main").unwrap();
+        assert!(
+            diff.contains("gc.txt") && !diff.contains("b/c.txt"),
+            "{diff}"
+        );
+
+        g.merge("c", "main", "c").unwrap();
+        g.merge("gc", "main", "gc").unwrap();
+        for f in ["p.txt", "p2.txt", "main.txt", "c.txt", "gc.txt", "wip.txt"] {
+            assert!(dir.join(f).exists(), "{f}");
+        }
+        let n = run(&dir, &["rev-list", "--count", "main"]).unwrap();
+        assert_eq!(n.trim(), "7");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

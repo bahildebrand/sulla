@@ -36,13 +36,19 @@ pub trait Backend: Send + Sync {
     fn command(&self, launch: &Launch) -> CommandBuilder;
 }
 
-pub fn task_prompt(bead: &Bead) -> String {
+pub fn task_prompt(bead: &Bead, parent: Option<&str>) -> String {
     let id = &bead.id;
-    let desc = if bead.description.trim().is_empty() {
+    let mut desc = if bead.description.trim().is_empty() {
         String::new()
     } else {
         format!("\n\n{}", bead.description.trim())
     };
+    if let Some(p) = parent {
+        desc.push_str(&format!(
+            "\n\nThis bead depends on {p}, which is not merged yet. Your branch is stacked on \
+             sulla/{p}, so its changes are already in your worktree. Only commit work for {id}."
+        ));
+    }
     format!(
         "You are working on bead {id}: {title}{desc}\n\n\
          You are in a dedicated git worktree on branch sulla/{id}. Commit your work to this \

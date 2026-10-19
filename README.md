@@ -25,8 +25,15 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   (`+adds -dels Nf`, refreshed every poll), and the last line of agent output.
 - Beads in Backlog are never auto scheduled. Pick Backlog or Pending in the new bead popup, `B` moves a bead to Backlog, `s` releases it to Pending and `S` releases the whole Backlog.
   The scheduler only starts Pending beads whose dependencies are closed. Blocked beads show `⊘`.
-- `A` on a blocked bead without a worktree does not launch it. It is released to Pending and
-  the scheduler starts it once its blockers close.
+- Stacked beads: a Pending bead whose only open blocker is in Review (or under AI review) is
+  started on a branch forked from the blocker's branch instead of base. The fork point is kept in
+  `refs/sulla/stack/<bead>`, so its diff, log and AI review only show its own commits. It still
+  cannot be merged until the blocker is closed. Merging a bead rebases its stacked children onto
+  base, and their children onto the new branches, down the chain (`--autostash` keeps
+  uncommitted work). A child that conflicts is left stacked and is rebased onto base when it is
+  merged.
+- `A` on a blocked bead without a worktree does not launch it unless it can be stacked. It is
+  released to Pending and the scheduler starts it once its blockers close.
 - Agents are told to run `bd set-state <bead> sulla=review` when done.
 - `V` on a bead in Review starts an AI reviewer agent in the same worktree with a fresh session.
   The bead is labeled `sulla:reviewing` and shown in In Progress with `◎` while it runs. The

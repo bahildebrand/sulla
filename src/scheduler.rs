@@ -148,6 +148,29 @@ pub fn pick<'a>(
     candidates
 }
 
+pub fn stack_parent<'a>(
+    id: &str,
+    blocked: &'a HashMap<String, Vec<String>>,
+    all: &[Bead],
+) -> Option<&'a str> {
+    let [parent] = blocked.get(id)?.as_slice() else {
+        return None;
+    };
+    all.iter()
+        .find(|b| b.id == *parent)
+        .filter(|b| {
+            b.status != "closed" && matches!(b.state(), Some(State::Review | State::Reviewing))
+        })
+        .map(|_| parent.as_str())
+}
+
+pub fn stackable<'a>(all: &'a [Bead], blocked: &HashMap<String, Vec<String>>) -> Vec<&'a Bead> {
+    all.iter()
+        .filter(|b| b.status == "open" && b.state().is_none() && b.issue_type != "epic")
+        .filter(|b| stack_parent(&b.id, blocked, all).is_some())
+        .collect()
+}
+
 pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
     all.iter()
         .filter(|b| b.status != "closed")
@@ -222,6 +245,35 @@ mod tests {
         assert!(b.resume());
         assert!(!b.resume());
         assert_eq!(b.hit(t + BACKOFF_MAX * 3), Some(BACKOFF_BASE));
+    }
+
+    #[test]
+    fn stacks_only_on_single_blocker_in_review() {
+        let all = vec![
+            bead("rev", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
+            bead("run", 1, "2026-01-01T00:00:00Z", &["sulla:running"]),
+            bead("on-rev", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("on-run", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("on-both", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("held", 1, "2026-01-01T00:00:00Z", &["sulla:held"]),
+        ];
+        let blocked = HashMap::from([
+            ("on-rev".to_string(), vec!["rev".to_string()]),
+            ("on-run".to_string(), vec!["run".to_string()]),
+            (
+                "on-both".to_string(),
+                vec!["rev".to_string(), "run".to_string()],
+            ),
+            ("held".to_string(), vec!["rev".to_string()]),
+        ]);
+        assert_eq!(stack_parent("on-rev", &blocked, &all), Some("rev"));
+        assert_eq!(stack_parent("on-run", &blocked, &all), None);
+        assert_eq!(stack_parent("on-both", &blocked, &all), None);
+        let ids: Vec<_> = stackable(&all, &blocked)
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+        assert_eq!(ids, ["on-rev"]);
     }
 
     #[test]
