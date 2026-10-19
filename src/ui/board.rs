@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState};
 use crate::agent;
 use crate::app::App;
 use crate::beads::{Bead, Column, State};
+use crate::checks::Check;
 use crate::ui::review;
 
 fn badge(app: &App, b: &Bead) -> Span<'static> {
@@ -22,6 +23,10 @@ fn conflict(app: &App, b: &Bead) -> Span<'static> {
     } else {
         Span::raw("")
     }
+}
+
+fn check_badge(app: &App, b: &Bead) -> Span<'static> {
+    app.checks.get(&b.id).map_or(Span::raw(""), Check::badge)
 }
 
 fn marker(app: &App, b: &Bead) -> Span<'static> {
@@ -98,6 +103,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                         marker(app, b),
                         conflict(app, b),
                         badge(app, b),
+                        check_badge(app, b),
                         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
                         Span::raw(b.title.clone()),
                         Span::raw(format!(" {}", b.id)).dim(),
@@ -134,6 +140,7 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
         marker(app, b),
         conflict(app, b),
         badge(app, b),
+        check_badge(app, b),
         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
         Span::raw(b.title.clone()).bold(),
         Span::raw(format!(" {}", b.id)).dim(),

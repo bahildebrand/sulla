@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use serde::{Deserialize, Serialize};
 
+use crate::checks::{Check, Status};
 use crate::conflicts::Conflict;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,15 +451,22 @@ fn wrap_into(
     }
 }
 
-pub fn render(
-    f: &mut Frame,
-    area: Rect,
-    diff: &Diff,
-    title: &str,
-    loc: Option<&str>,
-    ai: Option<&AiReview>,
-    conflict: Option<(&Conflict, &str)>,
-) {
+pub struct Header<'a> {
+    pub title: &'a str,
+    pub loc: Option<&'a str>,
+    pub ai: Option<&'a AiReview>,
+    pub conflict: Option<(&'a Conflict, &'a str)>,
+    pub check: Option<&'a Check>,
+}
+
+pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
+    let Header {
+        title,
+        loc,
+        ai,
+        conflict,
+        check,
+    } = h;
     let (adds, dels) = diff.adds_dels();
     let mut spans = vec![
         Span::styled(format!(" review {} ", diff.id), Style::new().bold()),
@@ -486,6 +494,17 @@ pub fn render(
                 Style::new().fg(Color::DarkGray),
             ));
         }
+    }
+    if let Some(c) = check {
+        let color = match c.status {
+            Status::Running => Color::Yellow,
+            Status::Pass => Color::Green,
+            Status::Fail => Color::Red,
+        };
+        spans.push(Span::styled(
+            format!("{} ", c.summary()),
+            Style::new().fg(color).add_modifier(Modifier::BOLD),
+        ));
     }
     if let Some((c, base)) = conflict {
         spans.push(Span::styled(

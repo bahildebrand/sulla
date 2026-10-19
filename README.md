@@ -46,6 +46,11 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   Comments whose line is no longer in the diff move to their file header, or to the first file
   when the file is gone. They are cleared when a new AI review starts, when you send feedback,
   or when the bead goes back to running for another reason.
+- With `check` set, sulla runs it with `sh -c` in the bead worktree on the host (also with the
+  incus sandbox) whenever a bead in Review has a new branch head, killing any run on an older
+  head. Output goes to `.sulla/checks/<bead>.log`. Cards show `⟳chk`, `✓chk` or `✗chk` and the
+  Review header shows the result and duration. `m` refuses to merge while checks are failing,
+  running, stale or missing. `M` force merges anyway. `t` shows the output, `T` reruns.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
 - Each poll runs `git merge-tree` on every open bead's committed branch against base and against
@@ -69,9 +74,9 @@ Press `?` in the app for the full list.
 
 | View | Keys |
 |---|---|
-| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead, `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `R` mark review, `V` ai review, `A` launch/resume, `q` quit |
+| Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `Enter` open, `p` progress, `r` review, `i` inspect bead, `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `s` release, `S` release all backlog, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
-| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge, `s` send feedback, `V` ai review, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
+| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:refresh` `:kill <id>` `:chat [new]` |
 
 ## Config
@@ -88,6 +93,7 @@ done_retention_days = 3
 poll_secs = 2
 base_branch = "main"
 kache = true
+check = "cargo test && cargo clippy" # pre-merge check, unset by default
 agent = "copilot" # or "claude"
 sandbox = "worktree" # or "incus"
 

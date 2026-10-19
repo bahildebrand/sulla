@@ -14,6 +14,7 @@ use crossterm::event::{
 
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
+use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, Trigger};
 use crate::conflicts::Conflict;
 use crate::git::{DiffStat, Git, RebaseConflict};
@@ -30,6 +31,7 @@ pub enum Event {
     AgentExited(String),
     AgentBell(String),
     Snapshot(Result<Snapshot, String>),
+    CheckDone(checks::Done),
 }
 
 pub enum View {
@@ -118,6 +120,7 @@ pub struct App {
     pub view: View,
     pub parked_review: Option<Diff>,
     pub ai_reviews: HashMap<String, AiReview>,
+    pub checks: HashMap<String, Check>,
     pub mode: Mode,
     pub col: usize,
     pub zoom: bool,
@@ -181,6 +184,7 @@ impl App {
             view: View::Board,
             parked_review: None,
             ai_reviews: HashMap::new(),
+            checks: HashMap::new(),
             mode: Mode::Normal,
             col: 0,
             zoom: false,
@@ -423,9 +427,19 @@ impl App {
                         self.notify(Trigger::Review, &id, &title);
                     }
                 }
+                self.sync_checks();
                 self.schedule();
             }
             Event::Snapshot(Err(e)) => self.status = format!("bd: {e}"),
+            Event::CheckDone(d) => {
+                if let Some(c) = self.checks.get_mut(&d.id)
+                    && c.head == d.head
+                    && c.status == checks::Status::Running
+                {
+                    c.finish(d.ok);
+                    self.status = format!("{}: {}", d.id, c.summary());
+                }
+            }
         }
     }
 
@@ -708,6 +722,142 @@ impl App {
         if let Some(r) = self.ai_reviews.get_mut(&d.id) {
             r.comments = d.comments.iter().filter(|c| c.ai).cloned().collect();
         }
+    }
+
+    fn check_cmd(&self) -> Option<String> {
+        self.cfg.check.clone().filter(|c| !c.trim().is_empty())
+    }
+
+    fn in_review(&self, id: &str) -> bool {
+        self.bead(id).is_some_and(|b| {
+            b.status != "closed" && matches!(b.state(), Some(State::Review | State::Reviewing))
+        })
+    }
+
+    fn sync_checks(&mut self) {
+        let stale: Vec<String> = self
+            .checks
+            .keys()
+            .filter(|id| self.check_cmd().is_none() || !self.in_review(id))
+            .cloned()
+            .collect();
+        for id in stale {
+            self.stop_check(&id);
+        }
+        if self.check_cmd().is_none() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .all
+            .iter()
+            .filter(|b| self.in_review(&b.id))
+            .map(|b| b.id.clone())
+            .collect();
+        for id in ids {
+            if !self.git.worktree_path(&id).join(".git").exists() {
+                continue;
+            }
+            let Ok(head) = self.git.head(&id) else {
+                continue;
+            };
+            if self.checks.get(&id).is_none_or(|c| c.head != head) {
+                self.start_check(&id, &head);
+            }
+        }
+    }
+
+    fn start_check(&mut self, id: &str, head: &str) {
+        let Some(cmd) = self.check_cmd() else {
+            return;
+        };
+        self.stop_check(id);
+        let log = self
+            .repo
+            .join(".sulla")
+            .join("checks")
+            .join(format!("{id}.log"));
+        let dir = self.git.worktree_path(id);
+        let c = Check::start(
+            id,
+            head,
+            &cmd,
+            &dir,
+            log.clone(),
+            self.cfg.kache,
+            self.tx.clone(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("check for {id} failed to start: {e:#}");
+            Check::failed(head, log, &e.to_string())
+        });
+        self.checks.insert(id.to_string(), c);
+    }
+
+    fn stop_check(&mut self, id: &str) {
+        if let Some(mut c) = self.checks.remove(id) {
+            c.stop();
+        }
+    }
+
+    fn rerun_check(&mut self, id: &str) {
+        if self.check_cmd().is_none() {
+            self.status = "no check command configured".into();
+            return;
+        }
+        if !self.in_review(id) {
+            self.status = format!("{id} is not in review");
+            return;
+        }
+        let r = self.git.head(id);
+        if let Some(head) = self.report(r) {
+            self.start_check(id, &head);
+            self.status = format!("checks for {id} restarted");
+        }
+    }
+
+    fn check_blocker(&self, id: &str) -> Option<String> {
+        self.check_cmd()?;
+        if !self.git.worktree_path(id).join(".git").exists() {
+            return None;
+        }
+        let Some(c) = self.checks.get(id) else {
+            return Some("checks have not run".into());
+        };
+        if c.status == checks::Status::Running {
+            return Some("checks are still running".into());
+        }
+        if self.git.head(id).is_ok_and(|h| h != c.head) {
+            return Some("checks are stale".into());
+        }
+        (c.status == checks::Status::Fail).then(|| "checks failed".into())
+    }
+
+    fn show_check(&mut self, id: String) {
+        let (Some(cmd), Some(c)) = (self.check_cmd(), self.checks.get(&id)) else {
+            self.status = format!("no check results for {id}");
+            return;
+        };
+        let text = format!("$ {cmd}\n{}\n\n{}", c.summary(), c.output());
+        let scroll = text.lines().count().saturating_sub(1) as u16;
+        self.mode = Mode::Inspect { id, text, scroll };
+    }
+
+    fn request_merge(&mut self, id: String, force: bool) {
+        let msg = match self.check_blocker(&id) {
+            Some(why) if !force => {
+                self.status = format!("{why} for {id}, t shows output, M force merges");
+                return;
+            }
+            Some(why) => format!(
+                "Force merge {id} although {why}? Rebase onto {} and fast-forward merge? y/n",
+                self.base
+            ),
+            None => format!("Rebase {id} onto {} and fast-forward merge? y/n", self.base),
+        };
+        self.mode = Mode::Confirm {
+            msg,
+            action: Action::Merge(id),
+        };
     }
 
     fn reviewing(&self, id: &str) -> bool {
@@ -1191,6 +1341,7 @@ impl App {
     }
 
     fn discard(&mut self, id: &str) {
+        self.stop_check(id);
         self.remove_agent(id, Outcome::Discarded);
         let r = self
             .git
@@ -1223,6 +1374,7 @@ impl App {
             return self.mutated();
         }
         let title = self.bead(id).map(|b| b.title.clone()).unwrap_or_default();
+        self.stop_check(id);
         let slot = self.take_agent(id);
         let msg = format!("{id}: {title}");
         let r = self.git.merge(id, &self.base, &msg);
@@ -1544,6 +1696,8 @@ impl App {
             KeyCode::Char('S') => self.release_backlog(),
             KeyCode::Char('B') => self.move_to_backlog(&b),
             KeyCode::Char('A') => self.relaunch(&b.id),
+            KeyCode::Char('t') => self.show_check(b.id),
+            KeyCode::Char('T') => self.rerun_check(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 let r = self.beads.set_priority(&b.id, b.priority.saturating_sub(1));
                 self.report(r);
@@ -1645,12 +1799,10 @@ impl App {
                 Some(text) => self.feedback(&id, &text),
                 None => self.status = "no comments to send".into(),
             },
-            KeyCode::Char('m') => {
-                self.mode = Mode::Confirm {
-                    msg: format!("Rebase {id} onto {} and fast-forward merge? y/n", self.base),
-                    action: Action::Merge(id),
-                };
-            }
+            KeyCode::Char('m') => self.request_merge(id, false),
+            KeyCode::Char('M') => self.request_merge(id, true),
+            KeyCode::Char('t') => self.show_check(id),
+            KeyCode::Char('T') => self.rerun_check(&id),
             KeyCode::Char('s') => {
                 self.mode = Mode::Input {
                     kind: InputKind::Feedback(id),
@@ -1670,6 +1822,9 @@ impl App {
     pub fn shutdown(&mut self) {
         for a in self.agents.values_mut() {
             a.kill();
+        }
+        for c in self.checks.values_mut() {
+            c.stop();
         }
         self.slots.clear();
         self.deferred.clear();

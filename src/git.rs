@@ -257,6 +257,19 @@ impl Git {
         run(&self.repo, &["diff", "--no-color", "--no-ext-diff", &b, &h])
     }
 
+    pub fn head(&self, id: &str) -> Result<String> {
+        Ok(run(
+            &self.repo,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}", branch(id)),
+            ],
+        )?
+        .trim()
+        .to_string())
+    }
+
     pub fn was_merged(&self, id: &str) -> bool {
         !self.worktree_path(id).join(".git").exists()
             && self.ref_exists(&merged_ref(id, "base"))

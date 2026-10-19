@@ -29,10 +29,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 f,
                 main,
                 d,
-                title,
-                app.slot_location(&d.id).as_deref(),
-                app.ai_reviews.get(&d.id),
-                app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
+                review::Header {
+                    title,
+                    loc: app.slot_location(&d.id).as_deref(),
+                    ai: app.ai_reviews.get(&d.id),
+                    conflict: app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
+                    check: app.checks.get(&d.id),
+                },
             )
         }
     }
@@ -150,6 +153,7 @@ const HELP: &[(&str, &str)] = &[
         "A",
         "launch / resume agent (blocked beads are queued instead)",
     ),
+    ("t / T", "show pre-merge check output / rerun checks"),
     ("q", "quit"),
     ("Progress", ""),
     ("i / a", "insert mode (type into agent, resumes if exited)"),
@@ -164,7 +168,12 @@ const HELP: &[(&str, &str)] = &[
     ("c / x", "comment on line / delete its comments"),
     ("C", "edit comment on line (yours or unsent ai)"),
     ("S", "send all comments to agent (incl. unsent ai)"),
-    ("m", "rebase + fast-forward merge"),
+    (
+        "m",
+        "rebase + fast-forward merge (blocked unless checks pass)",
+    ),
+    ("M", "force merge despite failing or running checks"),
+    ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),
     ("D", "discard worktree + branch, hold bead"),

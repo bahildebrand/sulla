@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod beads;
+mod checks;
 mod config;
 mod conflicts;
 mod git;

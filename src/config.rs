@@ -12,6 +12,7 @@ pub struct Config {
     pub poll_secs: u64,
     pub base_branch: Option<String>,
     pub kache: bool,
+    pub check: Option<String>,
     pub agent: AgentKind,
     pub sandbox: SandboxKind,
     pub copilot: CopilotConfig,
@@ -134,6 +135,7 @@ impl Default for Config {
             poll_secs: 2,
             base_branch: None,
             kache: true,
+            check: None,
             agent: AgentKind::default(),
             sandbox: SandboxKind::default(),
             copilot: CopilotConfig::default(),
@@ -258,7 +260,11 @@ mod tests {
     #[test]
     fn missing_repo_file_uses_global() {
         let d = tempdir("missing");
-        let g = write(&d, "global.toml", "max_agents = 9\n[incus]\nmemory = \"4GiB\"");
+        let g = write(
+            &d,
+            "global.toml",
+            "max_agents = 9\n[incus]\nmemory = \"4GiB\"",
+        );
         let cfg = Config::load_from(Some(&g), &d.join("nope.toml")).unwrap();
         assert_eq!(cfg.max_agents, 9);
         assert_eq!(cfg.incus.memory, "4GiB");
