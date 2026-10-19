@@ -57,7 +57,7 @@ pub enum InputKind {
     Search(String),
     Feedback(String),
     Retry(String),
-    Comment,
+    Comment(usize),
     EditComment(usize),
 }
 
@@ -157,6 +157,7 @@ pub enum Mode {
     },
 }
 
+const MAX_COUNT: usize = 99_999;
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 const STALL_POLL: Duration = Duration::from_secs(1);
 const RATE_SCAN_EVERY: Duration = Duration::from_secs(1);
@@ -256,6 +257,7 @@ pub struct App {
     pub status: String,
     rebuilt: Option<String>,
     pending: Option<char>,
+    pub count: Option<usize>,
     esc_at: Option<Instant>,
     last_mutation: Instant,
     tx: Sender<Event>,
@@ -360,6 +362,7 @@ impl App {
             status: String::new(),
             rebuilt: None,
             pending: None,
+            count: None,
             esc_at: None,
             last_mutation: Instant::now(),
             tx,
@@ -2434,9 +2437,9 @@ impl App {
             InputKind::Retry(id) => self.retry(&id, &text),
             InputKind::Command => self.command(&text),
             InputKind::Search(_) => self.set_filter(&text),
-            InputKind::Comment => {
+            InputKind::Comment(count) => {
                 if let View::Review(d) = &mut self.view {
-                    if d.add_comment(&text) {
+                    if d.add_comment(&text, count) {
                         self.status = format!("{} comment(s), S to send", d.comments.len());
                     } else {
                         self.status = "cannot comment on this line".into();
@@ -3138,6 +3141,7 @@ impl App {
 
     fn normal_key(&mut self, k: KeyEvent) {
         let pending = self.pending.take();
+        let count = self.count.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
             KeyCode::Char('?') => return self.mode = Mode::Help { scroll: 0 },
@@ -3153,7 +3157,7 @@ impl App {
         match &self.view {
             View::Board => self.board_key(k, pending),
             View::Progress(_) => self.progress_key(k, pending),
-            View::Review(_) => self.review_key(k, pending),
+            View::Review(_) => self.review_key(k, pending, count),
         }
     }
 
@@ -3362,22 +3366,28 @@ impl App {
         }
     }
 
-    fn review_key(&mut self, k: KeyEvent, pending: Option<char>) {
-        self.review_key_inner(k, pending);
+    fn review_key(&mut self, k: KeyEvent, pending: Option<char>, count: Option<usize>) {
+        self.review_key_inner(k, pending, count);
         self.sync_ai();
     }
 
-    fn review_key_inner(&mut self, k: KeyEvent, pending: Option<char>) {
+    fn review_key_inner(&mut self, k: KeyEvent, pending: Option<char>, count: Option<usize>) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.pty_size().0 / 2) as isize;
         let View::Review(d) = &mut self.view else {
             return;
         };
         let id = d.id.clone();
+        let n = count.unwrap_or(1);
         match k.code {
+            KeyCode::Char(c @ '0'..='9') if c != '0' || count.is_some() => {
+                let digit = c.to_digit(10).unwrap_or(0) as usize;
+                self.count = Some((count.unwrap_or(0) * 10 + digit).min(MAX_COUNT));
+            }
+            KeyCode::Esc if count.is_some() => {}
             KeyCode::Char('q') | KeyCode::Esc => self.view = View::Board,
-            KeyCode::Char('j') | KeyCode::Down => d.move_cursor(1),
-            KeyCode::Char('k') | KeyCode::Up => d.move_cursor(-1),
+            KeyCode::Char('j') | KeyCode::Down => d.move_cursor(n as isize),
+            KeyCode::Char('k') | KeyCode::Up => d.move_cursor(-(n as isize)),
             KeyCode::Char('d') if ctrl => d.move_cursor(half),
             KeyCode::Char('u') if ctrl => d.move_cursor(-half),
             KeyCode::Char('g') if pending == Some('g') => d.set_cursor(0),
@@ -3388,9 +3398,9 @@ impl App {
             KeyCode::Char('f') if pending == Some('[') => d.prev_file(),
             KeyCode::Char(c @ ('g' | ']' | '[')) => self.pending = Some(c),
             KeyCode::Char('c') => {
-                if d.comment_target().is_some() {
+                if d.comment_range(n).is_some() {
                     self.mode = Mode::Input {
-                        kind: InputKind::Comment,
+                        kind: InputKind::Comment(n),
                         buf: String::new(),
                     };
                 } else {

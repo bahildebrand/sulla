@@ -96,14 +96,22 @@ pub struct Comment {
     pub file: String,
     pub old: Option<usize>,
     pub new: Option<usize>,
+    pub end_old: Option<usize>,
+    pub end_new: Option<usize>,
     pub snippet: String,
     pub text: String,
     pub ai: bool,
 }
 
+impl Comment {
+    pub fn multi_line(&self) -> bool {
+        (self.old, self.new) != (self.end_old, self.end_new)
+    }
+}
+
 pub const COMMIT_MSG: &str = "COMMIT_MSG";
 
-const FEEDBACK_INSTRUCTIONS: &str = "Code review comments on your diff. Each comment is attached to a line: side \"new\" is a line in the new file, side \"old\" is a removed line from the old file. Comments on file \"COMMIT_MSG\" refer to lines of your commit messages. Address every comment and commit, then set the bead back to review.";
+const FEEDBACK_INSTRUCTIONS: &str = "Code review comments on your diff. Each comment is attached to a line: side \"new\" is a line in the new file, side \"old\" is a removed line from the old file. A comment with end_line covers every diff line from line through end_line (end_side tells which file end_line is in) and its code holds all of them. Comments on file \"COMMIT_MSG\" refer to lines of your commit messages. Address every comment and commit, then set the bead back to review.";
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -121,16 +129,28 @@ struct FeedbackComment<'a> {
     side: Side,
     old_line: Option<usize>,
     new_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_side: Option<Side>,
     code: &'a str,
     comment: &'a str,
 }
 
+fn side_line(old: Option<usize>, new: Option<usize>) -> (Side, Option<usize>) {
+    match (new, old) {
+        (Some(n), _) => (Side::New, Some(n)),
+        (None, Some(o)) => (Side::Old, Some(o)),
+        _ => (Side::File, None),
+    }
+}
+
 impl<'a> From<&'a Comment> for FeedbackComment<'a> {
     fn from(c: &'a Comment) -> Self {
-        let (side, line) = match (c.new, c.old) {
-            (Some(n), _) => (Side::New, Some(n)),
-            (None, Some(o)) => (Side::Old, Some(o)),
-            _ => (Side::File, None),
+        let (side, line) = side_line(c.old, c.new);
+        let (end_side, end_line) = match side_line(c.end_old, c.end_new) {
+            (s, Some(l)) if c.multi_line() => (Some(s), Some(l)),
+            _ => (None, None),
         };
         Self {
             file: &c.file,
@@ -138,6 +158,8 @@ impl<'a> From<&'a Comment> for FeedbackComment<'a> {
             side,
             old_line: c.old,
             new_line: c.new,
+            end_line,
+            end_side,
             code: &c.snippet,
             comment: &c.text,
         }
@@ -219,12 +241,30 @@ pub struct Diff {
     pub comments: Vec<Comment>,
 }
 
-fn line_comment(file: &FileDiff, l: &DLine, text: &str, ai: bool) -> Comment {
+fn commentable(l: &DLine) -> bool {
+    l.old.is_some() || l.new.is_some()
+}
+
+fn line_comment(file: &FileDiff, (start, end): (usize, usize), text: &str, ai: bool) -> Comment {
+    let (s, e) = (&file.lines[start], &file.lines[end]);
+    let code = |l: &DLine| l.text.get(1..).unwrap_or("").to_string();
+    let snippet = if start == end {
+        code(s).trim().to_string()
+    } else {
+        file.lines[start..=end]
+            .iter()
+            .filter(|l| commentable(l))
+            .map(|l| code(l).trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     Comment {
         file: file.name.clone(),
-        old: l.old,
-        new: l.new,
-        snippet: l.text.get(1..).unwrap_or("").trim().to_string(),
+        old: s.old,
+        new: s.new,
+        end_old: e.old,
+        end_new: e.new,
+        snippet,
         text: text.to_string(),
         ai,
     }
@@ -372,19 +412,22 @@ impl Diff {
         }
     }
 
-    pub fn comment_pos(&self, c: &Comment) -> Option<(usize, usize)> {
+    pub fn comment_span(&self, c: &Comment) -> Option<(usize, usize, usize)> {
         let Some(fi) = self.files.iter().position(|f| f.name == c.file) else {
-            return (!self.files.is_empty()).then_some((0, 0));
+            return (!self.files.is_empty()).then_some((0, 0, 0));
         };
         if c.old.is_none() && c.new.is_none() {
-            return Some((fi, 0));
+            return Some((fi, 0, 0));
         }
-        let li = self.files[fi]
-            .lines
-            .iter()
-            .position(|l| l.old == c.old && l.new == c.new)
-            .unwrap_or(0);
-        Some((fi, li))
+        let lines = &self.files[fi].lines;
+        let find = |old, new| lines.iter().position(|l| l.old == old && l.new == new);
+        let end = find(c.end_old, c.end_new).unwrap_or(0);
+        let start = find(c.old, c.new).filter(|&s| s <= end).unwrap_or(end);
+        Some((fi, start, end))
+    }
+
+    pub fn comment_pos(&self, c: &Comment) -> Option<(usize, usize)> {
+        self.comment_span(c).map(|(fi, _, end)| (fi, end))
     }
 
     fn cursor_pos(&self) -> Option<(usize, usize)> {
@@ -393,17 +436,19 @@ impl Diff {
         Some((self.sel, f.cursor))
     }
 
-    pub fn comment_target(&self) -> Option<(&FileDiff, &DLine)> {
+    pub fn comment_range(&self, count: usize) -> Option<(usize, usize)> {
         let f = self.files.get(self.sel)?;
-        let l = f.lines.get(f.cursor)?;
-        (l.old.is_some() || l.new.is_some()).then_some((f, l))
+        let end = f.cursor.saturating_add(count.max(1)).min(f.lines.len());
+        let mut hits = (f.cursor..end).filter(|&i| commentable(&f.lines[i]));
+        let start = hits.next()?;
+        Some((start, hits.next_back().unwrap_or(start)))
     }
 
-    pub fn add_comment(&mut self, text: &str) -> bool {
-        let Some((f, l)) = self.comment_target() else {
+    pub fn add_comment(&mut self, text: &str, count: usize) -> bool {
+        let Some(range) = self.comment_range(count) else {
             return false;
         };
-        let c = line_comment(f, l, text, false);
+        let c = line_comment(&self.files[self.sel], range, text, false);
         self.comments.push(c);
         true
     }
@@ -423,24 +468,28 @@ impl Diff {
                 file: COMMIT_MSG.to_string(),
                 old: None,
                 new: None,
+                end_old: None,
+                end_new: None,
                 snippet: String::new(),
                 text,
                 ai: true,
             };
         };
         let hit = c.line.and_then(|n| {
-            f.lines.iter().find(|l| match c.side {
+            f.lines.iter().position(|l| match c.side {
                 Side::New => l.new == Some(n),
                 Side::Old => l.old == Some(n),
                 Side::File => false,
             })
         });
         match hit {
-            Some(l) => line_comment(f, l, &c.comment, true),
+            Some(i) => line_comment(f, (i, i), &c.comment, true),
             None => Comment {
                 file: f.name.clone(),
                 old: None,
                 new: None,
+                end_old: None,
+                end_new: None,
                 snippet: String::new(),
                 text: match (c.side, c.line) {
                     (Side::File, _) | (_, None) => c.comment.clone(),
@@ -620,6 +669,7 @@ pub struct Header<'a> {
     pub ai: Option<&'a AiReview>,
     pub conflict: Option<(&'a Conflict, &'a str)>,
     pub check: Option<&'a Check>,
+    pub marked: Option<(usize, usize)>,
 }
 
 pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
@@ -629,6 +679,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
         ai,
         conflict,
         check,
+        marked,
     } = h;
     let (adds, dels) = diff.adds_dels();
     let mut spans = vec![
@@ -699,8 +750,12 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     let [left, right] =
         Layout::horizontal([Constraint::Length(side), Constraint::Fill(1)]).areas(area);
 
-    let pos: Vec<Option<(usize, usize)>> =
-        diff.comments.iter().map(|c| diff.comment_pos(c)).collect();
+    let ranges: Vec<Option<(usize, usize, usize)>> =
+        diff.comments.iter().map(|c| diff.comment_span(c)).collect();
+    let pos: Vec<Option<(usize, usize)>> = ranges
+        .iter()
+        .map(|r| r.map(|(fi, _, end)| (fi, end)))
+        .collect();
     let items: Vec<ListItem> = diff
         .files
         .iter()
@@ -761,9 +816,12 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
         if rejected && matches!(l.kind, Kind::Add | Kind::Del) {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
-        if i == file.cursor {
+        if i == file.cursor || marked.is_some_and(|(s, e)| (s..=e).contains(&i)) {
             style = style.add_modifier(Modifier::REVERSED);
         }
+        let covered = ranges
+            .iter()
+            .any(|r| r.is_some_and(|(fi, s, e)| fi == diff.sel && s < e && (s..=e).contains(&i)));
         let gutter = if matches!(l.kind, Kind::Add | Kind::Del | Kind::Ctx) {
             format!("{} {} ", num(l.old), num(l.new))
         } else if rejected && file.unit_at(i) == Some(i) {
@@ -777,6 +835,8 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
                 gutter,
                 Style::new().fg(if rejected {
                     Color::Red
+                } else if covered {
+                    Color::Magenta
                 } else {
                     Color::DarkGray
                 }),
@@ -925,11 +985,11 @@ mod tests {
     fn comments_render_into_feedback() {
         let mut d = Diff::parse("x", SAMPLE);
         d.set_cursor(0);
-        assert!(!d.add_comment("nope"));
+        assert!(!d.add_comment("nope", 1));
         d.set_cursor(6);
-        assert!(d.add_comment("rename this"));
+        assert!(d.add_comment("rename this", 1));
         d.set_cursor(5);
-        assert!(d.add_comment("why \"removed\"?"));
+        assert!(d.add_comment("why \"removed\"?", 1));
         let fb = d.feedback().unwrap();
         assert!(!fb.contains('\n'));
         let v: serde_json::Value = serde_json::from_str(&fb).unwrap();
@@ -951,6 +1011,38 @@ mod tests {
     }
 
     #[test]
+    fn counted_comments_span_lines() {
+        let mut d = Diff::parse("x", TWO_HUNKS);
+        d.set_cursor(4);
+        assert_eq!(d.comment_range(1), None);
+        assert_eq!(d.comment_range(2), Some((5, 5)));
+        d.set_cursor(5);
+        assert_eq!(d.comment_range(0), Some((5, 5)));
+        assert_eq!(d.comment_range(10), Some((5, 11)));
+        assert!(d.add_comment("spans hunks", 10));
+        d.set_cursor(9);
+        assert!(d.add_comment("one line", 1));
+        let c = &d.comments[0];
+        assert!(c.multi_line() && !d.comments[1].multi_line());
+        assert_eq!(c.snippet, "one\nONE\ntwo\nnine\nten\nTEN");
+        assert_eq!(d.comment_span(c), Some((0, 5, 11)));
+        assert_eq!(d.comment_pos(c), Some((0, 11)));
+        let v: serde_json::Value = serde_json::from_str(&d.feedback().unwrap()).unwrap();
+        let c = &v["comments"];
+        assert_eq!((&c[0]["side"], &c[0]["line"]), (&"old".into(), &1.into()));
+        assert_eq!(
+            (&c[0]["end_side"], &c[0]["end_line"]),
+            (&"new".into(), &10.into())
+        );
+        assert!(c[1].get("end_line").is_none() && c[1].get("end_side").is_none());
+        d.set_cursor(5);
+        assert_eq!(d.comment_at_cursor(), None);
+        d.set_cursor(11);
+        assert_eq!(d.comment_at_cursor(), Some(0));
+        assert_eq!(d.delete_comments_at_cursor(), 1);
+    }
+
+    #[test]
     fn commit_messages_become_first_file() {
         let log = "commit abc\nAuthor: a <a@a>\nDate:   now\n\nsubject\n\nbody\n\n";
         let mut d = Diff::parse("x", SAMPLE).with_commits(log);
@@ -963,7 +1055,7 @@ mod tests {
         assert_eq!((l[4].kind, l[4].new), (Kind::Ctx, Some(1)));
         assert_eq!(l.len(), 7);
         assert_eq!(d.files[0].cursor, 4);
-        assert!(d.add_comment("reword"));
+        assert!(d.add_comment("reword", 1));
         let v: serde_json::Value = serde_json::from_str(&d.feedback().unwrap()).unwrap();
         assert_eq!(v["comments"][0]["file"], COMMIT_MSG);
         assert_eq!(v["comments"][0]["code"], "subject");
@@ -1047,6 +1139,8 @@ mod tests {
                 file: "src/a.rs".into(),
                 old: None,
                 new: None,
+                end_old: None,
+                end_new: None,
                 snippet: String::new(),
                 text: "line 99: far".into(),
                 ai: true,
@@ -1070,9 +1164,9 @@ mod tests {
     fn ai_and_human_feedback_are_identical() {
         let mut d = Diff::parse("x", SAMPLE);
         d.set_cursor(6);
-        assert!(d.add_comment("rename this"));
+        assert!(d.add_comment("rename this", 1));
         d.set_cursor(5);
-        assert!(d.add_comment("why removed"));
+        assert!(d.add_comment("why removed", 1));
         let human = d.feedback().unwrap();
         let ai_comments = vec![
             d.anchor(&ai("src/a.rs", Side::New, Some(1), "rename this")),
@@ -1102,6 +1196,8 @@ mod tests {
             file: file.into(),
             old: None,
             new: Some(42),
+            end_old: None,
+            end_new: Some(42),
             snippet: String::new(),
             text: "stale".into(),
             ai: true,

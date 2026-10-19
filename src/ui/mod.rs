@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
 use crate::config::AgentKind;
 use crate::health::Status;
-use review::Diff;
+use review::{DLine, Diff};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let [main, status] =
@@ -37,6 +37,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                     ai: app.ai_reviews.get(&d.id),
                     conflict: app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
                     check: app.checks.get(&d.id),
+                    marked: match app.mode {
+                        Mode::Input {
+                            kind: InputKind::Comment(n),
+                            ..
+                        } => d.comment_range(n),
+                        _ => None,
+                    },
                 },
             )
         }
@@ -56,8 +63,21 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if let (Mode::Input { kind, buf }, View::Review(d)) = (&app.mode, &app.view) {
         match kind {
-            InputKind::Comment => comment(f, d, buf, false),
-            InputKind::EditComment(_) => comment(f, d, buf, true),
+            InputKind::Comment(n) => {
+                if let Some(range) = d.comment_range(*n) {
+                    comment(f, d, range, buf, false);
+                }
+            }
+            InputKind::EditComment(i) => {
+                let cursor = d.files.get(d.sel).map_or(0, |x| x.cursor);
+                let range = d
+                    .comments
+                    .get(*i)
+                    .and_then(|c| d.comment_span(c))
+                    .filter(|&(fi, _, _)| fi == d.sel)
+                    .map_or((cursor, cursor), |(_, s, e)| (s, e));
+                comment(f, d, range, buf, true);
+            }
             _ => {}
         }
     }
@@ -76,16 +96,20 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             tag("HELP", Color::Blue),
             Span::raw(" j k / Ctrl-d Ctrl-u / gg G scroll, any other key closes").dim(),
         ],
-        Mode::Normal => vec![
-            tag("NORMAL", Color::Blue),
-            Span::raw(format!(" {}", app.status)),
-        ],
+        Mode::Normal => {
+            let mut spans = vec![tag("NORMAL", Color::Blue)];
+            if let Some(n) = app.count {
+                spans.push(Span::styled(format!(" {n}"), Style::new().fg(Color::Yellow)));
+            }
+            spans.push(Span::raw(format!(" {}", app.status)));
+            spans
+        }
         Mode::Insert => vec![
             tag("INSERT", Color::Green),
             Span::raw(" Esc Esc or Ctrl-] to leave").dim(),
         ],
         Mode::Input {
-            kind: InputKind::Comment,
+            kind: InputKind::Comment(_),
             ..
         } => vec![
             tag("COMMENT", Color::Magenta),
@@ -104,7 +128,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 InputKind::Search(_) => "/".to_string(),
                 InputKind::Feedback(id) => format!("feedback to {id}: "),
                 InputKind::Retry(id) => format!("retry {id}, why did it fail: "),
-                InputKind::Comment | InputKind::EditComment(_) => String::new(),
+                InputKind::Comment(_) | InputKind::EditComment(_) => String::new(),
             };
             vec![Span::raw(format!("{prompt}{buf}")), Span::raw("█")]
         }
@@ -230,8 +254,10 @@ const HELP: &[(&str, &str)] = &[
     ("q / Esc", "back to review if opened from it, else board"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
+    ("<n>j / <n>k", "move n lines"),
     ("Tab J / S-Tab K / ]f [f", "next / prev file"),
     ("c / x", "comment on line / delete its comments"),
+    ("<n>c", "comment on n lines from the cursor (10c)"),
     ("C", "edit comment on line (yours or unsent ai)"),
     ("S", "send all comments to agent (incl. unsent ai)"),
     ("y / n", "accept / reject hunk (whole file on header)"),
@@ -475,18 +501,28 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
     );
 }
 
-fn comment(f: &mut Frame, d: &Diff, buf: &str, edit: bool) {
+const COMMENT_PREVIEW_LINES: usize = 8;
+
+fn comment(f: &mut Frame, d: &Diff, (start, end): (usize, usize), buf: &str, edit: bool) {
     let Some(file) = d.files.get(d.sel) else {
         return;
     };
-    let Some(line) = file.lines.get(file.cursor) else {
+    let (Some(first), Some(last)) = (file.lines.get(start), file.lines.get(end)) else {
         return;
     };
     let inner_width = 62usize;
     let wrapped = |text: &str| text.chars().count().div_ceil(inner_width).max(1);
-    let code = line.text.replace('\t', "    ");
+    let span = &file.lines[start..=end];
+    let mut code: Vec<String> = span
+        .iter()
+        .take(COMMENT_PREVIEW_LINES)
+        .map(|l| l.text.replace('\t', "    "))
+        .collect();
+    if span.len() > COMMENT_PREVIEW_LINES {
+        code.push(format!("… {} more", span.len() - COMMENT_PREVIEW_LINES));
+    }
     let input = format!("{buf}█");
-    let rows = wrapped(&code) + wrapped(&input) + 4;
+    let rows = code.iter().map(|c| wrapped(c)).sum::<usize>() + wrapped(&input) + 4;
     let height = (rows as u16 + 2).min(f.area().height);
     let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -494,13 +530,18 @@ fn comment(f: &mut Frame, d: &Diff, buf: &str, edit: bool) {
     let [area] = Layout::horizontal([Constraint::Length(64)])
         .flex(Flex::Center)
         .areas(area);
-    let loc = match (line.new, line.old) {
-        (Some(n), _) => format!("{}:{n}", file.name),
-        (None, Some(o)) => format!("{}:{o} (old)", file.name),
+    let num = |l: &DLine| match (l.new, l.old) {
+        (Some(n), _) => Some(n.to_string()),
+        (None, Some(o)) => Some(format!("{o} (old)")),
+        _ => None,
+    };
+    let loc = match (num(first), num(last)) {
+        (Some(a), Some(b)) if start != end => format!("{}:{a}-{b}", file.name),
+        (Some(a), _) => format!("{}:{a}", file.name),
         _ => file.name.clone(),
     };
-    let lines = vec![
-        Line::from(code).dim(),
+    let mut lines: Vec<Line> = code.into_iter().map(|c| Line::from(c).dim()).collect();
+    lines.extend([
         Line::raw(""),
         Line::from(input),
         Line::raw(""),
@@ -510,7 +551,7 @@ fn comment(f: &mut Frame, d: &Diff, buf: &str, edit: bool) {
             "Enter add  Ctrl-u clear  Esc cancel"
         })
         .dim(),
-    ];
+    ]);
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines)
