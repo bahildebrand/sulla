@@ -481,21 +481,21 @@ impl App {
         }
     }
 
+    pub(super) fn is_working(&self, id: &str) -> bool {
+        id != CHAT_ID
+            && self.agents.get(id).is_some_and(|a| a.alive)
+            && (agent::reviewed_bead(id).is_some()
+                || self.bead(id).is_none_or(|b| {
+                    b.status != "closed"
+                        && !matches!(
+                            b.state(),
+                            Some(State::Reviewing | State::Review | State::Pr)
+                        )
+                }))
+    }
+
     pub fn running_count(&self) -> usize {
-        self.agents
-            .iter()
-            .filter(|(id, a)| a.alive && id.as_str() != CHAT_ID)
-            .filter(|(id, _)| {
-                agent::reviewed_bead(id).is_some()
-                    || self.bead(id).is_none_or(|b| {
-                        b.status != "closed"
-                            && !matches!(
-                                b.state(),
-                                Some(State::Reviewing | State::Review | State::Pr)
-                            )
-                    })
-            })
-            .count()
+        self.agents.keys().filter(|id| self.is_working(id)).count()
     }
 
     pub fn pty_size(&self) -> (u16, u16) {

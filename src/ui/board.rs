@@ -59,7 +59,7 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
         Some(State::Revise) => Some(("revise queued ", Color::Magenta)),
         Some(State::Running) => Some(("revising ", Color::Yellow)),
         Some(State::Reviewing) => Some(("ai reviewing ", Color::Cyan)),
-        Some(State::Review) => Some(("revised ", Color::Green)),
+        Some(State::Review) => Some(("revised, Enter to review ", Color::Green)),
         _ => None,
     };
     if let Some((text, color)) = phase {

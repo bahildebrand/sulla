@@ -256,7 +256,8 @@ queues it. Revise beads are scheduled like pending work, so they wait for a free
 `max_agents`, ordered by priority, and evict parked Review agents (including `revised` beads
 waiting for `P`) like pending work does. Through the whole revision the card stays in Awaiting PR
 and shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review
-runs on it, and `revised` (`Enter` opens the review).
+runs on it, and `revised, Enter to review` once it is waiting on you: `Enter` opens the review and
+`P` there publishes it (`P` on the board pauses scheduling instead).
 
 When a Revise bead is picked, sulla:
 
@@ -273,8 +274,8 @@ When a Revise bead is picked, sulla:
    comment on the PR.
 
 The queued comment ids are then marked addressed so they never retrigger. When the bead shows
-`revised`, read the incremental diff and publish again with `P` (if its agent was evicted
-meanwhile, publishing works the same): the branch is force pushed with
+`revised, Enter to review`, read the incremental diff and publish again with `P` in the review (if
+its agent was evicted meanwhile, publishing works the same): the branch is force pushed with
 `--force-with-lease` to the existing PR and the bead returns to Awaiting PR. With `reply = true`
 sulla comments on the PR with the pushed commit and what it addressed. That comment carries a
 hidden `<!-- sulla -->` marker so the watcher ignores it. Graphite's stack comment, which `gt submit`
@@ -432,4 +433,7 @@ everything is there.
   stays green while the database is unreachable. It says whether sulla started or reused it, or
   why sulla fell back to the CLI. It shows the last bd poll error, and explains why nothing is
   starting (paused, rate limited, slots full, failed starts, all blocked, backlog only, or nothing
-  open). `r` rechecks.
+  open). When the slots are full and some are held by beads without a working agent (parked Review
+  beads, including revised PR beads, or beads with checks or a publish in flight), it names the
+  first three of them, for example
+  `all 3 slots in use (1 working, parked: a-1, a-2; :max <n> to raise)`. `r` rechecks.

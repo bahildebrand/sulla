@@ -368,6 +368,7 @@ pub enum Idle {
     SlotsFull {
         running: usize,
         max: usize,
+        parked: Vec<String>,
     },
     Failed(Vec<String>),
     Blocked(usize),
@@ -388,10 +389,20 @@ impl Idle {
                 "rate limited, resuming in {} (:resume to override)",
                 fmt_duration(*d)
             ),
-            Idle::SlotsFull { running, max } if running < max => {
+            Idle::SlotsFull {
+                running,
+                max,
+                parked,
+            } if running < max && !parked.is_empty() => {
+                format!(
+                    "all {max} slots in use ({running} working, parked: {}; :max <n> to raise)",
+                    capped(parked, 3)
+                )
+            }
+            Idle::SlotsFull { running, max, .. } if running < max => {
                 format!("all {max} slots in use ({running} working agents, :max <n> to raise)")
             }
-            Idle::SlotsFull { running, max } => {
+            Idle::SlotsFull { running, max, .. } => {
                 format!("slots full, {running}/{max} agents running (:max <n> to raise)")
             }
             Idle::Failed(ids) => {
@@ -501,6 +512,14 @@ pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
             _ => false,
         })
         .collect()
+}
+
+fn capped(ids: &[String], cap: usize) -> String {
+    let shown = ids[..ids.len().min(cap)].join(", ");
+    match ids.len().saturating_sub(cap) {
+        0 => shown,
+        more => format!("{shown} +{more}"),
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +669,34 @@ mod tests {
         assert_eq!(
             why_idle(&with(&[&b1, &bl]), &blocked, &failed),
             Idle::Failed(vec!["bl".into()])
+        );
+    }
+
+    #[test]
+    fn slots_full_names_capped_parked_beads() {
+        let full = |running, parked: &[&str]| {
+            Idle::SlotsFull {
+                running,
+                max: 5,
+                parked: parked.iter().map(|s| s.to_string()).collect(),
+            }
+            .describe()
+        };
+        assert_eq!(
+            full(1, &["a"]),
+            "all 5 slots in use (1 working, parked: a; :max <n> to raise)"
+        );
+        assert_eq!(
+            full(0, &["a", "b", "c", "d", "e"]),
+            "all 5 slots in use (0 working, parked: a, b, c +2; :max <n> to raise)"
+        );
+        assert_eq!(
+            full(3, &[]),
+            "all 5 slots in use (3 working agents, :max <n> to raise)"
+        );
+        assert_eq!(
+            full(5, &[]),
+            "slots full, 5/5 agents running (:max <n> to raise)"
         );
     }
 

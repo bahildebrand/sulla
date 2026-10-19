@@ -614,6 +614,13 @@ fn parked_agents_with_work_in_flight_are_never_evicted() {
     h.app.publishing.insert("r-1".into());
     queued_check(&mut h, "r-2");
     untouched(&mut h);
+    assert_eq!(
+        h.app.idle().unwrap().describe(),
+        format!(
+            "all {} slots in use (0 working, parked: r-1, r-2; :max <n> to raise)",
+            h.app.cfg.max_agents
+        )
+    );
     h.app.publishing.clear();
     h.app.republishing.insert("x".into(), "r-1".into());
     h.app.checks.get_mut("r-2").unwrap().status = checks::Status::Running;

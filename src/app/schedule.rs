@@ -163,6 +163,22 @@ impl App {
         parked.into_iter().map(|b| b.id.clone()).collect()
     }
 
+    fn idle_holders(&self) -> Vec<String> {
+        let mut holders: Vec<&Bead> = self
+            .agents
+            .keys()
+            .filter(|id| *id != CHAT_ID && agent::reviewed_bead(id).is_none())
+            .filter(|id| {
+                self.slots
+                    .get(id)
+                    .is_some_and(|s| self.slots.holders(s) == 1 && !self.is_working(id))
+            })
+            .filter_map(|id| self.bead(id))
+            .collect();
+        holders.sort_by_key(|b| (b.state_since(), b.id.clone()));
+        holders.into_iter().map(|b| b.id.clone()).collect()
+    }
+
     fn evict(&mut self, victim: &str, wanted_by: &str) {
         tracing::info!("evicting parked agent {victim} to make room for {wanted_by}");
         self.remove_agent(victim, Outcome::Evicted);
@@ -243,6 +259,7 @@ impl App {
             return Some(Idle::SlotsFull {
                 running: self.running_count(),
                 max: self.cfg.max_agents,
+                parked: self.idle_holders(),
             });
         }
         if !self.picks(reach).is_empty() {
