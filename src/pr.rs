@@ -10,6 +10,7 @@ use crate::health::Probe;
 
 pub const GH: &str = "gh";
 pub const MARKER: &str = "<!-- sulla -->";
+const GRAPHITE_STACK: &str = "<!-- Current dependencies on/for this PR: -->";
 const LOG_LINES: usize = 40;
 const LOG_WIDTH: usize = 240;
 
@@ -296,7 +297,7 @@ fn parse_view(json: &str, inline: Vec<PrComment>) -> Result<PrStatus> {
         .filter_map(comment)
         .chain(inline)
         .collect();
-    comments.retain(|c| !c.body.contains(MARKER));
+    comments.retain(|c| !c.body.contains(MARKER) && !c.body.contains(GRAPHITE_STACK));
     comments.sort_by_key(|c| c.created_at);
     Ok(PrStatus {
         state,
@@ -852,6 +853,21 @@ mod tests {
             body.replace('\n', "\\n").replace('`', "")
         );
         assert!(parse_view(&marked, Vec::new()).unwrap().comments.is_empty());
+    }
+
+    #[test]
+    fn ignores_graphite_stack_comment() {
+        let view = r#"{"state":"OPEN","comments":[
+            {"id":"IC_1","author":{"login":"me"},"body":"* **#12** \ud83d\udc48\n* `master`\n\nThis stack of pull requests is managed by Graphite.\n<!-- Current dependencies on/for this PR: -->"},
+            {"id":"IC_2","author":{"login":"me"},"body":"rename this"}
+        ]}"#;
+        let ids: Vec<_> = parse_view(view, Vec::new())
+            .unwrap()
+            .comments
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, ["IC_2"]);
     }
 
     #[test]

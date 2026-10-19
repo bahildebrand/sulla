@@ -166,6 +166,16 @@ impl Git {
             .filter(|s| !s.is_empty())
     }
 
+    pub fn behind_parent(&self, id: &str) -> bool {
+        self.stack_parent(id).is_some_and(|p| {
+            run(
+                &self.repo,
+                &["merge-base", "--is-ancestor", &branch(&p), &branch(id)],
+            )
+            .is_err()
+        })
+    }
+
     pub fn stacks(&self) -> Vec<(String, String)> {
         let Ok(out) = run(
             &self.repo,
@@ -1058,6 +1068,39 @@ mod tests {
                 .unwrap()
                 .trim()
                 .is_empty()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn child_follows_parent_rewritten_after_stacking() {
+        let (dir, g) = scratch("rewrite");
+        let commit = |wt: &Path, f: &str, amend: bool| {
+            std::fs::write(wt.join(f), f).unwrap();
+            git(wt, &["add", f]);
+            if amend {
+                git(wt, &["commit", "-q", "--amend", "--no-edit"]);
+            } else {
+                git(wt, &["commit", "-qm", f]);
+            }
+        };
+        let p = g.ensure_worktree("p", "main").unwrap();
+        commit(&p, "p.txt", false);
+        let c = g.ensure_stacked_worktree("c", "p").unwrap();
+        commit(&c, "c.txt", false);
+        assert!(!g.behind_parent("c"));
+
+        commit(&p, "p2.txt", true);
+        assert!(g.behind_parent("c"));
+        g.restack("c", "main").unwrap();
+        assert!(!g.behind_parent("c"));
+        assert_eq!(g.stack_parent("c").as_deref(), Some("p"));
+        assert!(c.join("p2.txt").exists() && c.join("c.txt").exists());
+        assert_eq!(
+            run(&c, &["rev-list", "--count", "sulla/p..HEAD"])
+                .unwrap()
+                .trim(),
+            "1"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

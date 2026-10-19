@@ -150,7 +150,9 @@ force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`.
 
 With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of `git push` and
 `gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
-rejected hunks, sulla runs `gt track sulla/<bead> --parent <parent> --no-interactive` in the bead's
+rejected hunks, a stacked bead whose parent branch was rewritten since it was stacked (the parent
+was amended in review or rebased before a revision) is first restacked onto the parent's current
+tip, with either tool. sulla then runs `gt track sulla/<bead> --parent <parent> --no-interactive` in the bead's
 worktree, where the parent is the stack parent's branch or base as above. Re-tracking only updates
 Graphite's metadata and never rebases. It then runs
 `gt submit --no-interactive --no-edit --no-ai --no-stack` (plus `--draft` when `draft = true`),
@@ -225,7 +227,9 @@ The queued comment ids are then marked addressed so they never retrigger. When t
 Review, read the incremental diff and publish again with `P`: the branch is force pushed with
 `--force-with-lease` to the existing PR and the bead returns to Awaiting PR. With `reply = true`
 sulla comments on the PR with the pushed commit and what it addressed. That comment carries a
-hidden `<!-- sulla -->` marker so the watcher ignores it.
+hidden `<!-- sulla -->` marker so the watcher ignores it. Graphite's stack comment, which `gt submit`
+posts under your account, is ignored the same way by its `<!-- Current dependencies on/for this PR: -->`
+marker.
 
 Apart from that opt-in reply, sulla only reads from GitHub. Agent and AI reviewer prompts tell
 agents never to post comments, reviews or replies to GitHub or change PRs through `gh`. PR

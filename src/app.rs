@@ -1813,6 +1813,7 @@ impl App {
             .git
             .commit_pending(id, &msg)
             .and_then(|_| self.git.drop_rejected(id, &self.base, &msg, &rejection))
+            .and_then(|_| self.follow_parent(id))
             .and_then(|_| match self.cfg.pr.tool {
                 PrTool::Gh => self
                     .git
@@ -1865,6 +1866,13 @@ impl App {
             }
         }
         self.mutated();
+    }
+
+    fn follow_parent(&self, id: &str) -> Result<()> {
+        if self.pr_parent(id).is_some() && self.git.behind_parent(id) {
+            self.git.restack(id, &self.base)?;
+        }
+        Ok(())
     }
 
     fn submit_graphite(&self, id: &str, base: &str, bead: &Bead) -> Result<pr::Pr> {
