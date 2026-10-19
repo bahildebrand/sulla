@@ -178,6 +178,13 @@ impl Bead {
             })
     }
 
+    pub fn set_state_label(&mut self, state: Option<State>) {
+        self.labels.retain(|l| !l.starts_with("sulla:"));
+        if let Some(s) = state {
+            self.labels.push(format!("{STATE_DIM}:{}", s.as_str()));
+        }
+    }
+
     pub fn state_since(&self) -> Option<DateTime<Utc>> {
         if self.status == "closed" {
             return self.closed_at.or(self.updated_at);
@@ -570,6 +577,18 @@ mod tests {
         );
         assert_eq!(r.state(), Some(State::Revise));
         assert_eq!(r.column(Utc::now(), 3), Some(Column::Pending));
+    }
+
+    #[test]
+    fn set_state_label_replaces_sulla_labels() {
+        let mut b =
+            bead(r#"{"id":"a","title":"t","status":"open","labels":["x","sulla:held","pr:4"]}"#);
+        b.set_state_label(Some(State::Backlog));
+        assert_eq!(b.state(), Some(State::Backlog));
+        assert_eq!(b.labels, ["x", "pr:4", "sulla:backlog"]);
+        b.set_state_label(None);
+        assert_eq!(b.state(), None);
+        assert_eq!(b.labels, ["x", "pr:4"]);
     }
 
     #[test]

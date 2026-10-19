@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -16,7 +16,7 @@ use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch, Stall
 use crate::beads::{Bead, Beads, Column, State};
 use crate::budget::{self, Budget};
 use crate::checks::{self, Check};
-use crate::config::{AgentKind, Config, PrTool, SandboxKind, Trigger, Workflow};
+use crate::config::{AgentKind, Config, PrConfig, PrTool, SandboxKind, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{self, DiffStat, Git, RebaseConflict};
@@ -30,7 +30,7 @@ use crate::scheduler::{self, Backoff, Idle, Snapshot, fmt_duration};
 use crate::sessions::{self, Resume};
 use crate::timeline;
 use crate::ui::keys;
-use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
+use crate::ui::review::{self, AiReview, Comment, Diff, Rejection, Verdict};
 use crate::usage::{self, Usage, Watch};
 
 pub enum Event {
@@ -45,6 +45,22 @@ pub enum Event {
     Health(Vec<Tool>),
     Pr(String, u64, Result<PrStatus, String>),
     Inspected(String, Result<String>),
+    Finished(Callback),
+}
+
+pub type Callback = Box<dyn FnOnce(&mut App) + Send>;
+type BdJob = Box<dyn FnOnce(&Beads) -> Callback + Send>;
+
+fn spawn_bd_worker(beads: Beads, tx: Sender<Event>) -> Sender<BdJob> {
+    let (jobs, rx) = channel::<BdJob>();
+    std::thread::spawn(move || {
+        for job in rx {
+            if tx.send(Event::Finished(job(&beads))).is_err() {
+                return;
+            }
+        }
+    });
+    jobs
 }
 
 pub enum Suspend {
@@ -223,6 +239,69 @@ impl Restacked {
     }
 }
 
+struct Publish {
+    id: String,
+    base: String,
+    stacked: bool,
+    trunk: String,
+    rejection: Rejection,
+    pr: PrConfig,
+    repo: PathBuf,
+    git: Git,
+    beads: Beads,
+}
+
+impl Publish {
+    fn run(&self) -> Result<(Bead, pr::Pr)> {
+        let id = self.id.as_str();
+        let bead = self.beads.show(id)?;
+        let msg = format!("{id}: {}", bead.title);
+        self.git.commit_pending(id, &msg)?;
+        self.git
+            .drop_rejected(id, &self.trunk, &msg, &self.rejection)?;
+        if self.stacked && self.git.behind_parent(id) {
+            self.git.restack(id, &self.trunk)?;
+        }
+        let created = match self.pr.tool {
+            PrTool::Gh => {
+                self.git
+                    .push(id, &self.pr.remote, bead.label("pr").is_some())?;
+                pr::create(
+                    &self.repo,
+                    &git::branch(id),
+                    &self.base,
+                    &bead.title,
+                    &pr::body(id, &bead.description),
+                    self.pr.draft,
+                )?
+            }
+            PrTool::Graphite => self.submit_graphite(&bead)?,
+        };
+        Ok((bead, created))
+    }
+
+    fn submit_graphite(&self, bead: &Bead) -> Result<pr::Pr> {
+        let id = self.id.as_str();
+        let dir = self.git.worktree_path(id);
+        let br = git::branch(id);
+        let existed = pr::find(&self.repo, &br)?.is_some();
+        graphite::track(&dir, &br, &self.base)?;
+        graphite::submit(&dir, self.pr.draft)?;
+        let Some(created) = pr::find(&self.repo, &br)? else {
+            bail!("gt submit opened no PR for {br}");
+        };
+        if !existed {
+            pr::edit(
+                &self.repo,
+                created.number,
+                &bead.title,
+                &pr::body(id, &bead.description),
+            )?;
+        }
+        Ok(created)
+    }
+}
+
 pub struct App {
     pub cfg: Config,
     pub base: String,
@@ -280,6 +359,10 @@ pub struct App {
     last_mutation: Instant,
     tx: Sender<Event>,
     refresh: Sender<()>,
+    bd_jobs: Sender<BdJob>,
+    bd_pending: usize,
+    starting: HashSet<String>,
+    publishing: HashSet<String>,
     term: (u16, u16),
     pub suspend: Option<Suspend>,
     pub paused: bool,
@@ -314,6 +397,7 @@ impl App {
             )
         });
         let pr_watch = pr::Watch::load(repo.join(".sulla").join("pr-watch.json"));
+        let bd_jobs = spawn_bd_worker(beads.clone(), tx.clone());
         let usage_watch = usage::spawn(Duration::from_secs(cfg.poll_secs.max(1)), tx.clone());
         let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
         backends.insert(
@@ -385,6 +469,10 @@ impl App {
             last_mutation: Instant::now(),
             tx,
             refresh,
+            bd_jobs,
+            bd_pending: 0,
+            starting: HashSet::new(),
+            publishing: HashSet::new(),
             term: (80, 24),
             suspend: None,
             paused: false,
@@ -519,6 +607,37 @@ impl App {
     fn mutated(&mut self) {
         self.last_mutation = Instant::now();
         let _ = self.refresh.send(());
+    }
+
+    fn bd<T: Send + 'static>(
+        &mut self,
+        job: impl FnOnce(&Beads) -> Result<T> + Send + 'static,
+        done: impl FnOnce(&mut App, Result<T>) + Send + 'static,
+    ) {
+        let job: BdJob = Box::new(move |beads| {
+            let r = job(beads);
+            Box::new(move |app: &mut App| {
+                app.bd_pending -= 1;
+                done(app, r);
+                app.mutated();
+            })
+        });
+        match self.bd_jobs.send(job) {
+            Ok(()) => self.bd_pending += 1,
+            Err(_) => self.status = "error: bd worker stopped".into(),
+        }
+    }
+
+    fn bd_run(&mut self, job: impl FnOnce(&Beads) -> Result<()> + Send + 'static) {
+        self.bd(job, |app, r| {
+            app.report(r);
+        });
+    }
+
+    fn edit_local(&mut self, id: &str, f: impl FnOnce(&mut Bead)) {
+        if let Some(b) = self.all.iter_mut().find(|b| b.id == id) {
+            f(b);
+        }
     }
 
     fn report<T>(&mut self, r: Result<T>) -> Option<T> {
@@ -682,13 +801,16 @@ impl App {
         self.stop_check(id);
         self.remove_agent(id, Outcome::Killed);
         self.budget_runs.remove(id);
-        let r = self
-            .beads
-            .set_state_because(id, State::Held, msg)
-            .and_then(|_| self.beads.unclaim(id));
-        if self.report(r).is_some() {
-            self.status = format!("{id} {msg}, held in Pending (s to release)");
-        }
+        let (bead, reason) = (id.to_string(), msg.to_string());
+        self.bd_run(move |b| {
+            b.set_state_because(&bead, State::Held, &reason)?;
+            b.unclaim(&bead)
+        });
+        self.edit_local(id, |b| {
+            b.set_state_label(Some(State::Held));
+            b.status = "open".into();
+        });
+        self.status = format!("{id} {msg}, held in Pending (s to release)");
         self.over_budget.insert(id.to_string(), msg.to_string());
         if matches!(&self.view, View::Progress(v) if v == id) {
             if matches!(self.mode, Mode::Insert) {
@@ -699,7 +821,6 @@ impl App {
         if let Some(title) = self.bead(id).map(|b| b.title.clone()) {
             self.notify(Trigger::Budget, id, &title);
         }
-        self.mutated();
     }
 
     fn entered_review(&mut self) -> Vec<String> {
@@ -745,6 +866,9 @@ impl App {
                 }
             }
             Event::Snapshot(Ok(s)) => {
+                if self.bd_pending > 0 {
+                    return;
+                }
                 if s.taken < self.last_mutation {
                     let _ = self.refresh.send(());
                     return;
@@ -831,6 +955,7 @@ impl App {
             Event::Health(tools) => self.health = Some(tools),
             Event::Pr(id, number, r) => self.on_pr(&id, number, r),
             Event::Inspected(id, r) => self.on_inspected(id, r),
+            Event::Finished(f) => f(self),
         }
     }
 
@@ -888,9 +1013,9 @@ impl App {
             let state = b.state();
             if state == Some(State::Reviewing) {
                 tracing::info!("returning orphaned review {} to review", b.id);
-                let r = self.beads.set_state(&b.id, State::Review);
-                self.report(r);
-                self.mutated();
+                let id = b.id.clone();
+                self.bd_run(move |beads| beads.set_state(&id, State::Review));
+                self.edit_local(&b.id, |b| b.set_state_label(Some(State::Review)));
                 if known.contains(&b.id) {
                     continue;
                 }
@@ -913,12 +1038,14 @@ impl App {
                 self.rebuilt_status();
             } else {
                 tracing::info!("resetting orphaned bead {}", b.id);
-                let r = self
-                    .beads
-                    .clear_state(&b)
-                    .and_then(|_| self.beads.unclaim(&b.id));
-                self.report(r);
-                self.mutated();
+                self.edit_local(&b.id, |b| {
+                    b.set_state_label(None);
+                    b.status = "open".into();
+                });
+                self.bd_run(move |beads| {
+                    beads.clear_state(&b)?;
+                    beads.unclaim(&b.id)
+                });
             }
         }
     }
@@ -978,10 +1105,11 @@ impl App {
             .max_agents
             .saturating_sub(self.running_count())
             .min(self.slots.free(self.cfg.max_agents))
+            .saturating_sub(self.starting.len())
     }
 
     fn picks(&self, free: usize) -> Vec<Bead> {
-        let busy: HashSet<String> = self.agents.keys().cloned().collect();
+        let busy: HashSet<String> = self.agents.keys().chain(&self.starting).cloned().collect();
         let mut candidates = self.ready.clone();
         candidates.extend(
             scheduler::stackable(&self.all, &self.blocked, self.cfg.workflow == Workflow::Pr)
@@ -1068,18 +1196,30 @@ impl App {
                 continue;
             }
             tracing::info!("scheduling {}", b.id);
-            let r = self
-                .beads
-                .claim(&b.id)
-                .and_then(|_| self.beads.set_state(&b.id, State::Running))
-                .and_then(|_| self.start_agent(&b, false, None));
-            if self.report(r).is_none() {
-                self.failed.insert(b.id.clone());
-                let _ = self.beads.unclaim(&b.id);
-            } else {
-                self.status = format!("started {}", b.id);
-            }
-            self.mutated();
+            self.starting.insert(b.id.clone());
+            let id = b.id.clone();
+            self.bd(
+                move |beads| {
+                    beads.claim(&b.id)?;
+                    beads.set_state(&b.id, State::Running)?;
+                    Ok(beads.show(&b.id).unwrap_or(b))
+                },
+                move |app, r| app.claimed(id, r),
+            );
+        }
+    }
+
+    fn claimed(&mut self, id: String, r: Result<Bead>) {
+        self.starting.remove(&id);
+        if self.agents.contains_key(&id) {
+            return;
+        }
+        let r = r.and_then(|b| self.launch_agent(&b, false, None));
+        if self.report(r).is_some() {
+            self.status = format!("started {id}");
+        } else {
+            self.failed.insert(id.clone());
+            self.bd_run(move |beads| beads.unclaim(&id));
         }
     }
 
@@ -1202,6 +1342,11 @@ impl App {
     }
 
     fn start_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
+        let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
+        self.launch_agent(&bead, resume, prompt)
+    }
+
+    fn launch_agent(&mut self, bead: &Bead, resume: bool, prompt: Option<String>) -> Result<()> {
         let fresh = !self.git.worktree_path(&bead.id).join(".git").exists()
             && !self.git.has_branch(&bead.id);
         let worktree = match self.stack_on(&bead.id).filter(|_| fresh) {
@@ -1209,21 +1354,20 @@ impl App {
             None => self.git.ensure_worktree(&bead.id, &self.base)?,
         };
         let parent = self.git.stack_parent(&bead.id);
-        let bead = self.beads.show(&bead.id).unwrap_or_else(|_| bead.clone());
         let prompt = prompt.or_else(|| {
             (!resume).then(|| {
-                let preset = presets::for_bead(&self.cfg.presets, &bead);
-                let task = agent::task_prompt(&bead, parent.as_deref(), preset);
+                let preset = presets::for_bead(&self.cfg.presets, bead);
+                let task = agent::task_prompt(bead, parent.as_deref(), preset);
                 agent::with_system(task, self.cfg.system_prompt.as_deref())
             })
         });
-        let (kind, model) = agent::selection(&bead, self.cfg.agent);
+        let (kind, model) = agent::selection(bead, self.cfg.agent);
         let slot = self
             .slots
             .acquire_with(&bead.id, &agent::review_id(&bead.id), self.cfg.max_agents)
             .ok_or_else(|| eyre!("no free agent slot for {}", bead.id))?;
         let (resume, prompt) = if resume && self.cfg.workflow == Workflow::Pr {
-            self.recover_session(&bead, kind, parent.as_deref(), prompt)
+            self.recover_session(bead, kind, parent.as_deref(), prompt)
         } else {
             (resume, prompt)
         };
@@ -1759,11 +1903,28 @@ impl App {
             self.status = format!("every change in {id} is rejected, D discards it");
             return;
         }
-        let parent = self.pr_parent(&id);
-        let blockers = self.beads.open_blockers(&id);
+        if self.busy_publishing(&id) {
+            return;
+        }
+        self.status = format!("checking blockers of {id}...");
+        let bead = id.clone();
+        self.bd(
+            move |beads| beads.open_blockers(&bead),
+            move |app, r| app.confirm_publish(id, r),
+        );
+    }
+
+    fn confirm_publish(&mut self, id: String, blockers: Result<Vec<String>>) {
+        if self.status == format!("checking blockers of {id}...") {
+            self.status.clear();
+        }
         let Some(mut blockers) = self.report(blockers) else {
             return;
         };
+        if !matches!(self.mode, Mode::Normal) || self.focused_id().as_deref() != Some(&id) {
+            return;
+        }
+        let parent = self.pr_parent(&id);
         blockers.retain(|b| Some(b) != parent.as_ref());
         if !blockers.is_empty() {
             self.status = format!(
@@ -1800,46 +1961,55 @@ impl App {
     }
 
     fn publish(&mut self, id: &str) {
-        let r = self.beads.show(id);
-        let Some(bead) = self.report(r) else {
-            return self.mutated();
-        };
-        let base = self.pr_base(id);
-        let msg = format!("{id}: {}", bead.title);
+        if !self.publishing.insert(id.to_string()) {
+            return;
+        }
+        self.status = format!("publishing {id}...");
         let rejection = self.review_of(id).map(Diff::rejection).unwrap_or_default();
-        let old = bead.label("pr").map(String::from);
-        let republished = old.is_some();
-        let r = self
-            .git
-            .commit_pending(id, &msg)
-            .and_then(|_| self.git.drop_rejected(id, &self.base, &msg, &rejection))
-            .and_then(|_| self.follow_parent(id))
-            .and_then(|_| match self.cfg.pr.tool {
-                PrTool::Gh => self
-                    .git
-                    .push(id, &self.cfg.pr.remote, old.is_some())
-                    .and_then(|_| {
-                        pr::create(
-                            &self.repo,
-                            &git::branch(id),
-                            &base,
-                            &bead.title,
-                            &pr::body(id, &bead.description),
-                            self.cfg.pr.draft,
-                        )
-                    }),
-                PrTool::Graphite => self.submit_graphite(id, &base, &bead),
-            });
-        let Some(created) = self.report(r) else {
+        let job = Publish {
+            id: id.to_string(),
+            base: self.pr_base(id),
+            stacked: self.pr_parent(id).is_some(),
+            trunk: self.base.clone(),
+            rejection,
+            pr: self.cfg.pr.clone(),
+            repo: self.repo.clone(),
+            git: self.git.clone(),
+            beads: self.beads.clone(),
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let id = job.id.clone();
+            let r = job.run();
+            let _ = tx.send(Event::Finished(Box::new(move |app| app.pushed(id, r))));
+        });
+    }
+
+    fn pushed(&mut self, id: String, r: Result<(Bead, pr::Pr)>) {
+        let Some((bead, created)) = self.report(r) else {
+            self.publishing.remove(&id);
             return self.mutated();
         };
+        let old = bead.label("pr").map(String::from);
         let label = format!("pr:{}", created.number);
-        let r = old
-            .filter(|n| *n != created.number.to_string())
-            .map_or(Ok(()), |n| self.beads.remove_label(id, &format!("pr:{n}")))
-            .and_then(|_| self.beads.add_label(id, &label))
-            .and_then(|_| self.beads.set_state(id, State::Pr));
-        if self.report(r).is_some() {
+        let bead_id = id.clone();
+        self.bd(
+            move |beads| {
+                if let Some(n) = old.filter(|n| *n != created.number.to_string()) {
+                    beads.remove_label(&bead_id, &format!("pr:{n}"))?;
+                }
+                beads.add_label(&bead_id, &label)?;
+                beads.set_state(&bead_id, State::Pr)?;
+                Ok(created)
+            },
+            move |app, r| app.published(&id, bead, r),
+        );
+    }
+
+    fn published(&mut self, id: &str, bead: Bead, r: Result<pr::Pr>) {
+        self.publishing.remove(id);
+        let republished = bead.label("pr").is_some();
+        if let Some(created) = self.report(r) {
             self.git.clear_revision(id);
             self.reply_revised(id, created.number);
             self.stop_check(id);
@@ -1848,8 +2018,15 @@ impl App {
             if self.cfg.pr.backup_sessions {
                 self.backup_session(&bead);
             }
-            self.parked_review = None;
-            self.view = View::Board;
+            if self.parked_review.as_ref().is_some_and(|d| d.id == id) {
+                self.parked_review = None;
+            }
+            if self.viewing().as_deref() == Some(id) {
+                if matches!(self.mode, Mode::Insert) {
+                    self.mode = Mode::Normal;
+                }
+                self.view = View::Board;
+            }
             self.status = format!("published {id} as PR #{} {}", created.number, created.url);
             if republished && self.graphite() {
                 let children = self
@@ -1865,34 +2042,6 @@ impl App {
                 let _ = tx.send(());
             }
         }
-        self.mutated();
-    }
-
-    fn follow_parent(&self, id: &str) -> Result<()> {
-        if self.pr_parent(id).is_some() && self.git.behind_parent(id) {
-            self.git.restack(id, &self.base)?;
-        }
-        Ok(())
-    }
-
-    fn submit_graphite(&self, id: &str, base: &str, bead: &Bead) -> Result<pr::Pr> {
-        let dir = self.git.worktree_path(id);
-        let br = git::branch(id);
-        let existed = pr::find(&self.repo, &br)?.is_some();
-        graphite::track(&dir, &br, base)?;
-        graphite::submit(&dir, self.cfg.pr.draft)?;
-        let Some(created) = pr::find(&self.repo, &br)? else {
-            bail!("gt submit opened no PR for {br}");
-        };
-        if !existed {
-            pr::edit(
-                &self.repo,
-                created.number,
-                &bead.title,
-                &pr::body(id, &bead.description),
-            )?;
-        }
-        Ok(created)
     }
 
     fn reply_revised(&mut self, id: &str, number: u64) {
@@ -2588,37 +2737,41 @@ impl App {
             self.view = View::Board;
             return;
         }
-        if let Some(bead) = agent::reviewed_bead(id) {
-            let r = self.beads.set_state(bead, State::Review);
-            if self.report(r).is_some() {
-                self.status = format!("stopped reviewer of {bead}, back in Review");
-            }
+        if let Some(bead) = agent::reviewed_bead(id).map(String::from) {
+            self.edit_local(&bead, |b| b.set_state_label(Some(State::Review)));
+            self.status = format!("stopped reviewer of {bead}, back in Review");
+            self.bd_run(move |b| b.set_state(&bead, State::Review));
             if matches!(self.view, View::Progress(_)) {
                 self.view = View::Board;
             }
-            return self.mutated();
+            return;
         }
-        let r = self
-            .beads
-            .set_state(id, State::Held)
-            .and_then(|_| self.beads.unclaim(id));
-        if self.report(r).is_some() {
-            self.status = format!("killed {id}, held in Pending (s to release)");
-        }
+        self.hold(id);
+        self.status = format!("killed {id}, held in Pending (s to release)");
         if matches!(self.view, View::Progress(_)) {
             self.view = View::Board;
         }
-        self.mutated();
+    }
+
+    fn hold(&mut self, id: &str) {
+        self.edit_local(id, |b| {
+            b.set_state_label(Some(State::Held));
+            b.status = "open".into();
+        });
+        let id = id.to_string();
+        self.bd_run(move |b| {
+            b.set_state(&id, State::Held)?;
+            b.unclaim(&id)
+        });
     }
 
     fn release(&mut self, bead: &Bead) {
         self.failed.remove(&bead.id);
         if matches!(bead.state(), Some(State::Held | State::Backlog)) {
-            let r = self.beads.clear_state(bead);
-            if self.report(r).is_some() {
-                self.status = format!("released {}", bead.id);
-            }
-            self.mutated();
+            self.edit_local(&bead.id, |b| b.set_state_label(None));
+            self.status = format!("released {}", bead.id);
+            let bead = bead.clone();
+            self.bd_run(move |b| b.clear_state(&bead));
         }
     }
 
@@ -2633,39 +2786,52 @@ impl App {
             self.status = "backlog is empty".into();
             return;
         }
-        let mut moved = 0;
         for b in &backlog {
-            let r = self.beads.clear_state(b);
-            if self.report(r).is_some() {
-                moved += 1;
+            self.edit_local(&b.id, |b| b.set_state_label(None));
+        }
+        self.status = format!("released {} backlog bead(s) to pending", backlog.len());
+        self.bd_run(move |beads| {
+            let failed: Vec<String> = backlog
+                .iter()
+                .filter_map(|b| beads.clear_state(b).err())
+                .map(|e| format!("{e:#}"))
+                .collect();
+            match failed.first() {
+                None => Ok(()),
+                Some(e) => bail!("{} of {} not released: {e}", failed.len(), backlog.len()),
             }
-        }
-        if moved == backlog.len() {
-            self.status = format!("released {moved} backlog bead(s) to pending");
-        }
-        self.mutated();
+        });
     }
 
     fn move_to_backlog(&mut self, bead: &Bead) {
         if self.agents.contains_key(&bead.id) || bead.status == "closed" {
             return;
         }
-        let r = self.beads.set_state(&bead.id, State::Backlog);
-        if self.report(r).is_some() {
-            self.status = format!("{} moved to backlog (s to release)", bead.id);
-        }
-        self.mutated();
+        self.edit_local(&bead.id, |b| b.set_state_label(Some(State::Backlog)));
+        self.status = format!("{} moved to backlog (s to release)", bead.id);
+        let id = bead.id.clone();
+        self.bd_run(move |b| b.set_state(&id, State::Backlog));
     }
 
     fn mark_review(&mut self, id: &str) {
-        let r = self.beads.set_state(id, State::Review);
-        if self.report(r).is_some() {
-            self.status = format!("{id} ready for review");
+        self.edit_local(id, |b| b.set_state_label(Some(State::Review)));
+        self.status = format!("{id} ready for review");
+        let id = id.to_string();
+        self.bd_run(move |b| b.set_state(&id, State::Review));
+    }
+
+    fn busy_publishing(&mut self, id: &str) -> bool {
+        let busy = self.publishing.contains(id);
+        if busy {
+            self.status = format!("{id} is being published, wait for it to finish");
         }
-        self.mutated();
+        busy
     }
 
     fn confirm_discard(&mut self, id: String) {
+        if self.busy_publishing(&id) {
+            return;
+        }
         self.mode = Mode::Confirm {
             msg: format!("Discard {id}: kill agent, delete worktree and branch, hold bead? y/n"),
             action: Action::Discard(id),
@@ -2677,12 +2843,9 @@ impl App {
         self.remove_agent(id, Outcome::Discarded);
         let children = self.git.children(id);
         self.untrack(id);
-        let r = self
-            .git
-            .discard(id)
-            .and_then(|_| self.beads.set_state(id, State::Held))
-            .and_then(|_| self.beads.unclaim(id));
+        let r = self.git.discard(id);
         if self.report(r).is_some() {
+            self.hold(id);
             self.status = format!("discarded {id}, held in Pending (s to release)");
         }
         let mut r = Restacked::default();
@@ -2693,6 +2856,9 @@ impl App {
     }
 
     fn confirm_delete(&mut self, id: String) {
+        if self.busy_publishing(&id) {
+            return;
+        }
         self.mode = Mode::Confirm {
             msg: format!(
                 "Delete {id} permanently: kill agent, delete worktree, branch and bead? y/n"
@@ -2707,9 +2873,13 @@ impl App {
         self.failed.remove(id);
         let children = self.git.children(id);
         self.untrack(id);
-        let r = self.git.discard(id).and_then(|_| self.beads.delete(id));
+        let r = self.git.discard(id);
         if self.report(r).is_some() {
+            self.all.retain(|b| b.id != id);
+            self.clamp();
             self.status = format!("deleted {id}");
+            let id = id.to_string();
+            self.bd_run(move |b| b.delete(&id));
         }
         let mut r = Restacked::default();
         self.sync_graphite(&mut r, &children, None);
@@ -2719,7 +2889,7 @@ impl App {
     }
 
     fn request_retry(&mut self, id: String) {
-        if agent::reviewed_bead(&id).is_some() || id == CHAT_ID {
+        if agent::reviewed_bead(&id).is_some() || id == CHAT_ID || self.busy_publishing(&id) {
             return;
         }
         self.mode = Mode::Input {
@@ -2734,15 +2904,19 @@ impl App {
         let entry = format!("Retry after discarded attempt: {note}");
         let children = self.git.children(id);
         self.untrack(id);
-        let r = self
-            .git
-            .remove(id)
-            .and_then(|_| self.beads.append_notes(id, &entry))
-            .and_then(|_| self.beads.show(id))
-            .and_then(|b| self.beads.clear_state(&b))
-            .and_then(|_| self.beads.unclaim(id));
+        let r = self.git.remove(id);
         if self.report(r).is_some() {
+            self.edit_local(id, |b| {
+                b.set_state_label(None);
+                b.status = "open".into();
+            });
             self.status = format!("retrying {id} from scratch with note");
+            let id = id.to_string();
+            self.bd_run(move |b| {
+                b.append_notes(&id, &entry)?;
+                b.clear_state(&b.show(&id)?)?;
+                b.unclaim(&id)
+            });
         }
         let mut r = Restacked::default();
         self.sync_graphite(&mut r, &children, None);
@@ -3415,17 +3589,17 @@ impl App {
             KeyCode::Char('t') => self.show_check(b.id),
             KeyCode::Char('T') => self.rerun_check(&b.id),
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                let r = self.beads.set_priority(&b.id, b.priority.saturating_sub(1));
-                self.report(r);
-                self.mutated();
+                self.set_priority(&b.id, b.priority.saturating_sub(1))
             }
-            KeyCode::Char('-') => {
-                let r = self.beads.set_priority(&b.id, (b.priority + 1).min(4));
-                self.report(r);
-                self.mutated();
-            }
+            KeyCode::Char('-') => self.set_priority(&b.id, (b.priority + 1).min(4)),
             _ => {}
         }
+    }
+
+    fn set_priority(&mut self, id: &str, priority: u8) {
+        self.edit_local(id, |b| b.priority = priority);
+        let id = id.to_string();
+        self.bd_run(move |b| b.set_priority(&id, priority));
     }
 
     fn progress_key(&mut self, k: KeyEvent, pending: Option<char>) {
@@ -3569,5 +3743,33 @@ impl App {
         self.deferred.clear();
         self.sandbox.shutdown();
         self.notifier.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bd_worker_runs_jobs_in_order_without_blocking_sender() {
+        let (tx, rx) = channel();
+        let jobs = spawn_bd_worker(Beads::new(&PathBuf::from(".")), tx);
+        let (order_tx, order_rx) = channel();
+        let sent = Instant::now();
+        for n in 0..3 {
+            let order_tx = order_tx.clone();
+            let job: BdJob = Box::new(move |_| {
+                std::thread::sleep(Duration::from_millis(50));
+                order_tx.send(n).unwrap();
+                Box::new(|_| {})
+            });
+            jobs.send(job).unwrap();
+        }
+        assert!(sent.elapsed() < Duration::from_millis(50));
+        for _ in 0..3 {
+            let ev = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(ev, Event::Finished(_)));
+        }
+        assert_eq!(order_rx.try_iter().collect::<Vec<_>>(), [0, 1, 2]);
     }
 }
