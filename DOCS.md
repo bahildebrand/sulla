@@ -68,8 +68,8 @@ closing it without merging, unstacks its children so they keep its commits in th
 
 - Each agent runs `copilot --yolo` or `claude --dangerously-skip-permissions` in a PTY with
   `RUSTC_WRAPPER=kache` (when `kache = true`).
-- If Copilot rejects the launch prompt with "Managed account policy is still loading", sulla
-  resubmits it a few seconds later.
+- If Copilot rejects a prompt sulla sent (at launch or as feedback) with "Managed account policy
+  is still loading", sulla resubmits it a few seconds later.
 - Labels override config per bead: `agent:copilot`/`agent:claude`, `model:<name>`. The AI
   reviewer uses the same agent and model.
 - `preset:<name>` adds approach guidance to the prompt. Built-ins: `bugfix`, `feature`,

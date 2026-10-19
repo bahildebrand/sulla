@@ -30,7 +30,8 @@ const PROMPT_ROWS: usize = 15;
 const EXIT_GRACE: Duration = Duration::from_secs(30);
 const POLICY_LOADING: &str = "Managed account policy is still loading";
 const PROMPT_RETRY_DELAY: Duration = Duration::from_secs(2);
-const PROMPT_RETRY_WINDOW: Duration = Duration::from_secs(120);
+const PROMPT_ACCEPTED: Duration = Duration::from_secs(45);
+const PROMPT_REARM: Duration = Duration::from_secs(5);
 const PROMPT_RETRY_MAX: u32 = 10;
 
 pub struct Launch {
@@ -424,38 +425,58 @@ pub fn render_log(bytes: &[u8], rows: u16, cols: u16) -> String {
     lines[start..].join("\n")
 }
 
+fn rejections(contents: &str) -> usize {
+    let lines: Vec<&str> = contents.trim_end().lines().collect();
+    lines[lines.len().saturating_sub(PROMPT_ROWS)..]
+        .iter()
+        .filter(|l| l.contains(POLICY_LOADING))
+        .count()
+}
+
 pub struct PromptRetry {
     text: String,
     seen: usize,
+    fewer_since: Option<Instant>,
     due: Option<Instant>,
     tries: u32,
-    until: Instant,
+    sent: Instant,
 }
 
 impl PromptRetry {
-    pub fn new(text: String, now: Instant) -> Self {
+    pub fn new(text: String, contents: &str, now: Instant) -> Self {
         Self {
             text,
-            seen: 0,
+            seen: rejections(contents),
+            fewer_since: None,
             due: None,
             tries: 0,
-            until: now + PROMPT_RETRY_WINDOW,
+            sent: now,
         }
     }
 
     pub fn expired(&self, now: Instant) -> bool {
-        now >= self.until || self.tries >= PROMPT_RETRY_MAX
+        self.tries >= PROMPT_RETRY_MAX
+            || (self.due.is_none() && now.saturating_duration_since(self.sent) >= PROMPT_ACCEPTED)
     }
 
     pub fn poll(&mut self, contents: &str, now: Instant) -> Option<&str> {
-        let count = contents.matches(POLICY_LOADING).count();
-        if count > self.seen && self.due.is_none() {
-            self.due = Some(now + PROMPT_RETRY_DELAY);
+        let count = rejections(contents);
+        if count > self.seen {
+            self.due.get_or_insert(now + PROMPT_RETRY_DELAY);
+            self.seen = count;
         }
-        self.seen = count;
+        if count < self.seen {
+            let since = *self.fewer_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= PROMPT_REARM {
+                self.seen = count;
+            }
+        } else {
+            self.fewer_since = None;
+        }
         if self.due.is_some_and(|d| now >= d) {
             self.due = None;
             self.tries += 1;
+            self.sent = now;
             return Some(&self.text);
         }
         None
@@ -624,8 +645,18 @@ impl Agent {
         self.write(&bytes);
     }
 
+    pub fn send_prompt(&mut self, text: &str) {
+        let contents = self.parser.lock().unwrap().screen().contents();
+        self.retry = Some(PromptRetry::new(
+            text.to_string(),
+            &contents,
+            Instant::now(),
+        ));
+        self.submit(text);
+    }
+
     pub fn retry_prompt(&mut self, text: String) {
-        self.retry = Some(PromptRetry::new(text, Instant::now()));
+        self.retry = Some(PromptRetry::new(text, "", Instant::now()));
     }
 
     pub fn retry_rejected_prompt(&mut self, now: Instant) -> bool {
@@ -739,59 +770,81 @@ mod tests {
         assert_eq!(exit_generation(&rx), new.generation);
     }
 
-    #[test]
-    fn resubmits_prompt_rejected_while_policy_loads() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.args([
-            "-c",
-            "echo '! Managed account policy is still loading. Please wait a moment and try again.'; read l; echo \"got:$l\"; sleep 5",
-        ]);
-        let mut a = Agent::spawn(cmd, "x-1", 10, 120, None, tx).unwrap();
-        a.retry_prompt("fix conflicts".into());
+    const REJECTED: &str =
+        "! Managed account policy is still loading. Please wait a moment and try again.";
+
+    fn drive(a: &mut Agent, want: &str) -> bool {
         let start = Instant::now();
         let mut sent = false;
         while start.elapsed() < Duration::from_secs(10) {
             let later = Instant::now() + PROMPT_RETRY_DELAY;
             sent |= a.retry_rejected_prompt(Instant::now()) || a.retry_rejected_prompt(later);
-            if a.parser
-                .lock()
-                .unwrap()
-                .screen()
-                .contents()
-                .contains("got:fix conflicts")
-            {
-                break;
+            if a.parser.lock().unwrap().screen().contents().contains(want) {
+                return sent;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(sent);
-        assert!(
-            a.parser
-                .lock()
-                .unwrap()
-                .screen()
-                .contents()
-                .contains("got:fix conflicts")
-        );
+        panic!("never saw {want}");
+    }
+
+    fn shell(script: &str) -> (Agent, std::sync::mpsc::Receiver<Event>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", script]);
+        (Agent::spawn(cmd, "x-1", 10, 120, None, tx).unwrap(), rx)
+    }
+
+    #[test]
+    fn resubmits_launch_prompt_rejected_while_policy_loads() {
+        let (mut a, _rx) = shell(&format!(
+            "echo '{REJECTED}'; read l; echo \"got:$l\"; sleep 5"
+        ));
+        a.retry_prompt("fix conflicts".into());
+        assert!(drive(&mut a, "got:fix conflicts"));
+    }
+
+    #[test]
+    fn resubmits_prompt_sent_to_live_agent_when_rejected() {
+        let (mut a, _rx) = shell(&format!(
+            "echo '{REJECTED}'; echo ready; read l; echo '{REJECTED}'; read m; echo \"got:$m\"; sleep 5"
+        ));
+        assert!(!drive(&mut a, "ready"));
+        a.send_prompt("fix conflicts");
+        assert!(drive(&mut a, "got:fix conflicts"));
     }
 
     #[test]
     fn prompt_retry_waits_for_new_rejections() {
         let t = Instant::now();
         let s = Duration::from_secs;
-        let msg = format!("{POLICY_LOADING}. Please wait");
-        let mut r = PromptRetry::new("go".into(), t);
+        let msg = format!("work\n{POLICY_LOADING}. Please wait\n> input");
+        let two = format!("{msg}\n{msg}");
+        let mut r = PromptRetry::new("go".into(), "", t);
         assert_eq!(r.poll("loading", t), None);
         assert_eq!(r.poll(&msg, t), None);
         assert_eq!(r.poll(&msg, t + s(1)), None);
         assert_eq!(r.poll(&msg, t + s(2)), Some("go"));
         assert_eq!(r.poll(&msg, t + s(10)), None);
-        assert_eq!(r.poll("", t + s(11)), None);
-        assert_eq!(r.poll(&msg, t + s(12)), None);
-        assert_eq!(r.poll(&msg, t + s(14)), Some("go"));
-        assert!(!r.expired(t + s(14)));
-        assert!(r.expired(t + PROMPT_RETRY_WINDOW));
+        assert_eq!(r.poll(&two, t + s(11)), None);
+        assert_eq!(r.poll(&two, t + s(13)), Some("go"));
+        assert!(!r.expired(t + s(13)));
+        assert!(r.expired(t + s(13) + PROMPT_ACCEPTED));
+    }
+
+    #[test]
+    fn prompt_retry_ignores_flicker_and_old_messages() {
+        let t = Instant::now();
+        let s = Duration::from_secs;
+        let msg = format!("{POLICY_LOADING}. Please wait");
+        let mut r = PromptRetry::new("go".into(), &msg, t);
+        assert_eq!(r.poll(&msg, t + s(3)), None);
+        assert_eq!(r.poll("", t + s(4)), None);
+        assert_eq!(r.poll(&msg, t + s(5)), None);
+        assert_eq!(r.poll(&msg, t + s(8)), None);
+        let scrolled = format!("{msg}{}", "\nworking".repeat(PROMPT_ROWS));
+        assert_eq!(r.poll(&scrolled, t + s(9)), None);
+        assert_eq!(r.poll(&scrolled, t + s(20)), None);
+        assert!(r.expired(t + PROMPT_ACCEPTED));
     }
 
     #[test]

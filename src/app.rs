@@ -1105,7 +1105,7 @@ impl App {
         self.beads
             .set_state_because(id, State::Running, "revising PR feedback")?;
         match self.agents.get_mut(id) {
-            Some(a) if a.alive => a.submit(&text),
+            Some(a) if a.alive => a.send_prompt(&text),
             _ => {
                 self.remove_agent(id, Outcome::Exited);
                 self.start_agent(bead, true, Some(text))?;
@@ -2930,7 +2930,7 @@ impl App {
         self.report(r);
         match self.agents.get_mut(id) {
             Some(a) if a.alive => {
-                a.submit(text);
+                a.send_prompt(text);
             }
             _ => {
                 self.remove_agent(id, Outcome::Exited);
