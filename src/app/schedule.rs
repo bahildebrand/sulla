@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use color_eyre::Result;
 
-use crate::agent;
+use crate::agent::{self, CHAT_ID};
 use crate::beads::{Bead, State};
+use crate::checks;
 use crate::config::Workflow;
 use crate::sandbox::Outcome;
 use crate::scheduler::{self, Idle};
@@ -59,13 +60,14 @@ impl App {
                 }
             }
             let has_worktree = self.git.worktree_path(&b.id).join(".git").exists();
-            if matches!(state, Some(State::Review | State::Reviewing))
-                && (!has_worktree || self.slots.free(self.cfg.max_agents) == 0)
-            {
+            let in_review = matches!(state, Some(State::Review | State::Reviewing));
+            if in_review && (!has_worktree || !self.spare_slot()) {
                 continue;
             }
             if has_worktree {
-                if self.backoff.remaining(Instant::now()).is_some() {
+                if self.backoff.remaining(Instant::now()).is_some()
+                    || (!in_review && !self.make_room(&b.id))
+                {
                     continue;
                 }
                 tracing::info!("resuming orphaned agent {}", b.id);
@@ -102,11 +104,104 @@ impl App {
     }
 
     pub(super) fn free_slots(&self) -> usize {
+        self.reach(0)
+    }
+
+    fn reach(&self, evictable: usize) -> usize {
         self.cfg
             .max_agents
             .saturating_sub(self.running_count() + self.launching.len())
-            .min(self.slots.free(self.cfg.max_agents))
+            .min(self.slots.free(self.cfg.max_agents) + evictable)
             .saturating_sub(self.starting.len())
+    }
+
+    fn spare_slot(&self) -> bool {
+        let spare = self
+            .slots
+            .free(self.cfg.max_agents)
+            .saturating_sub(self.starting.len());
+        let wanted = if self.paused {
+            0
+        } else {
+            self.picks(self.free_slots()).len()
+        };
+        spare > wanted
+    }
+
+    fn is_parked(&self, id: &str) -> bool {
+        let rid = agent::review_id(id);
+        id != CHAT_ID
+            && agent::reviewed_bead(id).is_none()
+            && self
+                .bead(id)
+                .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Review))
+            && self
+                .slots
+                .get(id)
+                .is_some_and(|s| self.slots.holders(s) == 1)
+            && !self.agents.get(&rid).is_some_and(|a| a.alive)
+            && !self.is_starting(&rid)
+            && !self.is_starting(id)
+            && !self.checks.get(id).is_some_and(|c| {
+                matches!(c.status, checks::Status::Queued | checks::Status::Running)
+            })
+            && !self.publishing.contains(id)
+            && !self.republishing.contains_key(id)
+            && !self.republishing.values().any(|top| top == id)
+            && !(matches!(self.mode, Mode::Insert)
+                && matches!(&self.view, View::Progress(v) if v == id))
+    }
+
+    fn parked(&self) -> Vec<String> {
+        let mut parked: Vec<&Bead> = self
+            .agents
+            .keys()
+            .filter(|id| self.is_parked(id))
+            .filter_map(|id| self.bead(id))
+            .collect();
+        parked.sort_by_key(|b| (b.state_since(), b.id.clone()));
+        parked.into_iter().map(|b| b.id.clone()).collect()
+    }
+
+    fn evict(&mut self, victim: &str, wanted_by: &str) {
+        tracing::info!("evicting parked agent {victim} to make room for {wanted_by}");
+        self.remove_agent(victim, Outcome::Evicted);
+        self.status = format!("freed slot from parked {victim} for {wanted_by}");
+    }
+
+    pub(super) fn make_room(&mut self, id: &str) -> bool {
+        let starting = self.starting.iter().filter(|s| *s != id).count();
+        if self.slots.get(id).is_some()
+            || self.slots.get(&agent::review_id(id)).is_some()
+            || self.slots.free(self.cfg.max_agents) > starting
+        {
+            return true;
+        }
+        let Some(victim) = self.parked().into_iter().find(|v| v != id) else {
+            return false;
+        };
+        self.evict(&victim, id);
+        true
+    }
+
+    pub(super) fn no_room(&mut self, id: &str) {
+        self.status = format!(
+            "no free agent slot for {id}: all {} hold working agents, none parked in review",
+            self.cfg.max_agents
+        );
+    }
+
+    fn evict_for_ready(&mut self) {
+        let parked = self.parked();
+        let free = self.free_slots();
+        let reach = self.reach(parked.len());
+        if reach <= free {
+            return;
+        }
+        let picks = self.picks(reach);
+        for (victim, b) in parked.iter().zip(picks.iter().skip(free)) {
+            self.evict(victim, &b.id);
+        }
     }
 
     pub(super) fn busy(&self) -> impl Iterator<Item = &String> {
@@ -143,14 +238,14 @@ impl App {
         if let Some(d) = self.backoff.remaining(Instant::now()) {
             return Some(Idle::RateLimited(d));
         }
-        let free = self.free_slots();
-        if free == 0 {
+        let reach = self.reach(self.parked().len());
+        if reach == 0 {
             return Some(Idle::SlotsFull {
                 running: self.running_count(),
                 max: self.cfg.max_agents,
             });
         }
-        if !self.picks(free).is_empty() {
+        if !self.picks(reach).is_empty() {
             return None;
         }
         Some(scheduler::why_idle(&self.all, &self.blocked, &self.failed))
@@ -160,6 +255,7 @@ impl App {
         if self.paused || self.backoff.remaining(Instant::now()).is_some() {
             return;
         }
+        self.evict_for_ready();
         let free = self.free_slots();
         if free == 0 {
             return;

@@ -297,8 +297,10 @@ impl App {
     }
 
     pub(super) fn feedback(&mut self, id: &str, text: &str) {
+        if !self.deliver(id, text) {
+            return;
+        }
         self.ai_reviews.remove(id);
-        self.deliver(id, text);
         self.status = format!("feedback sent to {id}");
         self.parked_review = None;
         self.view = View::Progress(id.to_string());

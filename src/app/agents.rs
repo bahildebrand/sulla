@@ -166,26 +166,45 @@ impl App {
             .any(|k| self.agents.get(k).is_some_and(|a| a.alive) || self.launching.contains_key(k))
     }
 
-    pub(super) fn deliver(&mut self, id: &str, text: &str) {
+    pub(super) fn deliver(&mut self, id: &str, text: &str) -> bool {
+        let alive = self.agents.get(id).is_some_and(|a| a.alive);
+        if !alive {
+            self.remove_agent(id, Outcome::Exited);
+            if !self.make_room(id) {
+                self.no_room(id);
+                return false;
+            }
+        }
+        let was = self.bead(id).and_then(Bead::state);
         self.budget_runs.remove(id);
         self.edit_local(id, |b| b.set_state_label(Some(State::Running)));
         let bead = id.to_string();
         self.bd_run(move |beads| beads.set_state(&bead, State::Running));
-        match self.agents.get_mut(id) {
-            Some(a) if a.alive => {
+        if alive {
+            if let Some(a) = self.agents.get_mut(id) {
                 a.send_prompt(text);
             }
-            _ => {
-                self.remove_agent(id, Outcome::Exited);
-                if let Some(b) = self.bead(id).cloned() {
-                    self.start_agent(b, true, Some(text.to_string()), |app, r| {
-                        if app.report(r).is_some() {
-                            app.rebuilt_status();
-                        }
-                    });
+        } else if let Some(b) = self.bead(id).cloned() {
+            let id = id.to_string();
+            self.start_agent(b, true, Some(text.to_string()), move |app, r| {
+                if app.report(r).is_some() {
+                    app.rebuilt_status();
+                } else {
+                    app.undeliver(&id, was);
                 }
-            }
+            });
         }
+        true
+    }
+
+    fn undeliver(&mut self, id: &str, was: Option<State>) {
+        let now = self.bead(id).and_then(Bead::state);
+        if was != Some(State::Review) || now != Some(State::Running) || self.live(id) {
+            return;
+        }
+        self.edit_local(id, |b| b.set_state_label(was));
+        let bead = id.to_string();
+        self.bd_run(move |beads| beads.set_state(&bead, State::Review));
     }
 
     pub(super) fn relaunch(&mut self, id: &str) {
@@ -223,6 +242,9 @@ impl App {
             }
             self.status = format!("{id} is blocked by {by}, queued in Pending");
             return;
+        }
+        if !self.make_room(id) {
+            return self.no_room(id);
         }
         let run = !matches!(b.state(), Some(State::Review | State::Pr));
         self.status = format!("launching {id}...");

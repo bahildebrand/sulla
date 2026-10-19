@@ -109,6 +109,9 @@ impl Publish {
 impl App {
     pub(super) fn revise(&mut self, bead: &Bead) {
         let id = bead.id.clone();
+        if !self.agents.get(&id).is_some_and(|a| a.alive) && !self.make_room(&id) {
+            return self.no_room(&id);
+        }
         tracing::info!("revising {id} from PR feedback");
         let r = self.start_revision(bead);
         if self.report(r).is_some() {
@@ -500,8 +503,14 @@ impl App {
             "Publishing {id} failed because rebasing onto {onto} hit conflicts. Run `{rebase}`, resolve every conflict while preserving the intent of both sides, finish the rebase, and make sure the build and tests still pass. Do not push or open a PR, sulla publishes again once you are done. When done, run `bd set-state {id} sulla=review --reason \"ready for review\"` then stop and wait.",
             onto = c.base
         );
+        if !self.deliver(id, &text) {
+            self.status = format!(
+                "publishing {id} hit conflicts with {}, and no agent slot is free to resolve them",
+                c.base
+            );
+            return;
+        }
         self.republishing.insert(id.to_string(), top);
-        self.deliver(id, &text);
         self.status = format!(
             "publishing {id} hit conflicts with {}, its agent is resolving them and sulla will publish again",
             c.base

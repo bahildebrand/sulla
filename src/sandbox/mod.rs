@@ -18,6 +18,7 @@ pub enum Outcome {
     Merged,
     Discarded,
     Killed,
+    Evicted,
     Exited,
 }
 
@@ -25,7 +26,7 @@ impl Outcome {
     fn rank(self) -> u8 {
         match self {
             Outcome::Exited => 0,
-            Outcome::Merged | Outcome::Killed => 1,
+            Outcome::Merged | Outcome::Killed | Outcome::Evicted => 1,
             Outcome::Discarded => 2,
         }
     }
@@ -146,6 +147,10 @@ impl Slots {
         self.taken.values().any(|t| *t == slot)
     }
 
+    pub fn holders(&self, slot: usize) -> usize {
+        self.taken.values().filter(|t| **t == slot).count()
+    }
+
     pub fn get(&self, id: &str) -> Option<usize> {
         self.taken.get(id).copied()
     }
@@ -195,6 +200,8 @@ mod tests {
         assert_eq!(s.acquire("a~review", 2), None);
         assert_eq!(s.acquire_with("a~review", "a", 2), Some(0));
         assert_eq!(s.free(2), 0);
+        assert_eq!(s.holders(0), 2);
+        assert_eq!(s.holders(1), 1);
         assert_eq!(s.release("a"), Some(0));
         assert!(s.held(0));
         assert_eq!(s.release("a~review"), Some(0));
@@ -208,6 +215,8 @@ mod tests {
         assert_eq!(Exited.worst(Killed), Killed);
         assert_eq!(Killed.worst(Exited), Killed);
         assert_eq!(Merged.worst(Discarded), Discarded);
+        assert_eq!(Evicted.worst(Exited), Evicted);
+        assert_eq!(Evicted.worst(Discarded), Discarded);
         assert_eq!(Exited.worst(Exited), Exited);
     }
 

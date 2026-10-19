@@ -1072,6 +1072,8 @@ mod tests {
         assert_eq!(decide(Exited, 10, 10, false), Reset::None);
         assert_eq!(decide(Merged, 1, 10, true), Reset::Light);
         assert_eq!(decide(Killed, 9, 10, true), Reset::Light);
+        assert_eq!(decide(Evicted, 1, 10, true), Reset::Light);
+        assert_eq!(decide(Evicted, 10, 10, true), Reset::Hard);
         assert_eq!(decide(Discarded, 1, 10, true), Reset::Hard);
         assert_eq!(decide(Merged, 10, 10, true), Reset::Hard);
         assert_eq!(decide(Killed, 11, 10, true), Reset::Hard);

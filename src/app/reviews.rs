@@ -156,9 +156,16 @@ impl App {
         );
         self.inject_ai(id);
         match json {
-            Some(json) => {
-                self.deliver(id, &json);
+            Some(json) if self.deliver(id, &json) => {
                 self.status = format!("ai review of {id}: {n} comment(s) sent to agent");
+            }
+            Some(_) => {
+                if let Some(r) = self.ai_reviews.get_mut(id) {
+                    r.forwarded = false;
+                }
+                self.status = format!(
+                    "ai review of {id}: {n} comment(s) not sent, no free agent slot (S sends them)"
+                );
             }
             None if out.verdict == Verdict::Approve => {
                 self.status = format!("ai review of {id}: approved, {n} comment(s)");

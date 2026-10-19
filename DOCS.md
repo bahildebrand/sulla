@@ -30,8 +30,9 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Delete** (`dd` on the board) does what Discard does, then permanently deletes the bead with
   `bd delete --force`. Dependents are orphaned rather than deleted.
 - **Kill** (`X`) holds the bead in Pending until released with `s`.
-- On restart, agents still running or in review are resumed via their agent session, so review
-  beads keep their slots ahead of pending work.
+- On restart, running agents are resumed via their agent session. Review beads are resumed only
+  into slots that no pending, stackable or revise work wants, so a restart never puts parked
+  review agents ahead of ready work.
 
 ### Workflow
 
@@ -117,6 +118,20 @@ When recent agent output shows a 429, rate limit or quota error, sulla stops lau
   crashes, merges and restarts. `l` in the inspect popup shows the last 5000 lines.
 
 ## Review
+
+A bead in Review keeps its agent and slot (its container with `sandbox = "incus"`) so feedback,
+checks and AI reviews reuse a warm session. These parked agents do not count toward `max_agents`,
+and they give up their slot on demand: when ready work cannot start because every free slot is
+held by a parked agent, sulla stops the agent parked longest (by time in Review) for each slot
+needed and the status line shows `freed slot from parked <bead> for <bead>`. The slot gets the
+same light reset as after a kill. The bead stays in Review with its worktree, branch and agent
+session, and its agent is resumed into a free slot once no ready work wants one. A bead is never
+evicted while its checks are queued or running, an AI review is launching or running, a publish
+is in flight, or you are typing into its agent.
+
+Feedback (`S`, forwarded AI comments) and `A` on an evicted bead resume its session, evicting
+another parked agent if no slot is free. When every slot holds a working agent, the status line
+says so and the bead stays in Review.
 
 ### AI review
 
@@ -238,9 +253,10 @@ New comments and reviews (approvals excluded) and newly failing checks on an ope
 as unaddressed feedback. With `[pr] auto_revise = true` (the default) the bead moves to
 `sulla:revise`, otherwise only the notification fires and `U` on the board
 queues it. Revise beads are scheduled like pending work, so they wait for a free slot under
-`max_agents`, ordered by priority. Through the whole revision the card stays in Awaiting PR and
-shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review runs
-on it, and `revised` (`Enter` opens the review).
+`max_agents`, ordered by priority, and evict parked Review agents (including `revised` beads
+waiting for `P`) like pending work does. Through the whole revision the card stays in Awaiting PR
+and shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review
+runs on it, and `revised` (`Enter` opens the review).
 
 When a Revise bead is picked, sulla:
 
@@ -257,7 +273,8 @@ When a Revise bead is picked, sulla:
    comment on the PR.
 
 The queued comment ids are then marked addressed so they never retrigger. When the bead shows
-`revised`, read the incremental diff and publish again with `P`: the branch is force pushed with
+`revised`, read the incremental diff and publish again with `P` (if its agent was evicted
+meanwhile, publishing works the same): the branch is force pushed with
 `--force-with-lease` to the existing PR and the bead returns to Awaiting PR. With `reply = true`
 sulla comments on the PR with the pushed commit and what it addressed. That comment carries a
 hidden `<!-- sulla -->` marker so the watcher ignores it. Graphite's stack comment, which `gt submit`
@@ -307,8 +324,8 @@ rerun on the trimmed result.
 
 With `check` set, sulla runs it via `sh -c` in the worktree whenever a Review bead's branch head or
 `git status --porcelain` changes, killing stale runs. One check runs at a time, the rest queue.
-With `sandbox = "incus"` it runs in the bead's container; without one (e.g. after restart) nothing
-starts automatically and `T` runs it on the host.
+With `sandbox = "incus"` it runs in the bead's container; without one (e.g. after restart or once
+its agent was evicted) nothing starts automatically and `T` runs it on the host.
 
 Output goes to `.sulla/checks/<bead>.log`, the result to `<bead>.json` (reused on restart if head
 and status match). Cards show `…chk`, `⟳chk`, `✓chk` or `✗chk`. `m` refuses to merge unless
