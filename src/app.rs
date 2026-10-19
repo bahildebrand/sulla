@@ -98,6 +98,35 @@ pub enum Mode {
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 const RATE_SCAN_EVERY: Duration = Duration::from_secs(1);
 
+#[derive(Default)]
+struct Restacked {
+    moved: Vec<String>,
+    deferred: Vec<String>,
+    stuck: Vec<String>,
+}
+
+impl Restacked {
+    fn summary(&self) -> String {
+        let mut s = String::new();
+        if !self.moved.is_empty() {
+            s.push_str(&format!(", restacked {}", self.moved.join(", ")));
+        }
+        if !self.deferred.is_empty() {
+            s.push_str(&format!(
+                ", {} busy, restacking when idle",
+                self.deferred.join(", ")
+            ));
+        }
+        if !self.stuck.is_empty() {
+            s.push_str(&format!(
+                ", could not restack {} (rebased at merge)",
+                self.stuck.join(", ")
+            ));
+        }
+        s
+    }
+}
+
 pub struct App {
     pub cfg: Config,
     pub base: String,
@@ -119,6 +148,7 @@ pub struct App {
     pub backoff: Backoff,
     rate_seen: HashMap<String, (String, usize)>,
     rate_scanned: Instant,
+    restack_stuck: HashSet<String>,
     notifier: Notifier,
     states: Option<HashMap<String, Option<State>>>,
     pub view: View,
@@ -190,6 +220,7 @@ impl App {
             backoff: Backoff::default(),
             rate_seen: HashMap::new(),
             rate_scanned: Instant::now(),
+            restack_stuck: HashSet::new(),
             view: View::Board,
             parked_review: None,
             ai_reviews: HashMap::new(),
@@ -489,6 +520,7 @@ impl App {
 
     fn reconcile(&mut self) {
         self.reap_reviewers();
+        self.sweep_stacks();
         let known: HashSet<String> = self.agents.keys().cloned().collect();
         let mut orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()
@@ -1558,6 +1590,8 @@ impl App {
                 Ok(()) => format!("{id} was already merged, closed bead"),
                 Err(e) => format!("{id} was already merged but bd close failed: {e}"),
             };
+            let r = self.restack_from(self.git.children(id));
+            self.status.push_str(&r.summary());
             self.view = View::Board;
             return self.mutated();
         }
@@ -1591,38 +1625,64 @@ impl App {
                 Ok(()) => format!("merged {id} into {}", self.base),
                 Err(e) => format!("merged {id} into {} but bd close failed: {e}", self.base),
             };
-            let (moved, stuck) = self.restack_children(id);
-            if !moved.is_empty() {
-                self.status
-                    .push_str(&format!(", restacked {}", moved.join(", ")));
-            }
-            if !stuck.is_empty() {
-                self.status.push_str(&format!(
-                    ", restack conflicts in {} (rebased at merge)",
-                    stuck.join(", ")
-                ));
-            }
+            let r = self.restack_from(self.git.children(id));
+            self.status.push_str(&r.summary());
             self.view = View::Board;
         }
         self.mutated();
     }
 
-    fn restack_children(&mut self, parent: &str) -> (Vec<String>, Vec<String>) {
-        let (mut moved, mut stuck) = (Vec::new(), Vec::new());
-        let mut queue = self.git.children(parent);
+    fn live(&self, id: &str) -> bool {
+        [id.to_string(), agent::review_id(id)]
+            .iter()
+            .any(|k| self.agents.get(k).is_some_and(|a| a.alive))
+    }
+
+    fn restack_from(&mut self, mut queue: Vec<String>) -> Restacked {
+        let mut r = Restacked::default();
         while let Some(c) = queue.pop() {
+            if self.restack_stuck.contains(&c) {
+                continue;
+            }
+            if self.live(&c) {
+                r.deferred.push(c);
+                continue;
+            }
             match self.git.restack(&c, &self.base) {
                 Ok(()) => {
                     queue.extend(self.git.children(&c));
-                    moved.push(c);
+                    r.moved.push(c);
                 }
                 Err(e) => {
                     tracing::warn!("restack of {c} failed: {e:#}");
-                    stuck.push(c);
+                    self.restack_stuck.insert(c.clone());
+                    r.stuck.push(c);
                 }
             }
         }
-        (moved, stuck)
+        r
+    }
+
+    fn sweep_stacks(&mut self) {
+        let mut seeds = Vec::new();
+        for (child, parent) in self.git.stacks() {
+            if self.bead(&parent).is_none_or(|b| b.status != "closed") {
+                continue;
+            }
+            if self.git.unmerged_branch(&parent, &self.base) {
+                tracing::info!("{parent} closed without merging, unstacking {child}");
+                self.git.unstack(&child);
+                continue;
+            }
+            seeds.push(child);
+        }
+        if seeds.is_empty() {
+            return;
+        }
+        let r = self.restack_from(seeds);
+        if !r.moved.is_empty() || !r.stuck.is_empty() {
+            self.status = r.summary().trim_start_matches(", ").to_string();
+        }
     }
 
     fn close_merged(&self, id: &str) -> Result<()> {

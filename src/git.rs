@@ -159,7 +159,7 @@ impl Git {
             .filter(|s| !s.is_empty())
     }
 
-    pub fn children(&self, parent: &str) -> Vec<String> {
+    pub fn stacks(&self) -> Vec<(String, String)> {
         let Ok(out) = run(
             &self.repo,
             &["config", "--get-regexp", r"^sulla\..*\.parent$"],
@@ -170,12 +170,27 @@ impl Git {
             .filter_map(|l| {
                 let (k, v) = l.split_once(' ')?;
                 let id = k.strip_prefix("sulla.")?.strip_suffix(".parent")?;
-                (v.trim() == parent && self.ref_exists(&stack_ref(id))).then(|| id.to_string())
+                self.ref_exists(&stack_ref(id))
+                    .then(|| (id.to_string(), v.trim().to_string()))
             })
             .collect()
     }
 
-    fn unstack(&self, id: &str) {
+    pub fn children(&self, parent: &str) -> Vec<String> {
+        self.stacks()
+            .into_iter()
+            .filter(|(_, p)| p == parent)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub fn unmerged_branch(&self, id: &str, base: &str) -> bool {
+        let br = branch(id);
+        self.branch_exists(&br)
+            && run(&self.repo, &["merge-base", "--is-ancestor", &br, base]).is_err()
+    }
+
+    pub fn unstack(&self, id: &str) {
         let _ = run(&self.repo, &["update-ref", "-d", &stack_ref(id)]);
         let _ = run(&self.repo, &["config", "--unset", &parent_key(id)]);
     }
@@ -207,13 +222,16 @@ impl Git {
         if !wt.join(".git").exists() {
             bail!("no worktree for {id}");
         }
-        let onto = if self.branch_exists(&branch(&parent)) {
+        let onto = if self.unmerged_branch(&parent, base) {
             branch(&parent)
         } else {
             base.to_string()
         };
+        if !run(&wt, &["status", "--porcelain"])?.trim().is_empty() {
+            bail!("{id} has uncommitted changes");
+        }
         let from = self.upstream(id, base);
-        if let Err(e) = run(&wt, &["rebase", "--autostash", "--onto", &onto, &from]) {
+        if let Err(e) = run(&wt, &["rebase", "--onto", &onto, &from]) {
             let _ = run(&wt, &["rebase", "--abort"]);
             return Err(RebaseConflict {
                 base: onto,
@@ -467,6 +485,9 @@ impl Git {
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
+        for c in self.children(id) {
+            self.unstack(&c);
+        }
         self.unstack(id);
         let wt = self.worktree_path(id);
         if wt.exists() {
@@ -569,7 +590,6 @@ mod tests {
         commit(&c, "c.txt");
         let gc = g.ensure_stacked_worktree("gc", "c").unwrap();
         commit(&gc, "gc.txt");
-        std::fs::write(gc.join("wip.txt"), "wip").unwrap();
         assert_eq!(g.children("p"), ["c"]);
 
         let diff = g.diff("c", "main").unwrap();
@@ -583,9 +603,13 @@ mod tests {
         assert_eq!(g.stack_parent("c"), None);
         assert_eq!(g.upstream("c", "main"), "main");
         assert_eq!(g.children("c"), ["gc"]);
+        std::fs::write(gc.join("wip.txt"), "wip").unwrap();
+        assert!(g.restack("gc", "main").is_err());
+        assert!(gc.join("wip.txt").exists());
+        std::fs::remove_file(gc.join("wip.txt")).unwrap();
         g.restack("gc", "main").unwrap();
         assert_eq!(g.stack_parent("gc").as_deref(), Some("c"));
-        assert!(gc.join("wip.txt").exists());
+        std::fs::write(gc.join("wip.txt"), "wip").unwrap();
         let diff = g.diff("gc", "main").unwrap();
         assert!(
             diff.contains("gc.txt") && !diff.contains("b/c.txt"),
@@ -599,6 +623,29 @@ mod tests {
         }
         let n = run(&dir, &["rev-list", "--count", "main"]).unwrap();
         assert_eq!(n.trim(), "7");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn discarding_parent_keeps_its_commits_in_children() {
+        let (dir, g) = scratch("discard");
+        let p = g.ensure_worktree("p", "main").unwrap();
+        std::fs::write(p.join("p.txt"), "p").unwrap();
+        git(&p, &["add", "p.txt"]);
+        git(&p, &["commit", "-qm", "p"]);
+        let c = g.ensure_stacked_worktree("c", "p").unwrap();
+        std::fs::write(c.join("c.txt"), "c").unwrap();
+        git(&c, &["add", "c.txt"]);
+        git(&c, &["commit", "-qm", "c"]);
+
+        g.remove("p").unwrap();
+        assert_eq!(g.stack_parent("c"), None);
+        assert_eq!(g.upstream("c", "main"), "main");
+        let diff = g.diff("c", "main").unwrap();
+        assert!(
+            diff.contains("b/p.txt") && diff.contains("b/c.txt"),
+            "{diff}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
