@@ -347,6 +347,7 @@ pub fn stack_parent<'a>(
     id: &str,
     blocked: &'a HashMap<String, Vec<String>>,
     all: &[Bead],
+    on_pr: bool,
 ) -> Option<&'a str> {
     let [parent] = blocked.get(id)?.as_slice() else {
         return None;
@@ -354,15 +355,24 @@ pub fn stack_parent<'a>(
     all.iter()
         .find(|b| b.id == *parent)
         .filter(|b| {
-            b.status != "closed" && matches!(b.state(), Some(State::Review | State::Reviewing))
+            b.status != "closed"
+                && match b.state() {
+                    Some(State::Review | State::Reviewing) => true,
+                    Some(State::Pr) => on_pr,
+                    _ => false,
+                }
         })
         .map(|_| parent.as_str())
 }
 
-pub fn stackable<'a>(all: &'a [Bead], blocked: &HashMap<String, Vec<String>>) -> Vec<&'a Bead> {
+pub fn stackable<'a>(
+    all: &'a [Bead],
+    blocked: &HashMap<String, Vec<String>>,
+    on_pr: bool,
+) -> Vec<&'a Bead> {
     all.iter()
         .filter(|b| b.status == "open" && b.state().is_none() && b.issue_type != "epic")
-        .filter(|b| stack_parent(&b.id, blocked, all).is_some())
+        .filter(|b| stack_parent(&b.id, blocked, all, on_pr).is_some())
         .collect()
 }
 
@@ -546,10 +556,10 @@ mod tests {
             ),
             ("held".to_string(), vec!["rev".to_string()]),
         ]);
-        assert_eq!(stack_parent("on-rev", &blocked, &all), Some("rev"));
-        assert_eq!(stack_parent("on-run", &blocked, &all), None);
-        assert_eq!(stack_parent("on-both", &blocked, &all), None);
-        let ids: Vec<_> = stackable(&all, &blocked)
+        assert_eq!(stack_parent("on-rev", &blocked, &all, false), Some("rev"));
+        assert_eq!(stack_parent("on-run", &blocked, &all, false), None);
+        assert_eq!(stack_parent("on-both", &blocked, &all, false), None);
+        let ids: Vec<_> = stackable(&all, &blocked, false)
             .iter()
             .map(|b| b.id.as_str())
             .collect();
@@ -606,6 +616,43 @@ mod tests {
         );
         assert!(!map.contains_key("x"));
         assert!(blockers(&all[3], &blocked, &stacked_on).is_empty());
+    }
+
+    #[test]
+    fn stacks_on_awaiting_pr_parent_only_with_pr_workflow() {
+        let mut merged = bead("merged", 1, "2026-01-01T00:00:00Z", &["sulla:pr", "pr:2"]);
+        merged.status = "closed".into();
+        let all = vec![
+            bead("pr", 1, "2026-01-01T00:00:00Z", &["sulla:pr", "pr:1"]),
+            bead("rev", 1, "2026-01-01T00:00:00Z", &["sulla:review"]),
+            merged,
+            bead("on-pr", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("on-rev", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("on-both", 1, "2026-01-01T00:00:00Z", &[]),
+            bead("on-merged", 1, "2026-01-01T00:00:00Z", &[]),
+        ];
+        let blocked = HashMap::from([
+            ("on-pr".to_string(), vec!["pr".to_string()]),
+            ("on-rev".to_string(), vec!["rev".to_string()]),
+            (
+                "on-both".to_string(),
+                vec!["pr".to_string(), "rev".to_string()],
+            ),
+            ("on-merged".to_string(), vec!["merged".to_string()]),
+        ]);
+        assert_eq!(stack_parent("on-pr", &blocked, &all, true), Some("pr"));
+        assert_eq!(stack_parent("on-pr", &blocked, &all, false), None);
+        assert_eq!(stack_parent("on-rev", &blocked, &all, true), Some("rev"));
+        assert_eq!(stack_parent("on-both", &blocked, &all, true), None);
+        assert_eq!(stack_parent("on-merged", &blocked, &all, true), None);
+        let ids = |on_pr| -> Vec<&str> {
+            stackable(&all, &blocked, on_pr)
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect()
+        };
+        assert_eq!(ids(true), ["on-pr", "on-rev"]);
+        assert_eq!(ids(false), ["on-rev"]);
     }
 
     #[test]

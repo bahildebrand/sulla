@@ -52,8 +52,11 @@ the `gh` CLI, configured by the `[pr]` table:
 ### Stacked beads
 
 A Pending bead whose only open blocker is in Review (or under AI review) starts on a branch forked
-from the blocker's branch. The fork point is kept in `refs/sulla/stack/<bead>`, so its diff, log
-and AI review show only its own commits. It cannot merge until the blocker is closed.
+from the blocker's branch. With `workflow = "pr"` it also stacks on a blocker that is Awaiting PR,
+so a chain of dependent beads becomes a chain of stacked PRs. The fork point is kept in
+`refs/sulla/stack/<bead>`, so its diff, log and AI review show only its own commits. It can be
+published while its blocker is Awaiting PR (the PR targets the blocker's branch), but it cannot
+merge locally until the blocker is closed.
 
 When the blocker merges (or is closed after landing in base), its children are rebased onto base,
 and their children onto the new branches, down the chain. Children with a live agent or reviewer

@@ -912,7 +912,7 @@ impl App {
         let busy: HashSet<String> = self.agents.keys().cloned().collect();
         let mut candidates = self.ready.clone();
         candidates.extend(
-            scheduler::stackable(&self.all, &self.blocked)
+            scheduler::stackable(&self.all, &self.blocked, self.cfg.workflow == Workflow::Pr)
                 .into_iter()
                 .filter(|b| self.stack_on(&b.id).is_some())
                 .cloned(),
@@ -1123,7 +1123,8 @@ impl App {
     }
 
     fn stack_on(&self, id: &str) -> Option<String> {
-        scheduler::stack_parent(id, &self.blocked, &self.all)
+        let on_pr = self.cfg.workflow == Workflow::Pr;
+        scheduler::stack_parent(id, &self.blocked, &self.all, on_pr)
             .filter(|p| self.git.has_branch(p))
             .map(String::from)
     }
@@ -1654,13 +1655,15 @@ impl App {
         };
     }
 
+    fn pr_parent(&self, id: &str) -> Option<String> {
+        self.git.stack_parent(id).filter(|p| {
+            self.bead(p)
+                .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
+        })
+    }
+
     fn pr_base(&self, id: &str) -> String {
-        self.git
-            .stack_parent(id)
-            .filter(|p| {
-                self.bead(p)
-                    .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
-            })
+        self.pr_parent(id)
             .map(|p| git::branch(&p))
             .unwrap_or_else(|| self.base.clone())
     }
@@ -1678,20 +1681,20 @@ impl App {
             self.status = format!("every change in {id} is rejected, D discards it");
             return;
         }
-        let base = self.pr_base(&id);
-        if base == self.base {
-            let blockers = self.beads.open_blockers(&id);
-            let Some(blockers) = self.report(blockers) else {
-                return;
-            };
-            if !blockers.is_empty() {
-                self.status = format!(
-                    "cannot publish {id}: blocked by open {}",
-                    blockers.join(", ")
-                );
-                return;
-            }
+        let parent = self.pr_parent(&id);
+        let blockers = self.beads.open_blockers(&id);
+        let Some(mut blockers) = self.report(blockers) else {
+            return;
+        };
+        blockers.retain(|b| Some(b) != parent.as_ref());
+        if !blockers.is_empty() {
+            self.status = format!(
+                "cannot publish {id}: blocked by open {}",
+                blockers.join(", ")
+            );
+            return;
         }
+        let base = self.pr_base(&id);
         let remote = &self.cfg.pr.remote;
         let br = git::branch(&id);
         let msg = match self.bead(&id).and_then(|b| b.label("pr")) {
