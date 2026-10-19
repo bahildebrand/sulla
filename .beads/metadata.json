@@ -1,7 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
+  "dolt_mode": "server",
   "dolt_database": "sulla",
   "project_id": "385209bf-4ac8-4b1b-8c1c-b8d82abc0c33"
 }
