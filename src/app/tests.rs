@@ -429,6 +429,36 @@ fn confirm_publish_names_blockers_below_in_the_stack() {
 }
 
 #[test]
+fn confirm_publish_stacks_onto_a_parent_revising_its_pr() {
+    let mut h = Harness::new(
+        "chain-revising",
+        &[
+            ("a", Some(State::Revise)),
+            ("b", Some(State::Review)),
+            ("c", Some(State::Review)),
+        ],
+    );
+    h.app.all[0].labels.push("pr:7".into());
+    h.stack("b", "a");
+    h.stack("c", "b");
+    h.app.view = View::Progress("c".into());
+    assert_eq!(h.app.publish_chain("c"), chain(&["b", "c"]));
+    assert_eq!(h.app.pr_base("b"), "sulla/a");
+    let blockers = Ok(vec![vec!["a".to_string()], vec!["b".to_string()]]);
+    h.app
+        .confirm_publish("c".into(), chain(&["b", "c"]), blockers);
+    let Mode::Confirm {
+        msg,
+        action: Action::Publish(c),
+    } = &h.app.mode
+    else {
+        panic!("no confirm, status: {}", h.app.status);
+    };
+    assert_eq!(c, &chain(&["b", "c"]));
+    assert!(msg.contains("onto sulla/a"), "{msg}");
+}
+
+#[test]
 fn failed_parent_publish_skips_the_rest_of_the_stack() {
     let review = Some(State::Review);
     let mut h = Harness::new("chain-fail", &[("a", review), ("b", review)]);

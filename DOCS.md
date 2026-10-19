@@ -148,8 +148,8 @@ and its body from that commit's body, so a commit written to the repo's PR conve
 PR description. When that commit's body is empty, the bead description is used as the body
 (followed by `Bead: <bead>`). When the first commit is the one sulla made for uncommitted changes
 (`<bead>: <title>`), the bead title and description are used instead. If an open PR
-already exists for the branch it is reused. A bead stacked on a parent that is itself Awaiting PR
-targets the parent's branch instead of base. The bead gets `pr:<number>`, moves to Awaiting PR and
+already exists for the branch it is reused. A bead stacked on a parent that has an open PR (in
+Awaiting PR, including while that PR is being revised) targets the parent's branch instead of base. The bead gets `pr:<number>`, moves to Awaiting PR and
 its agent and reviewer stop, leaving the worktree and session for later rounds. Publishing again
 force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`. With
 `workflow = "local"`, `P` only shows a status message.
@@ -162,8 +162,8 @@ of any bead on that chain is left besides its own stack parent, the prompt names
 another from the bottom, each exactly as if `P` had been pressed on it once the one below was
 Awaiting PR: the bottom one targets the Awaiting PR parent's branch or base, every other one
 targets the branch below it. Rejected hunks in each bead's review are dropped. If one fails, the
-beads above it are not published and stay in Review. A stack parent in any other state (running,
-under AI review, held) still blocks the publish, and the status line names it.
+beads above it are not published and stay in Review. A stack parent without a PR in any other
+state (running, under AI review, held) still blocks the publish, and the status line names it.
 
 With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of `git push` and
 `gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
