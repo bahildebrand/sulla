@@ -1,8 +1,10 @@
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::health::Probe;
 
@@ -101,6 +103,354 @@ pub fn body(id: &str, description: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub path: Option<String>,
+    pub line: Option<u64>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+impl PrComment {
+    pub fn describe(&self) -> String {
+        let at = match (&self.path, self.line) {
+            (Some(p), Some(l)) => format!(" on {p}:{l}"),
+            (Some(p), None) => format!(" on {p}"),
+            _ => String::new(),
+        };
+        format!("{}{at}: {}", self.author, self.body.trim())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "result", content = "failing")]
+pub enum Checks {
+    #[default]
+    None,
+    Pending,
+    Passing,
+    Failing(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrStatus {
+    pub state: PrState,
+    pub head: String,
+    pub comments: Vec<PrComment>,
+    pub checks: Checks,
+}
+
+#[derive(Deserialize)]
+struct Author {
+    #[serde(default)]
+    login: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawComment {
+    id: String,
+    author: Option<Author>,
+    #[serde(default)]
+    body: String,
+    created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawReview {
+    id: String,
+    author: Option<Author>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    state: String,
+    submitted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+struct RawCheck {
+    #[serde(rename = "__typename", default)]
+    kind: String,
+    name: Option<String>,
+    context: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawView {
+    state: String,
+    #[serde(default)]
+    head_ref_oid: String,
+    #[serde(default)]
+    comments: Vec<RawComment>,
+    #[serde(default)]
+    reviews: Vec<RawReview>,
+    #[serde(default)]
+    status_check_rollup: Option<Vec<RawCheck>>,
+}
+
+#[derive(Deserialize)]
+struct RawUser {
+    #[serde(default)]
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct RawInline {
+    id: u64,
+    user: Option<RawUser>,
+    #[serde(default)]
+    body: String,
+    path: Option<String>,
+    line: Option<u64>,
+    original_line: Option<u64>,
+    created_at: Option<DateTime<Utc>>,
+}
+
+fn author(a: Option<Author>) -> String {
+    a.map(|a| a.login)
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| "ghost".into())
+}
+
+fn review_body(r: &RawReview) -> Option<String> {
+    let body = r.body.trim();
+    if !body.is_empty() {
+        return Some(body.to_string());
+    }
+    match r.state.as_str() {
+        "APPROVED" => Some("approved".into()),
+        "CHANGES_REQUESTED" => Some("changes requested".into()),
+        _ => None,
+    }
+}
+
+fn checks(rollup: &[RawCheck]) -> Checks {
+    if rollup.is_empty() {
+        return Checks::None;
+    }
+    let mut failing = Vec::new();
+    let mut pending = false;
+    for c in rollup {
+        let name = c
+            .name
+            .clone()
+            .or_else(|| c.context.clone())
+            .unwrap_or_else(|| "check".into());
+        if c.kind == "StatusContext" || (c.state.is_some() && c.status.is_none()) {
+            match c.state.as_deref().unwrap_or("") {
+                "FAILURE" | "ERROR" => failing.push(name),
+                "SUCCESS" => {}
+                _ => pending = true,
+            }
+            continue;
+        }
+        if c.status.as_deref() != Some("COMPLETED") {
+            pending = true;
+            continue;
+        }
+        if matches!(
+            c.conclusion.as_deref().unwrap_or(""),
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
+        ) {
+            failing.push(name);
+        }
+    }
+    if !failing.is_empty() {
+        failing.sort();
+        failing.dedup();
+        Checks::Failing(failing)
+    } else if pending {
+        Checks::Pending
+    } else {
+        Checks::Passing
+    }
+}
+
+fn parse_inline(json: &str) -> Result<Vec<PrComment>> {
+    let mut out = Vec::new();
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Vec<RawInline>>() {
+        out.extend(page?.into_iter().map(|c| {
+            PrComment {
+                id: format!("rc{}", c.id),
+                author: c
+                    .user
+                    .map(|u| u.login)
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or_else(|| "ghost".into()),
+                body: c.body,
+                path: c.path,
+                line: c.line.or(c.original_line),
+                created_at: c.created_at,
+            }
+        }));
+    }
+    Ok(out)
+}
+
+fn parse_view(json: &str, inline: Vec<PrComment>) -> Result<PrStatus> {
+    let v: RawView = serde_json::from_str(json)?;
+    let state = match v.state.as_str() {
+        "OPEN" => PrState::Open,
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        s => bail!("unknown PR state {s}"),
+    };
+    let mut comments: Vec<PrComment> = v
+        .comments
+        .into_iter()
+        .map(|c| PrComment {
+            id: c.id,
+            author: author(c.author),
+            body: c.body,
+            path: None,
+            line: None,
+            created_at: c.created_at,
+        })
+        .collect();
+    for r in v.reviews {
+        if let Some(body) = review_body(&r) {
+            comments.push(PrComment {
+                id: r.id,
+                author: author(r.author),
+                body,
+                path: None,
+                line: None,
+                created_at: r.submitted_at,
+            });
+        }
+    }
+    comments.extend(inline);
+    comments.sort_by_key(|c| c.created_at);
+    Ok(PrStatus {
+        state,
+        head: v.head_ref_oid,
+        comments,
+        checks: checks(v.status_check_rollup.as_deref().unwrap_or(&[])),
+    })
+}
+
+pub fn status(repo: &Path, number: u64) -> Result<PrStatus> {
+    let n = number.to_string();
+    let view = gh(
+        repo,
+        &[
+            "pr",
+            "view",
+            &n,
+            "--json",
+            "state,mergedAt,comments,reviews,statusCheckRollup,headRefOid",
+        ],
+    )?;
+    let inline = gh(
+        repo,
+        &[
+            "api",
+            "--paginate",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments"),
+        ],
+    )?;
+    parse_view(&view, parse_inline(&inline)?)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    #[serde(default)]
+    pub comments: Vec<String>,
+    #[serde(default)]
+    pub checks: Checks,
+    #[serde(default)]
+    pub closed: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    pub comments: Vec<PrComment>,
+    pub failing: Option<Vec<String>>,
+    pub closed: bool,
+}
+
+impl Activity {
+    pub fn is_empty(&self) -> bool {
+        self.comments.is_empty() && self.failing.is_none() && !self.closed
+    }
+}
+
+impl Seen {
+    pub fn update(&mut self, s: &PrStatus) -> Activity {
+        let known: HashSet<&str> = self.comments.iter().map(String::as_str).collect();
+        let fresh: Vec<PrComment> = s
+            .comments
+            .iter()
+            .filter(|c| !known.contains(c.id.as_str()))
+            .cloned()
+            .collect();
+        self.comments.extend(fresh.iter().map(|c| c.id.clone()));
+        let failing = match &s.checks {
+            Checks::Failing(names) if self.checks != s.checks => Some(names.clone()),
+            _ => None,
+        };
+        self.checks = s.checks.clone();
+        let closed = s.state == PrState::Closed && !self.closed;
+        self.closed = s.state == PrState::Closed;
+        Activity {
+            comments: fresh,
+            failing,
+            closed,
+        }
+    }
+}
+
+pub struct Watch {
+    path: PathBuf,
+    pub beads: BTreeMap<String, Seen>,
+}
+
+impl Watch {
+    pub fn load(path: PathBuf) -> Self {
+        let beads = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, beads }
+    }
+
+    pub fn save(&self) -> Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&self.beads)?)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+pub fn notes(number: u64, a: &Activity) -> String {
+    let mut lines = Vec::new();
+    if !a.comments.is_empty() {
+        lines.push(format!("PR #{number} review activity:"));
+        lines.extend(a.comments.iter().map(|c| format!("- {}", c.describe())));
+    }
+    if let Some(names) = &a.failing {
+        lines.push(format!("PR #{number} checks failing: {}", names.join(", ")));
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +469,99 @@ mod tests {
         assert_eq!(pr.map(|p| p.number), Some(3));
         assert_eq!(parse_list("[]").unwrap(), None);
         assert_eq!(parse_list("").unwrap(), None);
+    }
+    const VIEW: &str = r#"{
+        "state": "OPEN",
+        "mergedAt": null,
+        "headRefOid": "abc123",
+        "comments": [
+            {"id": "IC_1", "author": {"login": "alice"}, "body": "looks off", "createdAt": "2026-10-18T10:00:00Z"}
+        ],
+        "reviews": [
+            {"id": "PRR_1", "author": {"login": "bob"}, "body": "", "state": "COMMENTED", "submittedAt": "2026-10-18T09:00:00Z"},
+            {"id": "PRR_2", "author": {"login": "bob"}, "body": "", "state": "CHANGES_REQUESTED", "submittedAt": "2026-10-18T11:00:00Z"}
+        ],
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": ""},
+            {"__typename": "StatusContext", "context": "ci/legacy", "state": "ERROR"}
+        ]
+    }"#;
+
+    const INLINE: &str = r#"[{"id": 7, "user": {"login": "carol"}, "body": "rename", "path": "src/a.rs", "line": null, "original_line": 12, "created_at": "2026-10-18T10:30:00Z"}][{"id": 8, "user": null, "body": "nit", "path": "src/b.rs", "line": 3, "created_at": "2026-10-18T12:00:00Z"}]"#;
+
+    fn status_of(view: &str) -> PrStatus {
+        parse_view(view, parse_inline(INLINE).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parses_view_into_status() {
+        let s = status_of(VIEW);
+        assert_eq!(s.state, PrState::Open);
+        assert_eq!(s.head, "abc123");
+        let ids: Vec<_> = s.comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["IC_1", "rc7", "PRR_2", "rc8"]);
+        assert_eq!(s.comments[1].describe(), "carol on src/a.rs:12: rename");
+        assert_eq!(s.comments[2].body, "changes requested");
+        assert_eq!(s.comments[3].author, "ghost");
+        assert_eq!(
+            s.checks,
+            Checks::Failing(vec!["ci/legacy".into(), "test".into()])
+        );
+    }
+
+    #[test]
+    fn classifies_checks_and_states() {
+        let merged = r#"{"state":"MERGED","statusCheckRollup":[{"__typename":"CheckRun","name":"b","status":"QUEUED","conclusion":""},{"__typename":"StatusContext","context":"c","state":"SUCCESS"}]}"#;
+        let s = parse_view(merged, Vec::new()).unwrap();
+        assert_eq!(s.state, PrState::Merged);
+        assert_eq!(s.checks, Checks::Pending);
+        let s = parse_view(r#"{"state":"CLOSED","statusCheckRollup":[{"__typename":"CheckRun","name":"b","status":"COMPLETED","conclusion":"SKIPPED"}]}"#, Vec::new()).unwrap();
+        assert_eq!(s.state, PrState::Closed);
+        assert_eq!(s.checks, Checks::Passing);
+        let s = parse_view(r#"{"state":"OPEN","statusCheckRollup":null}"#, Vec::new()).unwrap();
+        assert_eq!(s.checks, Checks::None);
+        assert!(parse_view(r#"{"state":"WEIRD"}"#, Vec::new()).is_err());
+        assert!(parse_inline("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reports_only_new_comments_and_check_changes() {
+        let mut seen = Seen::default();
+        let s = status_of(VIEW);
+        let a = seen.update(&s);
+        assert_eq!(a.comments.len(), 4);
+        assert_eq!(a.failing, Some(vec!["ci/legacy".into(), "test".into()]));
+        assert!(!a.closed);
+        assert!(seen.update(&s).is_empty());
+
+        let json = serde_json::to_string(&seen).unwrap();
+        let mut seen: Seen = serde_json::from_str(&json).unwrap();
+        let mut more = s.clone();
+        more.comments.push(PrComment {
+            id: "IC_2".into(),
+            author: "dave".into(),
+            body: "ping".into(),
+            path: None,
+            line: None,
+            created_at: None,
+        });
+        more.checks = Checks::Pending;
+        let a = seen.update(&more);
+        assert_eq!(
+            a.comments.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["IC_2"]
+        );
+        assert_eq!(a.failing, None);
+        assert_eq!(seen.checks, Checks::Pending);
+
+        more.checks = Checks::Failing(vec!["test".into()]);
+        more.state = PrState::Closed;
+        let a = seen.update(&more);
+        assert_eq!(a.failing, Some(vec!["test".into()]));
+        assert!(a.closed);
+        assert!(seen.update(&more).is_empty());
+        assert_eq!(notes(4, &a), "PR #4 checks failing: test");
     }
 }

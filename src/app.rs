@@ -22,7 +22,7 @@ use crate::filter::Filter;
 use crate::git::{self, DiffStat, Git, RebaseConflict};
 use crate::health::{self, Probe, Tool};
 use crate::notify::Notifier;
-use crate::pr;
+use crate::pr::{self, PrState, PrStatus};
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Idle, Snapshot, fmt_duration};
@@ -41,6 +41,7 @@ pub enum Event {
     CheckDone(checks::Done),
     Usage(usage::Report),
     Health(Vec<Tool>),
+    Pr(String, u64, Result<PrStatus, String>),
 }
 
 pub enum View {
@@ -208,6 +209,8 @@ pub struct App {
     rate_scanned: Instant,
     restack_stuck: HashMap<String, Option<String>>,
     notifier: Notifier,
+    pub pr_watch: pr::Watch,
+    pr_refresh: Option<Sender<()>>,
     pub stalls: HashMap<String, Stall>,
     stall_checked: Option<Instant>,
     budget_runs: HashMap<String, budget::Run>,
@@ -259,6 +262,15 @@ impl App {
             Duration::from_secs(cfg.poll_secs.max(1)),
             tx.clone(),
         );
+        let pr_refresh = (cfg.workflow == Workflow::Pr).then(|| {
+            scheduler::spawn_pr_watcher(
+                beads.clone(),
+                repo.clone(),
+                Duration::from_secs(cfg.pr.poll_secs.max(1)),
+                tx.clone(),
+            )
+        });
+        let pr_watch = pr::Watch::load(repo.join(".sulla").join("pr-watch.json"));
         let usage_watch = usage::spawn(Duration::from_secs(cfg.poll_secs.max(1)), tx.clone());
         let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
         backends.insert(
@@ -275,6 +287,8 @@ impl App {
         );
         Ok(Self {
             notifier: Notifier::new(cfg.notify.clone()),
+            pr_watch,
+            pr_refresh,
             stalls: HashMap::new(),
             stall_checked: None,
             budget_runs: HashMap::new(),
@@ -694,6 +708,15 @@ impl App {
                                 && (t != Trigger::Review || b.state() == Some(State::Review))
                         })
                 });
+                let before = self.pr_watch.beads.len();
+                self.pr_watch
+                    .beads
+                    .retain(|id, _| all.iter().any(|b| b.id == *id && b.status != "closed"));
+                if self.pr_watch.beads.len() != before
+                    && let Err(e) = self.pr_watch.save()
+                {
+                    tracing::warn!("pr watch: {e:#}");
+                }
                 self.over_budget.retain(|id, _| {
                     all.iter().any(|b| {
                         b.id == *id && b.status != "closed" && b.state() == Some(State::Held)
@@ -730,6 +753,7 @@ impl App {
                 self.run_usage = r.run;
             }
             Event::Health(tools) => self.health = Some(tools),
+            Event::Pr(id, number, r) => self.on_pr(&id, number, r),
         }
     }
 
@@ -1513,6 +1537,102 @@ impl App {
             self.parked_review = None;
             self.view = View::Board;
             self.status = format!("published {id} as PR #{} {}", created.number, created.url);
+            if let Some(tx) = &self.pr_refresh {
+                let _ = tx.send(());
+            }
+        }
+        self.mutated();
+    }
+
+    fn on_pr(&mut self, id: &str, number: u64, r: Result<PrStatus, String>) {
+        let s = match r {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("pr #{number} for {id}: {e}");
+                return;
+            }
+        };
+        let n = number.to_string();
+        let Some(title) = self
+            .bead(id)
+            .filter(|b| {
+                b.status != "closed"
+                    && b.state() == Some(State::Pr)
+                    && b.label("pr") == Some(n.as_str())
+            })
+            .map(|b| b.title.clone())
+        else {
+            return;
+        };
+        if s.state == PrState::Merged {
+            return self.pr_merged(id, number);
+        }
+        let seen = self.pr_watch.beads.entry(id.to_string()).or_default();
+        let before = seen.clone();
+        let activity = seen.update(&s);
+        if *seen != before
+            && let Err(e) = self.pr_watch.save()
+        {
+            tracing::warn!("pr watch: {e:#}");
+        }
+        if activity.is_empty() {
+            return;
+        }
+        let notes = pr::notes(number, &activity);
+        if !notes.is_empty() {
+            let r = self.beads.append_notes(id, &notes);
+            self.report(r);
+        }
+        let mut what = Vec::new();
+        if activity.closed {
+            what.push("closed without merging".to_string());
+        }
+        match activity.comments.len() {
+            0 => {}
+            1 => what.push("1 new comment".into()),
+            c => what.push(format!("{c} new comments")),
+        }
+        if activity.failing.is_some() {
+            what.push("checks failing".into());
+        }
+        let what = what.join(", ");
+        self.status = format!("PR #{number} for {id}: {what}");
+        self.notify(Trigger::Pr, id, &format!("{title}: PR #{number} {what}"));
+    }
+
+    fn pr_merged(&mut self, id: &str, number: u64) {
+        self.stop_check(id);
+        self.remove_agent(&agent::review_id(id), Outcome::Merged);
+        self.remove_agent(id, Outcome::Merged);
+        let children = self.git.children(id);
+        let r = self.git.retire(id, &self.base);
+        if self.report(r).is_none() {
+            return self.mutated();
+        }
+        self.status = match self.close_with(id, &format!("merged via PR #{number}")) {
+            Ok(()) => format!("PR #{number} merged, closed {id}"),
+            Err(e) => format!("PR #{number} merged but bd close of {id} failed: {e}"),
+        };
+        if self.pr_watch.beads.remove(id).is_some()
+            && let Err(e) = self.pr_watch.save()
+        {
+            tracing::warn!("pr watch: {e:#}");
+        }
+        self.notifier.clear(id);
+        if self.viewing().as_deref() == Some(id) {
+            self.parked_review = None;
+            self.view = View::Board;
+        }
+        if !children.is_empty() {
+            let onto = self
+                .git
+                .fetch_base(&self.cfg.pr.remote, &self.base)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("fetch {}: {e:#}", self.base);
+                    self.base.clone()
+                });
+            let r = self.restack_onto(children, onto);
+            self.status.push_str(&r.summary());
         }
         self.mutated();
     }
@@ -2234,7 +2354,11 @@ impl App {
             .any(|k| self.agents.get(k).is_some_and(|a| a.alive))
     }
 
-    fn restack_from(&mut self, mut queue: Vec<String>) -> Restacked {
+    fn restack_from(&mut self, queue: Vec<String>) -> Restacked {
+        self.restack_onto(queue, self.base.clone())
+    }
+
+    fn restack_onto(&mut self, mut queue: Vec<String>, onto: String) -> Restacked {
         let mut r = Restacked::default();
         while let Some(c) = queue.pop() {
             let fp = self.git.fingerprint(&c);
@@ -2246,7 +2370,7 @@ impl App {
                 r.deferred.push(c);
                 continue;
             }
-            match self.git.restack(&c, &self.base) {
+            match self.git.restack(&c, &onto) {
                 Ok(()) => {
                     queue.extend(self.git.children(&c));
                     r.moved.push(c);
@@ -2287,7 +2411,10 @@ impl App {
     }
 
     fn close_merged(&self, id: &str) -> Result<()> {
-        let reason = "merged by sulla";
+        self.close_with(id, "merged by sulla")
+    }
+
+    fn close_with(&self, id: &str, reason: &str) -> Result<()> {
         self.beads.close(id, reason).or_else(|e| {
             tracing::warn!("bd close {id} failed, retrying with --force: {e:#}");
             self.beads.force_close(id, reason)

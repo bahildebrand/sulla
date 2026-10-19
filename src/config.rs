@@ -92,6 +92,7 @@ pub enum Trigger {
     Stalled,
     Waiting,
     Budget,
+    Pr,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +114,7 @@ impl Default for NotifyConfig {
                 Trigger::Stalled,
                 Trigger::Waiting,
                 Trigger::Budget,
+                Trigger::Pr,
             ],
             cooldown_secs: 60,
             notify_send: "notify-send".into(),

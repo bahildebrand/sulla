@@ -445,6 +445,33 @@ impl Git {
         run(&self.repo, &args).map(drop)
     }
 
+    pub fn fetch_base(&self, remote: &str, base: &str) -> Result<String> {
+        run(&self.repo, &["fetch", "--quiet", remote, base])?;
+        let r = format!("refs/remotes/{remote}/{base}");
+        self.rev(&r)?;
+        Ok(r)
+    }
+
+    pub fn retire(&self, id: &str, base: &str) -> Result<()> {
+        let br = branch(id);
+        if self.branch_exists(&br) {
+            let up = self.upstream(id, base);
+            let merged_base = run(&self.repo, &["merge-base", &up, &br])?
+                .trim()
+                .to_string();
+            let merged_head = self.head(id)?;
+            run(
+                &self.repo,
+                &["update-ref", &merged_ref(id, "base"), &merged_base],
+            )?;
+            run(
+                &self.repo,
+                &["update-ref", &merged_ref(id, "head"), &merged_head],
+            )?;
+        }
+        self.remove(id)
+    }
+
     pub fn commit_pending(&self, id: &str, message: &str) -> Result<()> {
         let wt = self.worktree_path(id);
         if !wt.join(".git").exists() {
@@ -644,6 +671,70 @@ mod tests {
         assert_eq!(pushed(), g.head("p-1").ok());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&remote).unwrap();
+    }
+
+    #[test]
+    fn retire_records_merge_and_children_restack_onto_remote_base() {
+        let (dir, g) = scratch("retire");
+        let remote = dir.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        git(&dir, &["init", "-q", "--bare", &remote.to_string_lossy()]);
+        git(
+            &dir,
+            &["remote", "add", "origin", &remote.to_string_lossy()],
+        );
+        git(&dir, &["push", "-q", "origin", "main"]);
+        let wt = g.ensure_worktree("p", "main").unwrap();
+        std::fs::write(wt.join("p.txt"), "p\n").unwrap();
+        g.commit_pending("p", "p: work").unwrap();
+        let cwt = g.ensure_stacked_worktree("c", "p").unwrap();
+        std::fs::write(cwt.join("c.txt"), "c\n").unwrap();
+        g.commit_pending("c", "c: work").unwrap();
+
+        let squash = dir.with_extension("squash");
+        let _ = std::fs::remove_dir_all(&squash);
+        git(
+            &dir,
+            &[
+                "clone",
+                "-q",
+                "-b",
+                "main",
+                &remote.to_string_lossy(),
+                &squash.to_string_lossy(),
+            ],
+        );
+        std::fs::write(squash.join("p.txt"), "p\n").unwrap();
+        git(&squash, &["add", "p.txt"]);
+        git(
+            &squash,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "p (#1)",
+            ],
+        );
+        git(&squash, &["push", "-q", "origin", "main"]);
+
+        let children = g.children("p");
+        g.retire("p", "main").unwrap();
+        assert!(!wt.exists());
+        assert!(!g.branch_exists("sulla/p"));
+        assert!(g.merged_diff("p").unwrap().contains("p.txt"));
+        assert_eq!(children, ["c"]);
+
+        let onto = g.fetch_base("origin", "main").unwrap();
+        g.restack("c", &onto).unwrap();
+        assert_eq!(g.stack_parent("c"), None);
+        let log = run(&cwt, &["log", "--format=%s", &format!("{onto}..HEAD")]).unwrap();
+        assert_eq!(log.trim(), "c: work");
+        for d in [&dir, &remote, &squash] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
     }
 
     #[test]

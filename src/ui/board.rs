@@ -11,6 +11,7 @@ use crate::agent::{self, Stall};
 use crate::app::App;
 use crate::beads::{Bead, Column, State};
 use crate::checks::Check;
+use crate::pr::Checks;
 use crate::ui::review;
 
 fn badge(app: &App, b: &Bead) -> Span<'static> {
@@ -46,6 +47,29 @@ fn conflict(app: &App, b: &Bead) -> Span<'static> {
 
 fn check_badge(app: &App, b: &Bead) -> Span<'static> {
     app.checks.get(&b.id).map_or(Span::raw(""), Check::badge)
+}
+
+fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
+    let Some(seen) = app.pr_watch.beads.get(&b.id) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    if !seen.comments.is_empty() {
+        spans.push(Span::styled(
+            format!("✉{} ", seen.comments.len()),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    if seen.closed {
+        spans.push(Span::styled("closed ", Style::new().fg(Color::Red)));
+    }
+    spans.push(match seen.checks {
+        Checks::None => Span::raw(""),
+        Checks::Pending => Span::styled("⟳ci ", Style::new().fg(Color::Yellow)),
+        Checks::Passing => Span::styled("✓ci ", Style::new().fg(Color::Green)),
+        Checks::Failing(_) => Span::styled("✗ci ", Style::new().fg(Color::Red)),
+    });
+    spans
 }
 
 fn marker(app: &App, b: &Bead) -> Span<'static> {
@@ -95,6 +119,7 @@ fn headline(app: &App, b: &Bead, base: Style) -> Line<'static> {
     ];
     if let Some(n) = b.label("pr") {
         spans.push(Span::styled(format!("#{n} "), Style::new().fg(Color::Blue)));
+        spans.extend(pr_badges(app, b));
     }
     spans.extend(highlighted(
         &b.title,

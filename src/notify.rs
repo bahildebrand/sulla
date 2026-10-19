@@ -107,6 +107,7 @@ fn message(trigger: Trigger, id: &str, title: &str) -> (String, String) {
         Trigger::Stalled => "stalled",
         Trigger::Waiting => "waiting for input",
         Trigger::Budget => "over budget, held",
+        Trigger::Pr => "has PR activity",
     };
     (format!("sulla: {id} {what}"), title.to_string())
 }

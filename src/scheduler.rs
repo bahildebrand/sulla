@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -7,6 +8,7 @@ use crate::app::Event;
 use crate::beads::{Bead, Beads, State};
 use crate::conflicts::{Conflict, Scanner};
 use crate::git::{DiffStat, Git};
+use crate::pr;
 
 pub struct Snapshot {
     pub taken: Instant,
@@ -66,6 +68,43 @@ pub fn spawn_poller(
                 .map_err(|e| e.to_string());
             if tx.send(Event::Snapshot(snap)).is_err() {
                 return;
+            }
+            match refresh_rx.recv_timeout(every) {
+                Ok(()) => while refresh_rx.try_recv().is_ok() {},
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    });
+    refresh_tx
+}
+
+pub fn watched_prs(all: &[Bead]) -> Vec<(String, u64)> {
+    all.iter()
+        .filter(|b| b.status != "closed" && b.state() == Some(State::Pr))
+        .filter_map(|b| Some((b.id.clone(), b.label("pr")?.parse().ok()?)))
+        .collect()
+}
+
+pub fn spawn_pr_watcher(
+    beads: Beads,
+    repo: PathBuf,
+    every: Duration,
+    tx: Sender<Event>,
+) -> Sender<()> {
+    let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
+    std::thread::spawn(move || {
+        loop {
+            match beads.list_all() {
+                Ok(all) => {
+                    for (id, number) in watched_prs(&all) {
+                        let r = pr::status(&repo, number).map_err(|e| e.to_string());
+                        if tx.send(Event::Pr(id, number, r)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("pr watcher: {e:#}"),
             }
             match refresh_rx.recv_timeout(every) {
                 Ok(()) => while refresh_rx.try_recv().is_ok() {},

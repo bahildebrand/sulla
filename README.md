@@ -76,7 +76,7 @@ env = {}                  # extra env passed to agents in containers
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
-on = ["review", "stalled", "waiting", "budget"]
+on = ["review", "stalled", "waiting", "budget", "pr"]
 cooldown_secs = 60        # min gap between repeat notifications for one bead
 notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
@@ -105,7 +105,8 @@ Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
 ## Notifications
 
 Sulla notifies when a bead moves to Ready for Review, an agent stalls, an agent goes over its
-budget, or an agent rings the terminal bell (waiting on input). Opening the bead's progress or review view clears its flag.
+budget, an agent rings the terminal bell (waiting on input), or a watched PR gets new comments,
+failing checks or is closed without merging (`pr`). Opening the bead's progress or review view clears its flag.
 Notifications are skipped for the bead you are currently viewing.
 
 - `bell` rings the terminal bell in the terminal running sulla.

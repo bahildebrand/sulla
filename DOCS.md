@@ -124,6 +124,27 @@ its agent and reviewer stop, leaving the worktree and session for later rounds. 
 force pushes with `--force-with-lease`. Cards show the PR number as `#<number>`. With
 `workflow = "local"`, `P` only shows a status message.
 
+### Watching PRs
+
+With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR every
+`[pr] poll_secs` (default 120) with `gh pr view <n> --json state,mergedAt,comments,reviews,statusCheckRollup,headRefOid`
+plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments.
+
+- **Merged**: the bead is closed with reason `merged via PR #<n>`, its agent and reviewer stop,
+  and its worktree and branch are removed (the diff stays viewable in Done). Beads stacked on it
+  are restacked onto `<remote>/<base>` after a fetch (local base if the fetch fails).
+- **Closed without merging**: a `pr` notification fires and a status message is shown. The bead
+  stays in Awaiting PR.
+- **New comments, reviews or failing checks**: new items are appended to the bead's notes (which
+  the agent prompt includes) as `PR #<n> review activity:` and `PR #<n> checks failing: <names>`,
+  and a `pr` notification fires. Reviews with an empty body count only when they approve or
+  request changes.
+
+Seen comment and review ids, the last checks result and the closed flag are kept per bead in
+`.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the number of PR
+comments seen, `⟳ci`, `✓ci` or `✗ci` for the checks result and `closed` when the PR was closed.
+Publishing triggers an immediate poll.
+
 ### Rejecting hunks
 
 `n` rejects the hunk under the cursor, `y` accepts it, and the cursor moves on like `git add -p`.
