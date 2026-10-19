@@ -44,6 +44,7 @@ pub enum Event {
     Usage(usage::Report),
     Health(Vec<Tool>),
     Pr(String, u64, Result<PrStatus, String>),
+    Inspected(String, Result<String>),
 }
 
 pub enum Suspend {
@@ -829,6 +830,7 @@ impl App {
             }
             Event::Health(tools) => self.health = Some(tools),
             Event::Pr(id, number, r) => self.on_pr(&id, number, r),
+            Event::Inspected(id, r) => self.on_inspected(id, r),
         }
     }
 
@@ -3257,36 +3259,66 @@ impl App {
     }
 
     fn inspect(&mut self, id: String) {
-        let r = self.beads.show_text(&id);
-        if let Some(mut text) = self.report(r) {
-            if let Some(u) = self.usage.get(&id) {
-                text = format!("{}\n\nUSAGE\n  {}\n", text.trim_end(), u.detail());
-            }
-            if let Some(b) = self.budget_status(&id) {
-                text = format!("{}\n\nBUDGET\n  {b}\n", text.trim_end());
-            }
-            if let Some(m) = self.over_budget.get(&id) {
-                text = format!("{}\n\nHELD\n  {m}\n", text.trim_end());
-            }
-            self.mode = Mode::Inspect {
-                id,
-                text,
-                scroll: 0,
-            };
+        let mut sections = Vec::new();
+        if let Some(u) = self.usage.get(&id) {
+            sections.push(("USAGE", u.detail()));
         }
+        if let Some(b) = self.budget_status(&id) {
+            sections.push(("BUDGET", b));
+        }
+        if let Some(m) = self.over_budget.get(&id) {
+            sections.push(("HELD", m.clone()));
+        }
+        self.load_inspect(id, move |beads, id| {
+            let mut text = beads.show_text(id)?;
+            for (heading, body) in sections {
+                text = format!("{}\n\n{heading}\n  {body}\n", text.trim_end());
+            }
+            Ok(text)
+        });
     }
 
     fn show_timeline(&mut self, id: String) {
-        let r = self
-            .bead(&id)
-            .cloned()
-            .map_or_else(|| self.beads.show(&id), Ok)
-            .and_then(|b| Ok((self.beads.events(&id)?, self.beads.comments(&id)?, b)));
-        if let Some((events, comments, bead)) = self.report(r) {
+        let cached = self.bead(&id).cloned();
+        self.load_inspect(id, move |beads, id| {
+            let bead = cached.map_or_else(|| beads.show(id), Ok)?;
+            let events = beads.events(id)?;
+            let comments = beads.comments(id)?;
             let t = timeline::build(&bead, &events, &comments, Utc::now());
+            Ok(timeline::render(&bead, &t))
+        });
+    }
+
+    fn load_inspect<F>(&mut self, id: String, load: F)
+    where
+        F: FnOnce(&Beads, &str) -> Result<String> + Send + 'static,
+    {
+        self.status = format!("loading {id}...");
+        let beads = self.beads.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = load(&beads, &id);
+            let _ = tx.send(Event::Inspected(id, r));
+        });
+    }
+
+    fn on_inspected(&mut self, id: String, r: Result<String>) {
+        let waiting = matches!(self.view, View::Board)
+            && match &self.mode {
+                Mode::Normal => self.selected().is_some_and(|b| b.id == id),
+                Mode::Inspect { id: open, .. } => *open == id,
+                _ => false,
+            };
+        if !waiting {
+            return;
+        }
+        if self.status == format!("loading {id}...") {
+            self.status.clear();
+        }
+        if let Some(text) = self.report(r) {
             self.mode = Mode::Inspect {
                 id,
-                text: timeline::render(&bead, &t),
+                text,
                 scroll: 0,
             };
         }
@@ -3329,7 +3361,14 @@ impl App {
             KeyCode::Char('p') => return self.open_progress(self.agent_key(&id)),
             KeyCode::Char('r') => return self.open_review(id),
             KeyCode::Char('l') => return self.show_log(id),
-            KeyCode::Char('h') => return self.show_timeline(id),
+            KeyCode::Char('h') => {
+                self.mode = Mode::Inspect {
+                    id: id.clone(),
+                    text,
+                    scroll,
+                };
+                return self.show_timeline(id);
+            }
             _ => {}
         }
         self.mode = Mode::Inspect {
