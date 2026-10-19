@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 pub const ACTOR: &str = "sulla";
 const STATE_DIM: &str = "sulla";
+pub const STATE_EVENT_PREFIX: &str = "State change: sulla → ";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Bead {
@@ -53,19 +54,22 @@ struct Blocked {
     blocked_by: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct BeadComment {
+#[derive(Debug, Clone, Deserialize)]
+pub struct Comment {
     #[serde(default)]
-    text: String,
-    created_at: Option<DateTime<Utc>>,
+    pub text: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+fn parse_comments(json: &str) -> Result<Vec<Comment>> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(json)?)
 }
 
 fn newest_comment(json: &str) -> Result<Option<String>> {
-    if json.trim().is_empty() {
-        return Ok(None);
-    }
-    let list: Vec<BeadComment> = serde_json::from_str(json)?;
-    Ok(list
+    Ok(parse_comments(json)?
         .into_iter()
         .enumerate()
         .max_by_key(|(i, c)| (c.created_at, *i))
@@ -73,12 +77,13 @@ fn newest_comment(json: &str) -> Result<Option<String>> {
 }
 
 fn stamp_state_changes(all: &mut [Bead]) {
-    let prefix = format!("State change: {STATE_DIM} → ");
     let mut latest: HashMap<(String, String), DateTime<Utc>> = HashMap::new();
     for e in all.iter().filter(|b| b.issue_type == "event") {
-        let (Some(parent), Some(state), Some(at)) =
-            (&e.parent, e.title.strip_prefix(&prefix), e.created_at)
-        else {
+        let (Some(parent), Some(state), Some(at)) = (
+            &e.parent,
+            e.title.strip_prefix(STATE_EVENT_PREFIX),
+            e.created_at,
+        ) else {
             continue;
         };
         let t = latest
@@ -282,6 +287,18 @@ impl Beads {
 
     pub fn show_text(&self, id: &str) -> Result<String> {
         self.run(&["show", id])
+    }
+
+    pub fn comments(&self, id: &str) -> Result<Vec<Comment>> {
+        parse_comments(&self.run(&["comments", id, "--json"])?)
+    }
+
+    pub fn events(&self, id: &str) -> Result<Vec<Bead>> {
+        Ok(self
+            .json(&["list", "--parent", id, "--all", "--json", "-n", "0"])?
+            .into_iter()
+            .filter(|b| b.issue_type == "event")
+            .collect())
     }
 
     pub fn latest_comment(&self, id: &str) -> Result<Option<String>> {

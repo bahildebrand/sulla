@@ -11,6 +11,7 @@ mod notify;
 mod presets;
 mod sandbox;
 mod scheduler;
+mod timeline;
 mod ui;
 mod usage;
 

@@ -24,6 +24,7 @@ use crate::notify::Notifier;
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Snapshot, fmt_duration};
+use crate::timeline;
 use crate::ui::keys;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
 use crate::usage::{self, Usage, Watch};
@@ -2387,6 +2388,22 @@ impl App {
         }
     }
 
+    fn show_timeline(&mut self, id: String) {
+        let r = self
+            .bead(&id)
+            .cloned()
+            .map_or_else(|| self.beads.show(&id), Ok)
+            .and_then(|b| Ok((self.beads.events(&id)?, self.beads.comments(&id)?, b)));
+        if let Some((events, comments, bead)) = self.report(r) {
+            let t = timeline::build(&bead, &events, &comments, Utc::now());
+            self.mode = Mode::Inspect {
+                id,
+                text: timeline::render(&bead, &t),
+                scroll: 0,
+            };
+        }
+    }
+
     fn inspect_key(&mut self, k: KeyEvent, id: String, text: String, mut scroll: u16) {
         let pending = self.pending.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -2404,6 +2421,7 @@ impl App {
             KeyCode::Char('p') => return self.open_progress(self.agent_key(&id)),
             KeyCode::Char('r') => return self.open_review(id),
             KeyCode::Char('l') => return self.show_log(id),
+            KeyCode::Char('h') => return self.show_timeline(id),
             _ => {}
         }
         self.mode = Mode::Inspect {
@@ -2422,6 +2440,7 @@ impl App {
                 _ => self.open_progress(self.agent_key(&b.id)),
             },
             KeyCode::Char('i') => self.inspect(b.id),
+            KeyCode::Char('H') => self.show_timeline(b.id),
             KeyCode::Char('e') => self.request_edit(&b.id),
             KeyCode::Char('p') => self.open_progress(self.agent_key(&b.id)),
             KeyCode::Char('V') => self.start_review(&b.id),
