@@ -39,10 +39,11 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   bead goes back to In Progress. With `approve` (or no comments) it stays in Review. Missing or
   unparseable output leaves the bead in Review with a status message.
 - The board card and the Review header show `✓ai` (approve) or `✎ai` (changes). In the Review
-  view AI comments appear inline in cyan, prefixed `ai:`. Forwarded ones are read-only history
-  (`ai (sent):`). Unsent ones (approve) can be kept, edited with `C`, deleted with `x`, and sent
-  with `S` along with your own. They are cleared when a new AI review starts, when you send
-  feedback, or when the bead goes back to running for another reason.
+  view AI comments appear inline in cyan, prefixed `ai:` (or `ai (sent):` once forwarded). All
+  of them can be kept, edited with `C`, deleted with `x`, and sent with `S` along with your own.
+  Comments whose line is no longer in the diff move to their file header, or to the first file
+  when the file is gone. They are cleared when a new AI review starts, when you send feedback,
+  or when the bead goes back to running for another reason.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
 - Discarding deletes the worktree and branch and holds the bead, so it can be re-run from scratch.

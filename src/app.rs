@@ -673,10 +673,11 @@ impl App {
     }
 
     fn inject_ai(&mut self, id: &str) {
-        let ai: Vec<Comment> = match self.ai_reviews.get(id) {
-            Some(r) if !r.forwarded => r.comments.clone(),
-            _ => Vec::new(),
-        };
+        let ai: Vec<Comment> = self
+            .ai_reviews
+            .get(id)
+            .map(|r| r.comments.clone())
+            .unwrap_or_default();
         let open = match &mut self.view {
             View::Review(d) => Some(d),
             _ => None,
@@ -695,9 +696,7 @@ impl App {
         let View::Review(d) = &self.view else {
             return;
         };
-        if let Some(r) = self.ai_reviews.get_mut(&d.id)
-            && !r.forwarded
-        {
+        if let Some(r) = self.ai_reviews.get_mut(&d.id) {
             r.comments = d.comments.iter().filter(|c| c.ai).cloned().collect();
         }
     }

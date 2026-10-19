@@ -299,14 +299,25 @@ impl Diff {
         }
     }
 
-    fn comment_matches(c: &Comment, file: &FileDiff, i: usize, l: &DLine) -> bool {
-        if c.file != file.name {
-            return false;
-        }
+    pub fn comment_pos(&self, c: &Comment) -> Option<(usize, usize)> {
+        let Some(fi) = self.files.iter().position(|f| f.name == c.file) else {
+            return (!self.files.is_empty()).then_some((0, 0));
+        };
         if c.old.is_none() && c.new.is_none() {
-            return i == 0;
+            return Some((fi, 0));
         }
-        c.old == l.old && c.new == l.new
+        let li = self.files[fi]
+            .lines
+            .iter()
+            .position(|l| l.old == c.old && l.new == c.new)
+            .unwrap_or(0);
+        Some((fi, li))
+    }
+
+    fn cursor_pos(&self) -> Option<(usize, usize)> {
+        let f = self.files.get(self.sel)?;
+        f.lines.get(f.cursor)?;
+        Some((self.sel, f.cursor))
     }
 
     pub fn comment_target(&self) -> Option<(&FileDiff, &DLine)> {
@@ -368,28 +379,25 @@ impl Diff {
     }
 
     pub fn comment_at_cursor(&self) -> Option<usize> {
-        let f = self.files.get(self.sel)?;
-        let l = f.lines.get(f.cursor)?;
+        let pos = self.cursor_pos()?;
         self.comments
             .iter()
-            .position(|c| Self::comment_matches(c, f, f.cursor, l))
+            .position(|c| self.comment_pos(c) == Some(pos))
     }
 
     pub fn delete_comments_at_cursor(&mut self) -> usize {
-        let Some(f) = self.files.get(self.sel) else {
+        let Some(pos) = self.cursor_pos() else {
             return 0;
         };
-        let Some(l) = f.lines.get(f.cursor) else {
-            return 0;
-        };
+        let keep: Vec<bool> = self
+            .comments
+            .iter()
+            .map(|c| self.comment_pos(c) != Some(pos))
+            .collect();
         let before = self.comments.len();
-        self.comments
-            .retain(|c| !Self::comment_matches(c, f, f.cursor, l));
+        let mut keep = keep.into_iter();
+        self.comments.retain(|_| keep.next().unwrap_or(true));
         before - self.comments.len()
-    }
-
-    pub fn comment_count(&self, file: &str) -> usize {
-        self.comments.iter().filter(|c| c.file == file).count()
     }
 
     pub fn feedback(&self) -> Option<String> {
@@ -476,9 +484,10 @@ pub fn render(
             ));
         }
     }
-    let history: &[Comment] = match ai {
-        Some(r) if r.forwarded => &r.comments,
-        _ => &[],
+    let ai_label = if ai.is_some_and(|r| r.forwarded) {
+        "ai (sent)"
+    } else {
+        "ai"
     };
     let block = Block::bordered().title(Line::from(spans));
     if diff.files.is_empty() {
@@ -490,13 +499,18 @@ pub fn render(
     let [left, right] =
         Layout::horizontal([Constraint::Length(side), Constraint::Fill(1)]).areas(area);
 
+    let pos: Vec<Option<(usize, usize)>> =
+        diff.comments.iter().map(|c| diff.comment_pos(c)).collect();
     let items: Vec<ListItem> = diff
         .files
         .iter()
-        .map(|x| {
+        .enumerate()
+        .map(|(fi, x)| {
             let base = x.name.rsplit('/').next().unwrap_or(&x.name);
-            let n =
-                diff.comment_count(&x.name) + history.iter().filter(|c| c.file == x.name).count();
+            let n = pos
+                .iter()
+                .filter(|p| p.is_some_and(|(f, _)| f == fi))
+                .count();
             let mut spans = vec![Span::raw(base.to_string())];
             if n > 0 {
                 spans.push(Span::styled(
@@ -542,13 +556,14 @@ pub fn render(
             style,
             inner_w,
         );
-        for c in diff
+        for (c, _) in diff
             .comments
             .iter()
-            .filter(|c| Diff::comment_matches(c, file, i, l))
+            .zip(&pos)
+            .filter(|(_, p)| **p == Some((diff.sel, i)))
         {
             let (text, color) = if c.ai {
-                (format!("▍ ai: {}", c.text), Color::Cyan)
+                (format!("▍ {ai_label}: {}", c.text), Color::Cyan)
             } else {
                 (format!("▍ {}", c.text), Color::Magenta)
             };
@@ -558,19 +573,6 @@ pub fn render(
                 11,
                 &text,
                 Style::new().fg(color).add_modifier(Modifier::BOLD),
-                inner_w,
-            );
-        }
-        for c in history
-            .iter()
-            .filter(|c| Diff::comment_matches(c, file, i, l))
-        {
-            wrap_into(
-                &mut rows,
-                Span::raw("           "),
-                11,
-                &format!("▍ ai (sent): {}", c.text),
-                Style::new().fg(Color::Blue),
                 inner_w,
             );
         }
@@ -651,7 +653,6 @@ mod tests {
         assert_eq!(c[1]["old_line"], 1);
         assert_eq!(c[1]["new_line"], serde_json::Value::Null);
         assert_eq!(c[1]["comment"], "why \"removed\"?");
-        assert_eq!(d.comment_count("src/a.rs"), 2);
         assert_eq!(d.delete_comments_at_cursor(), 1);
         d.set_cursor(6);
         assert_eq!(d.delete_comments_at_cursor(), 1);
@@ -801,5 +802,29 @@ mod tests {
         d.set_cursor(0);
         assert_eq!(d.comment_at_cursor(), Some(0));
         assert_eq!(d.delete_comments_at_cursor(), 1);
+    }
+
+    #[test]
+    fn stale_comments_fall_back_to_file_header() {
+        let mut d = Diff::parse("x", SAMPLE);
+        let stale = |file: &str| Comment {
+            file: file.into(),
+            old: None,
+            new: Some(42),
+            snippet: String::new(),
+            text: "stale".into(),
+            ai: true,
+        };
+        d.comments.push(stale("b.txt"));
+        d.comments.push(stale("gone.rs"));
+        assert_eq!(d.comment_pos(&d.comments[0]), Some((1, 0)));
+        assert_eq!(d.comment_pos(&d.comments[1]), Some((0, 0)));
+        d.set_cursor(0);
+        assert_eq!(d.comment_at_cursor(), Some(1));
+        d.next_file();
+        d.set_cursor(0);
+        assert_eq!(d.comment_at_cursor(), Some(0));
+        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.comments.len(), 1);
     }
 }
