@@ -382,6 +382,11 @@ impl Beads {
             .map(drop)
     }
 
+    pub fn delete(&self, id: &str) -> Result<()> {
+        self.run(&["delete", id, "--force", "--actor", ACTOR])
+            .map(drop)
+    }
+
     pub fn open_blockers(&self, id: &str) -> Result<Vec<String>> {
         Ok(self
             .show(id)?

@@ -206,6 +206,7 @@ const HELP: &[(&str, &str)] = &[
     ("+ -", "raise / lower priority"),
     ("X", "kill agent and hold bead, or stop ai reviewer"),
     ("D", "discard worktree + branch, hold bead"),
+    ("dd", "delete bead permanently (also worktree + branch)"),
     ("F", "retry from scratch with a note for the agent"),
     ("s", "release held or backlog bead to pending"),
     ("S", "release every backlog bead to pending"),

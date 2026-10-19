@@ -26,6 +26,8 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
+- **Delete** (`dd` on the board) does what Discard does, then permanently deletes the bead with
+  `bd delete --force`. Dependents are orphaned rather than deleted.
 - **Kill** (`X`) holds the bead in Pending until released with `s`.
 - On restart, agents still running or in review are resumed via their agent session, so review
   beads keep their slots ahead of pending work.

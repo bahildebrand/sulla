@@ -130,6 +130,7 @@ pub enum Action {
     Publish(String),
     ResolveConflicts(String),
     Discard(String),
+    Delete(String),
     Quit,
 }
 
@@ -2533,6 +2534,7 @@ impl App {
             Action::Publish(id) => self.publish(&id),
             Action::ResolveConflicts(id) => self.resolve_conflicts(&id),
             Action::Discard(id) => self.discard(&id),
+            Action::Delete(id) => self.delete(&id),
         }
     }
 
@@ -2643,6 +2645,32 @@ impl App {
             .and_then(|_| self.beads.unclaim(id));
         if self.report(r).is_some() {
             self.status = format!("discarded {id}, held in Pending (s to release)");
+        }
+        let mut r = Restacked::default();
+        self.sync_graphite(&mut r, &children, None);
+        self.status.push_str(&r.summary());
+        self.view = View::Board;
+        self.mutated();
+    }
+
+    fn confirm_delete(&mut self, id: String) {
+        self.mode = Mode::Confirm {
+            msg: format!(
+                "Delete {id} permanently: kill agent, delete worktree, branch and bead? y/n"
+            ),
+            action: Action::Delete(id),
+        };
+    }
+
+    fn delete(&mut self, id: &str) {
+        self.stop_check(id);
+        self.remove_agent(id, Outcome::Discarded);
+        self.failed.remove(id);
+        let children = self.git.children(id);
+        self.untrack(id);
+        let r = self.git.discard(id).and_then(|_| self.beads.delete(id));
+        if self.report(r).is_some() {
+            self.status = format!("deleted {id}");
         }
         let mut r = Restacked::default();
         self.sync_graphite(&mut r, &children, None);
@@ -3133,6 +3161,12 @@ impl App {
             KeyCode::Char('g') if pending == Some('g') => *row = 0,
             KeyCode::Char('g') => self.pending = Some('g'),
             KeyCode::Char('G') => *row = len.saturating_sub(1),
+            KeyCode::Char('d') if pending == Some('d') => {
+                if let Some(b) = self.selected() {
+                    self.confirm_delete(b.id);
+                }
+            }
+            KeyCode::Char('d') => self.pending = Some('d'),
             KeyCode::Char('z') => self.zoom = !self.zoom,
             KeyCode::Esc if self.zoom => self.zoom = false,
             KeyCode::Esc if self.filter.is_active() => {
