@@ -45,6 +45,7 @@ use config::Config;
     about = "Keyboard-first TUI for scheduling, steering and merging coding agents"
 )]
 struct Args {
+    /// Path to the repo, defaults to the current directory
     #[arg(short = 'C', long, default_value = ".", global = true)]
     repo: PathBuf,
     #[arg(long)]
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
     }
     beads::Beads::new(&repo)
         .list_all()
-        .wrap_err("bd is not usable here, run `sulla init` in the repo")?;
+        .wrap_err("bd is not usable here, run `bd init` in the repo")?;
     let _guard = init_logging()?;
 
     let (tx, rx) = channel();

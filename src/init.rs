@@ -1,8 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
-use std::process::Command;
 
-use color_eyre::{Result, eyre::bail};
+use color_eyre::{Result, eyre::WrapErr};
 
 use crate::beads::Beads;
 use crate::config::{AgentKind, Config, SandboxKind, Workflow};
@@ -215,54 +214,15 @@ fn inherited_table() -> Result<toml::Table> {
     Ok(t)
 }
 
-fn ensure_git<R: BufRead, W: Write>(
-    p: &mut Prompter<R, W>,
-    dir: &Path,
-) -> Result<std::path::PathBuf> {
-    if let Ok(repo) = git::toplevel(dir) {
-        return Ok(repo);
-    }
-    if !p.yes(
-        &format!("{} is not a git repository. Run git init", dir.display()),
-        true,
-    )? {
-        bail!("sulla needs a git repository");
-    }
-    if !Command::new("git")
-        .arg("init")
-        .current_dir(dir)
-        .status()?
-        .success()
-    {
-        bail!("git init failed");
-    }
-    git::toplevel(dir)
-}
-
-fn ensure_beads<R: BufRead, W: Write>(p: &mut Prompter<R, W>, repo: &Path) -> Result<()> {
-    if Beads::new(repo).list_all().is_ok() {
-        p.say("beads: already set up")?;
-        return Ok(());
-    }
-    if !p.yes("beads is not set up here. Run bd init", true)? {
-        p.say("skipping bd init, sulla will not start until it is run")?;
-        return Ok(());
-    }
-    match Command::new("bd").arg("init").current_dir(repo).status() {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => bail!("bd init failed: {s}"),
-        Err(e) => bail!("could not run bd, is it installed? {e}"),
-    }
-}
-
 pub fn run(dir: &Path) -> Result<()> {
     let stdin = std::io::stdin();
     let mut p = Prompter::new(stdin.lock(), std::io::stdout());
-    p.say("Setting up sulla. Press enter to keep the value in brackets.")?;
-
-    let repo = ensure_git(&mut p, dir)?;
+    let repo = git::toplevel(dir).wrap_err("not a git repository, run `git init` first")?;
+    Beads::new(&repo)
+        .list_all()
+        .wrap_err("bd is not usable here, run `bd init` first")?;
     Git::new(repo.clone()).ensure_ignored()?;
-    ensure_beads(&mut p, &repo)?;
+    p.say("Setting up sulla. Press enter to keep the value in brackets.")?;
 
     let cfg = Config::load(&repo)?;
     let path = Config::repo_path(&repo);
