@@ -25,6 +25,12 @@ pub struct Bead {
     pub created_at: Option<DateTime<Utc>>,
     pub closed_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(skip)]
+    pub state_changed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub dependencies: Vec<Dependency>,
 }
 
@@ -62,6 +68,27 @@ fn newest_comment(json: &str) -> Result<Option<String>> {
         .enumerate()
         .max_by_key(|(i, c)| (c.created_at, *i))
         .map(|(_, c)| c.text))
+}
+
+fn stamp_state_changes(all: &mut [Bead]) {
+    let prefix = format!("State change: {STATE_DIM} → ");
+    let mut latest: HashMap<(String, String), DateTime<Utc>> = HashMap::new();
+    for e in all.iter().filter(|b| b.issue_type == "event") {
+        let (Some(parent), Some(state), Some(at)) =
+            (&e.parent, e.title.strip_prefix(&prefix), e.created_at)
+        else {
+            continue;
+        };
+        let t = latest
+            .entry((parent.clone(), state.trim().to_string()))
+            .or_insert(at);
+        *t = (*t).max(at);
+    }
+    for b in all.iter_mut() {
+        if let Some(s) = b.state() {
+            b.state_changed_at = latest.get(&(b.id.clone(), s.as_str().to_string())).copied();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +153,16 @@ impl Bead {
                 "held" => Some(State::Held),
                 _ => None,
             })
+    }
+
+    pub fn state_since(&self) -> Option<DateTime<Utc>> {
+        if self.status == "closed" {
+            return self.closed_at.or(self.updated_at);
+        }
+        self.state()
+            .and(self.state_changed_at)
+            .or(self.updated_at)
+            .or(self.created_at)
     }
 
     pub fn open_blockers(&self) -> Vec<&str> {
@@ -196,11 +233,9 @@ impl Beads {
     }
 
     pub fn list_all(&self) -> Result<Vec<Bead>> {
-        Ok(self
-            .json(&["list", "--all", "--json", "-n", "0"])?
-            .into_iter()
-            .filter(Bead::is_work)
-            .collect())
+        let mut all = self.json(&["list", "--all", "--json", "-n", "0"])?;
+        stamp_state_changes(&mut all);
+        Ok(all.into_iter().filter(Bead::is_work).collect())
     }
 
     pub fn ready(&self) -> Result<Vec<Bead>> {
@@ -416,6 +451,29 @@ mod tests {
         assert_eq!(newest_comment(json).unwrap().as_deref(), Some("tie"));
         assert_eq!(newest_comment("[]").unwrap(), None);
         assert_eq!(newest_comment("").unwrap(), None);
+    }
+
+    #[test]
+    fn state_since_uses_latest_matching_state_change() {
+        let mut all = vec![
+            bead(
+                r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:running"],"updated_at":"2026-10-19T05:00:00Z"}"#,
+            ),
+            bead(
+                r#"{"id":"a.1","title":"State change: sulla → running","status":"closed","issue_type":"event","parent":"a","created_at":"2026-10-19T01:00:00Z"}"#,
+            ),
+            bead(
+                r#"{"id":"a.2","title":"State change: sulla → review","status":"closed","issue_type":"event","parent":"a","created_at":"2026-10-19T02:00:00Z"}"#,
+            ),
+            bead(
+                r#"{"id":"a.3","title":"State change: sulla → running","status":"closed","issue_type":"event","parent":"a","created_at":"2026-10-19T03:00:00Z"}"#,
+            ),
+            bead(r#"{"id":"b","title":"t","status":"open","updated_at":"2026-10-19T04:00:00Z"}"#),
+        ];
+        stamp_state_changes(&mut all);
+        let at = |s: &str| s.parse::<DateTime<Utc>>().ok();
+        assert_eq!(all[0].state_since(), at("2026-10-19T03:00:00Z"));
+        assert_eq!(all[4].state_since(), at("2026-10-19T04:00:00Z"));
     }
 
     #[test]

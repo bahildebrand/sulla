@@ -165,6 +165,44 @@ impl vt100::Callbacks for Bell {
     }
 }
 
+fn is_box_char(c: char) -> bool {
+    ('\u{2500}'..='\u{257f}').contains(&c)
+}
+
+fn is_chrome(l: &str) -> bool {
+    let t = l.trim();
+    t.starts_with(['╭', '╰', '┌', '└'])
+        || (!t.is_empty() && t.chars().all(|c| is_box_char(c) || c == '-'))
+}
+
+pub fn last_line(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut end = lines.len();
+    if let Some(bottom) = lines.iter().rposition(|l| is_chrome(l))
+        && lines.len() - bottom <= 12
+    {
+        end = bottom;
+        let mut gap = 0;
+        for j in (0..bottom).rev() {
+            if is_chrome(lines[j]) {
+                end = j;
+                gap = 0;
+            } else {
+                gap += 1;
+                if gap > 3 {
+                    break;
+                }
+            }
+        }
+    }
+    lines[..end]
+        .iter()
+        .rev()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || is_box_char(c)))
+        .find(|l| !l.is_empty())
+        .map(String::from)
+}
+
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
@@ -313,6 +351,10 @@ impl Agent {
         self.parser.lock().unwrap().screen_mut().set_scrollback(0);
     }
 
+    pub fn last_line(&self) -> Option<String> {
+        last_line(&self.parser.lock().unwrap().screen().contents())
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -351,6 +393,16 @@ mod tests {
         assert!(!p.callbacks().0);
         p.process(b"\x07");
         assert!(p.callbacks().0);
+    }
+
+    #[test]
+    fn last_line_skips_input_box_and_footer() {
+        let boxed = "● Reading files\n  ⎿ src/app.rs\n\n● Running tests\n\n╭──────╮\n│ >    │\n╰──────╯\n  ? for shortcuts\n\n";
+        assert_eq!(last_line(boxed).as_deref(), Some("● Running tests"));
+        let ruled = "● Done editing\n─────────\n> \n─────────\n  model · 12k tokens\n";
+        assert_eq!(last_line(ruled).as_deref(), Some("● Done editing"));
+        assert_eq!(last_line("plain\noutput  \n\n").as_deref(), Some("output"));
+        assert_eq!(last_line("\n \n"), None);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crossterm::event::{
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
 use crate::config::{AgentKind, Config, Trigger};
-use crate::git::{Git, RebaseConflict};
+use crate::git::{DiffStat, Git, RebaseConflict};
 use crate::notify::Notifier;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Snapshot};
@@ -108,6 +108,7 @@ pub struct App {
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
     pub blocked: HashMap<String, Vec<String>>,
+    pub diffstats: HashMap<String, DiffStat>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
     notifier: Notifier,
@@ -142,6 +143,8 @@ impl App {
         let beads = Beads::new(&repo);
         let refresh = scheduler::spawn_poller(
             beads.clone(),
+            git.clone(),
+            base.clone(),
             Duration::from_secs(cfg.poll_secs.max(1)),
             tx.clone(),
         );
@@ -169,6 +172,7 @@ impl App {
             all: Vec::new(),
             ready: Vec::new(),
             blocked: HashMap::new(),
+            diffstats: HashMap::new(),
             agents: HashMap::new(),
             failed: HashSet::new(),
             view: View::Board,
@@ -382,6 +386,7 @@ impl App {
                 self.all = s.all;
                 self.ready = s.ready;
                 self.blocked = s.blocked;
+                self.diffstats = s.diffstats;
                 let all = &self.all;
                 self.ai_reviews.retain(|id, r| {
                     all.iter().any(|b| {

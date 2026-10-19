@@ -18,6 +18,8 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
 - Each agent runs `copilot --yolo` (or `claude --dangerously-skip-permissions` with `agent = "claude"`) in a PTY inside `.sulla/worktrees/<bead>` on branch
   `sulla/<bead>`, with `RUSTC_WRAPPER=kache`.
 - Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`, `sulla:review`, `sulla:held`.
+- Each board card shows an activity line: time in the current state, the worktree diff stat
+  (`+adds -dels Nf`, refreshed every poll), and the last line of agent output.
 - Beads in Backlog are never auto scheduled. Pick Backlog or Pending in the new bead popup, `B` moves a bead to Backlog, `s` releases it to Pending and `S` releases the whole Backlog.
   The scheduler only starts Pending beads whose dependencies are closed. Blocked beads show `⊘`.
 - `A` on a blocked bead without a worktree does not launch it. It is released to Pending and

@@ -5,15 +5,36 @@ use std::time::{Duration, Instant};
 use crate::agent;
 use crate::app::Event;
 use crate::beads::{Bead, Beads, State};
+use crate::git::{DiffStat, Git};
 
 pub struct Snapshot {
     pub taken: Instant,
     pub all: Vec<Bead>,
     pub ready: Vec<Bead>,
     pub blocked: HashMap<String, Vec<String>>,
+    pub diffstats: HashMap<String, DiffStat>,
 }
 
-pub fn spawn_poller(beads: Beads, every: Duration, tx: Sender<Event>) -> Sender<()> {
+fn diffstats(git: &Git, base: &str, all: &[Bead]) -> HashMap<String, DiffStat> {
+    all.iter()
+        .filter(|b| b.status != "closed")
+        .filter_map(|b| match git.diff_stat(&b.id, base) {
+            Ok(s) => Some((b.id.clone(), s?)),
+            Err(e) => {
+                tracing::debug!("diff stat {}: {e:#}", b.id);
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn spawn_poller(
+    beads: Beads,
+    git: Git,
+    base: String,
+    every: Duration,
+    tx: Sender<Event>,
+) -> Sender<()> {
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
     std::thread::spawn(move || {
         loop {
@@ -23,6 +44,7 @@ pub fn spawn_poller(beads: Beads, every: Duration, tx: Sender<Event>) -> Sender<
                 .and_then(|all| {
                     Ok(Snapshot {
                         taken,
+                        diffstats: diffstats(&git, &base, &all),
                         all,
                         ready: beads.ready()?,
                         blocked: beads.blocked()?,
@@ -88,6 +110,9 @@ mod tests {
             description: String::new(),
             created_at: Some(created.parse().unwrap()),
             closed_at: None,
+            updated_at: None,
+            parent: None,
+            state_changed_at: None,
             dependencies: Vec::new(),
         }
     }

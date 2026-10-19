@@ -20,6 +20,13 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub files: usize,
+    pub adds: usize,
+    pub dels: usize,
+}
+
 #[derive(Debug)]
 pub struct RebaseConflict {
     pub base: String,
@@ -142,6 +149,31 @@ impl Git {
             out.push_str(&String::from_utf8_lossy(&o.stdout));
         }
         Ok(out)
+    }
+
+    pub fn diff_stat(&self, id: &str, base: &str) -> Result<Option<DiffStat>> {
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            return Ok(None);
+        }
+        let mb = run(&wt, &["merge-base", base, "HEAD"])?;
+        let mut s = DiffStat::default();
+        for l in run(&wt, &["diff", "--numstat", "--no-ext-diff", mb.trim()])?.lines() {
+            let mut cols = l.split('\t');
+            s.files += 1;
+            s.adds += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            s.dels += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        }
+        for f in run(&wt, &["ls-files", "--others", "--exclude-standard"])?.lines() {
+            s.files += 1;
+            if let Ok(bytes) = std::fs::read(wt.join(f))
+                && !bytes.contains(&0)
+            {
+                s.adds += bytes.iter().filter(|b| **b == b'\n').count()
+                    + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+            }
+        }
+        Ok(Some(s))
     }
 
     pub fn log(&self, id: &str, base: &str) -> Result<String> {
@@ -300,6 +332,17 @@ mod tests {
 
         let diff = g.diff("x-1", "main").unwrap();
         assert!(diff.contains("b.txt"));
+        std::fs::write(wt.join("a.txt"), "x\ny\n").unwrap();
+        assert_eq!(
+            g.diff_stat("x-1", "main").unwrap(),
+            Some(DiffStat {
+                files: 2,
+                adds: 3,
+                dels: 1
+            })
+        );
+        git(&wt, &["checkout", "a.txt"]);
+        assert_eq!(g.diff_stat("nope", "main").unwrap(), None);
         assert!(!diff.contains("c.txt"));
 
         git(&wt, &["add", "b.txt"]);

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -29,9 +30,47 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
         None if b.state() == Some(State::Held) => {
             Span::styled("⏸ ", Style::new().fg(Color::Yellow))
         }
-        None if b.status == "blocked" || app.blocked.contains_key(&b.id) => Span::styled("⊘ ", Style::new().fg(Color::Red)),
+        None if b.status == "blocked" || app.blocked.contains_key(&b.id) => {
+            Span::styled("⊘ ", Style::new().fg(Color::Red))
+        }
         None => Span::raw("  "),
     }
+}
+
+fn elapsed(secs: i64) -> String {
+    let s = secs.max(0);
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        3600..86400 => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+        _ => format!("{}d{}h", s / 86400, s % 86400 / 3600),
+    }
+}
+
+fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
+    let mut spans = vec![Span::raw("    ")];
+    if let Some(t) = b.state_since() {
+        spans.push(Span::styled(
+            elapsed((now - t).num_seconds()),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    if let Some(d) = app.diffstats.get(&b.id) {
+        spans.extend([
+            Span::styled(format!(" +{}", d.adds), Style::new().fg(Color::Green)),
+            Span::styled(format!(" -{}", d.dels), Style::new().fg(Color::Red)),
+            Span::raw(format!(" {}f", d.files)).dim(),
+        ]);
+    }
+    let id = if b.state() == Some(State::Reviewing) {
+        agent::review_id(&b.id)
+    } else {
+        b.id.clone()
+    };
+    if let Some(l) = app.agents.get(&id).and_then(|a| a.last_line()) {
+        spans.push(Span::raw(format!(" · {l}")).dim());
+    }
+    Line::from(spans)
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -39,19 +78,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         return render_zoomed(f, area, app);
     }
     let cols = app.columns();
+    let now = Utc::now();
     let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
     for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
         let active = i == app.col;
         let items: Vec<ListItem> = beads
             .iter()
             .map(|b| {
-                ListItem::new(Line::from(vec![
-                    marker(app, b),
-                    badge(app, b),
-                    Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
-                    Span::raw(b.title.clone()),
-                    Span::raw(format!(" {}", b.id)).dim(),
-                ]))
+                ListItem::new(vec![
+                    Line::from(vec![
+                        marker(app, b),
+                        badge(app, b),
+                        Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
+                        Span::raw(b.title.clone()),
+                        Span::raw(format!(" {}", b.id)).dim(),
+                    ]),
+                    activity(app, b, now),
+                ])
             })
             .collect();
         let border = if active {
@@ -106,6 +149,7 @@ fn card(app: &App, b: &Bead, width: usize) -> ListItem<'static> {
     }
     meta.retain(|m| !m.is_empty());
     lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(Color::Cyan));
+    lines.push(activity(app, b, Utc::now()));
     let max = width.saturating_sub(4).max(1);
     for l in b
         .description
@@ -155,4 +199,18 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .highlight_style(Style::new().bg(Color::DarkGray));
     let mut state = ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
     f.render_stateful_widget(list, area, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elapsed;
+
+    #[test]
+    fn elapsed_is_compact() {
+        assert_eq!(elapsed(-5), "0s");
+        assert_eq!(elapsed(59), "59s");
+        assert_eq!(elapsed(125), "2m");
+        assert_eq!(elapsed(3 * 3600 + 5 * 60), "3h05m");
+        assert_eq!(elapsed(2 * 86400 + 7 * 3600), "2d7h");
+    }
 }
