@@ -55,6 +55,16 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
         return Vec::new();
     };
     let mut spans = Vec::new();
+    let phase = match b.state() {
+        Some(State::Revise) => Some(("revise queued ", Color::Magenta)),
+        Some(State::Running) => Some(("revising ", Color::Yellow)),
+        Some(State::Reviewing) => Some(("ai reviewing ", Color::Cyan)),
+        Some(State::Review) => Some(("revised ", Color::Green)),
+        _ => None,
+    };
+    if let Some((text, color)) = phase {
+        spans.push(Span::styled(text, Style::new().fg(color).bold()));
+    }
     if !seen.comments.is_empty() {
         spans.push(Span::styled(
             format!("✉{} ", seen.comments.len()),

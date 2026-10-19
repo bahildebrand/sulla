@@ -19,10 +19,11 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
   worktree and branch, and closes the bead.
 - **Publish** (`P` in review, `workflow = "pr"` only) pushes the branch and opens a GitHub PR
   instead of merging. The bead stays open in **Awaiting PR** (`sulla:pr`, plus `pr:<number>`) with
-  its worktree and agent session intact, while the agent is stopped. Awaiting PR beads never count
-  toward `max_agents`, are never scheduled and are not resumed on restart.
-- **Revise** (`sulla:revise`): an Awaiting PR bead with new PR feedback waits in Pending and is
-  picked like any other pending bead (see [Revising from PR feedback](#revising-from-pr-feedback)).
+  its worktree and agent session intact, while the agent is stopped. Beads in `sulla:pr` never
+  count toward `max_agents`, are never scheduled and are not resumed on restart.
+- **Revise** (`sulla:revise`): an Awaiting PR bead with new PR feedback is picked like any other
+  pending bead (see [Revising from PR feedback](#revising-from-pr-feedback)). A bead with a
+  `pr:<number>` label stays in the Awaiting PR column while it is queued, revising or revised.
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
@@ -210,9 +211,11 @@ result and `closed` when the PR was closed. Publishing triggers an immediate pol
 
 New comments and reviews (approvals excluded) and newly failing checks on an open PR are queued
 as unaddressed feedback. With `[pr] auto_revise = true` (the default) the bead moves to
-`sulla:revise` and shows in Pending, otherwise only the notification fires and `U` on the board
+`sulla:revise`, otherwise only the notification fires and `U` on the board
 queues it. Revise beads are scheduled like pending work, so they wait for a free slot under
-`max_agents`, ordered by priority.
+`max_agents`, ordered by priority. Through the whole revision the card stays in Awaiting PR and
+shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review runs
+on it, and `revised` (`Enter` opens the review).
 
 When a Revise bead is picked, sulla:
 
@@ -220,15 +223,16 @@ When a Revise bead is picked, sulla:
    a parent that is still open is restacked onto the parent instead). On conflicts the rebase is
    aborted and the prompt tells the agent to run it and resolve the conflicts first.
 2. Records the rebased HEAD in `refs/sulla/revise/<bead>`. Until the next publish, the Review diff,
-   log and rejected hunks cover only the commits made since then.
+   log, rejected hunks and the card's line counts cover only the changes made since then. While
+   the revision has no commits or uncommitted changes yet they show the whole branch instead.
 3. Resumes the bead's agent session with a prompt listing each comment (author, `file:line`,
    body) and each failing check with the last lines of `gh run view --log-failed` when available.
    The agent is told to address every comment, commit, run the build and tests, run
    `bd set-state <bead> sulla=review --reason "addressed PR feedback"` and stop, and not to push or
    comment on the PR.
 
-The queued comment ids are then marked addressed so they never retrigger. When the bead is back in
-Review, read the incremental diff and publish again with `P`: the branch is force pushed with
+The queued comment ids are then marked addressed so they never retrigger. When the bead shows
+`revised`, read the incremental diff and publish again with `P`: the branch is force pushed with
 `--force-with-lease` to the existing PR and the bead returns to Awaiting PR. With `reply = true`
 sulla comments on the PR with the pushed commit and what it addressed. That comment carries a
 hidden `<!-- sulla -->` marker so the watcher ignores it. Graphite's stack comment, which `gt submit`

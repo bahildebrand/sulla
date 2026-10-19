@@ -231,8 +231,12 @@ impl Bead {
                 .is_none_or(|t| Duration::try_days(retention_days).is_none_or(|r| now - t <= r));
             return recent.then_some(Column::Done);
         }
+        let on_pr = self.label("pr").is_some();
         match self.state() {
             Some(State::Backlog) => Some(Column::Backlog),
+            Some(State::Revise | State::Running | State::Reviewing | State::Review) if on_pr => {
+                Some(Column::AwaitingPr)
+            }
             Some(State::Review) => Some(Column::Review),
             Some(State::Pr) => Some(Column::AwaitingPr),
             Some(State::Revise) => Some(Column::Pending),
@@ -814,7 +818,16 @@ mod tests {
             r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:revise","pr:42"]}"#,
         );
         assert_eq!(r.state(), Some(State::Revise));
-        assert_eq!(r.column(Utc::now(), 3), Some(Column::Pending));
+        assert_eq!(r.column(Utc::now(), 3), Some(Column::AwaitingPr));
+        for s in ["running", "reviewing", "review"] {
+            let b = bead(&format!(
+                r#"{{"id":"a","title":"t","status":"in_progress","labels":["sulla:{s}","pr:42"]}}"#
+            ));
+            assert_eq!(b.column(Utc::now(), 3), Some(Column::AwaitingPr), "{s}");
+        }
+        let held =
+            bead(r#"{"id":"a","title":"t","status":"open","labels":["sulla:held","pr:42"]}"#);
+        assert_eq!(held.column(Utc::now(), 3), Some(Column::Pending));
     }
 
     #[test]

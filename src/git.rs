@@ -298,13 +298,16 @@ impl Git {
 
     pub fn revision(&self, id: &str) -> Option<String> {
         let r = revision_ref(id);
-        (self.ref_exists(&r)
-            && run(
-                &self.worktree_path(id),
-                &["merge-base", "--is-ancestor", &r, "HEAD"],
-            )
-            .is_ok())
-        .then_some(r)
+        if !self.ref_exists(&r) {
+            return None;
+        }
+        let wt = self.worktree_path(id);
+        run(&wt, &["merge-base", "--is-ancestor", &r, "HEAD"]).ok()?;
+        let moved = run(&wt, &["rev-parse", &r, "HEAD"]).is_ok_and(|out| {
+            let mut revs = out.lines();
+            revs.next() != revs.next()
+        });
+        (moved || self.dirty(id).is_ok_and(|s| !s.trim().is_empty())).then_some(r)
     }
 
     fn review_base(&self, id: &str, base: &str) -> Result<String> {
@@ -350,10 +353,9 @@ impl Git {
         if !wt.join(".git").exists() {
             return Ok(None);
         }
-        let up = self.upstream(id, base);
-        let mb = run(&wt, &["merge-base", &up, "HEAD"])?;
+        let mb = self.review_base(id, base)?;
         let mut s = DiffStat::default();
-        for l in run(&wt, &["diff", "--numstat", "--no-ext-diff", mb.trim()])?.lines() {
+        for l in run(&wt, &["diff", "--numstat", "--no-ext-diff", &mb])?.lines() {
             let mut cols = l.split('\t');
             s.files += 1;
             s.adds += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -749,10 +751,19 @@ mod tests {
         assert!(run(&wt, &["merge-base", "--is-ancestor", "main", "HEAD"]).is_ok());
 
         g.mark_revision("r-1").unwrap();
+        let d = g.diff("r-1", "main").unwrap();
+        assert!(d.contains("b.txt"));
+        assert!(g.log("r-1", "main").unwrap().contains("r-1: work"));
+        assert_eq!(g.diff_stat("r-1", "main").unwrap().unwrap().files, 1);
+
         std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+        let d = g.diff("r-1", "main").unwrap();
+        assert!(d.contains("c.txt") && !d.contains("b.txt"));
         g.commit_pending("r-1", "r-1: address feedback").unwrap();
         let d = g.diff("r-1", "main").unwrap();
         assert!(d.contains("c.txt") && !d.contains("b.txt"));
+        let s = g.diff_stat("r-1", "main").unwrap().unwrap();
+        assert_eq!((s.files, s.adds), (1, 1));
         let log = g.log("r-1", "main").unwrap();
         assert!(log.contains("address feedback") && !log.contains("r-1: work"));
 

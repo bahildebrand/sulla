@@ -587,17 +587,16 @@ impl App {
     }
 
     pub fn running_count(&self) -> usize {
-        let now = Utc::now();
         self.agents
             .iter()
             .filter(|(id, a)| a.alive && id.as_str() != CHAT_ID)
             .filter(|(id, _)| {
                 agent::reviewed_bead(id).is_some()
                     || self.bead(id).is_none_or(|b| {
-                        b.state() != Some(State::Reviewing)
+                        b.status != "closed"
                             && !matches!(
-                                b.column(now, i64::MAX),
-                                Some(Column::Review | Column::AwaitingPr | Column::Done)
+                                b.state(),
+                                Some(State::Reviewing | State::Review | State::Pr)
                             )
                     })
             })
@@ -3666,6 +3665,11 @@ impl App {
         self.parked_review = None;
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
+                Column::AwaitingPr
+                    if matches!(b.state(), Some(State::Running | State::Reviewing)) =>
+                {
+                    self.open_progress(self.agent_key(&b.id))
+                }
                 Column::Review | Column::AwaitingPr | Column::Done => self.open_review(b.id),
                 _ => self.open_progress(self.agent_key(&b.id)),
             },
