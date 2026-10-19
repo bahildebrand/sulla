@@ -69,6 +69,14 @@ Requires `git`, `bd`, and either `copilot` or `claude` (Claude Code) on `PATH`.
   changes. `M` force merges anyway. `t` shows the output, `T` reruns.
 - Merging rebases the branch onto base and fast-forwards. No merge commits. The worktree and
   branch are removed and the bead is closed.
+- In Review, `n` rejects the hunk under the cursor and `y` accepts it again, then the cursor
+  jumps to the next hunk, like `git add -p`. On a file header, or with `N`/`Y`, the whole file
+  is rejected or accepted. Rejected hunks are dimmed, and the file list marks files `±` (partly
+  rejected) or `✗` (fully rejected). On merge, pending changes are committed, the rejected
+  hunks are reverse-applied (binary files are restored from the fork point) and committed as
+  `Drop changes rejected in review of <bead>`, then the normal merge runs. If the worktree moved
+  on and a rejected hunk no longer applies, the merge stops and `R` reloads the diff, keeping
+  rejections whose content is unchanged. Checks do not rerun on the trimmed result.
 - Each poll runs `git merge-tree` on every open bead's committed branch against base and against
   every other open bead branch. Beads that would conflict show `⚠` on their card. The zoomed card
   and the Review header name what they conflict with, and conflicting files are marked `⚠` in
@@ -107,7 +115,7 @@ Press `?` in the app for the full list.
 |---|---|
 | Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log), `e` open `$EDITOR` in worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree |
-| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
+| Review | `jk` `Ctrl-d/u` scroll, `]f` `[f` files, `c` comment, `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree (diff reloads on return) |
 | Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:chat [new]` |
 
 ## Config

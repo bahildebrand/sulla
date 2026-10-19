@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use crate::checks::{Check, Status};
 use crate::conflicts::Conflict;
@@ -27,8 +28,67 @@ pub struct DLine {
 
 pub struct FileDiff {
     pub name: String,
+    pub old_name: String,
     pub lines: Vec<DLine>,
     pub cursor: usize,
+    pub rejected: BTreeSet<usize>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Rejection {
+    pub patch: String,
+    pub restore: Vec<String>,
+}
+
+impl Rejection {
+    pub fn is_empty(&self) -> bool {
+        self.patch.is_empty() && self.restore.is_empty()
+    }
+}
+
+impl FileDiff {
+    pub fn units(&self) -> Vec<usize> {
+        if self.name == COMMIT_MSG {
+            return Vec::new();
+        }
+        let hunks: Vec<usize> = (0..self.lines.len())
+            .filter(|&i| self.lines[i].kind == Kind::Hunk)
+            .collect();
+        if hunks.is_empty() { vec![0] } else { hunks }
+    }
+
+    pub fn unit_at(&self, i: usize) -> Option<usize> {
+        let units = self.units();
+        match units.as_slice() {
+            [0] => Some(0),
+            _ => units.into_iter().rev().find(|&u| u <= i),
+        }
+    }
+
+    fn unit_end(&self, start: usize) -> usize {
+        self.units()
+            .into_iter()
+            .find(|&u| u > start)
+            .unwrap_or(self.lines.len())
+    }
+
+    fn unit_text(&self, start: usize) -> String {
+        self.lines[start..self.unit_end(start)]
+            .iter()
+            .skip(usize::from(self.lines[start].kind == Kind::Hunk))
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn line_rejected(&self, i: usize) -> bool {
+        self.unit_at(i).is_some_and(|u| self.rejected.contains(&u))
+    }
+
+    pub fn fully_rejected(&self) -> bool {
+        let units = self.units();
+        !units.is_empty() && units.iter().all(|u| self.rejected.contains(u))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,10 +250,18 @@ impl Diff {
         for l in text.lines() {
             if let Some(rest) = l.strip_prefix("diff --git ") {
                 in_header = true;
+                let name = rest.rsplit(" b/").next().unwrap_or(rest).to_string();
+                let old_name = rest
+                    .rsplit_once(" b/")
+                    .and_then(|(a, _)| a.strip_prefix("a/"))
+                    .unwrap_or(&name)
+                    .to_string();
                 files.push(FileDiff {
-                    name: rest.rsplit(" b/").next().unwrap_or(rest).to_string(),
+                    name,
+                    old_name,
                     lines: Vec::new(),
                     cursor: 0,
+                    rejected: BTreeSet::new(),
                 });
             }
             let Some(file) = files.last_mut() else {
@@ -271,8 +339,10 @@ impl Diff {
             0,
             FileDiff {
                 name: COMMIT_MSG.to_string(),
+                old_name: COMMIT_MSG.to_string(),
                 lines,
                 cursor,
+                rejected: BTreeSet::new(),
             },
         );
         self
@@ -407,6 +477,99 @@ impl Diff {
         feedback_json(&self.id, &self.comments)
     }
 
+    pub fn mark_hunk(&mut self, accept: bool) -> bool {
+        let Some(f) = self.files.get_mut(self.sel) else {
+            return false;
+        };
+        let Some(u) = f.unit_at(f.cursor) else {
+            return self.mark_file(accept);
+        };
+        if accept {
+            f.rejected.remove(&u);
+        } else {
+            f.rejected.insert(u);
+        }
+        match f.units().into_iter().find(|&n| n > u) {
+            Some(n) => f.cursor = n,
+            None => self.next_file(),
+        }
+        true
+    }
+
+    pub fn mark_file(&mut self, accept: bool) -> bool {
+        let Some(f) = self.files.get_mut(self.sel) else {
+            return false;
+        };
+        let units = f.units();
+        if units.is_empty() {
+            return false;
+        }
+        f.rejected = if accept {
+            BTreeSet::new()
+        } else {
+            units.into_iter().collect()
+        };
+        self.next_file();
+        true
+    }
+
+    pub fn rejected_hunks(&self) -> usize {
+        self.files.iter().map(|f| f.rejected.len()).sum()
+    }
+
+    pub fn all_rejected(&self) -> bool {
+        let mut files = self
+            .files
+            .iter()
+            .filter(|f| !f.units().is_empty())
+            .peekable();
+        files.peek().is_some() && files.all(FileDiff::fully_rejected)
+    }
+
+    pub fn rejection(&self) -> Rejection {
+        let mut r = Rejection::default();
+        for f in self.files.iter().filter(|f| !f.rejected.is_empty()) {
+            if f.fully_rejected() {
+                if f.lines.iter().any(|l| l.text.starts_with("Binary files ")) {
+                    r.restore.push(f.old_name.clone());
+                    if f.name != f.old_name {
+                        r.restore.push(f.name.clone());
+                    }
+                    continue;
+                }
+                for l in &f.lines {
+                    r.patch.push_str(&l.text);
+                    r.patch.push('\n');
+                }
+                continue;
+            }
+            let n = &f.name;
+            r.patch
+                .push_str(&format!("diff --git a/{n} b/{n}\n--- a/{n}\n+++ b/{n}\n"));
+            for &u in &f.rejected {
+                for l in &f.lines[u..f.unit_end(u)] {
+                    r.patch.push_str(&l.text);
+                    r.patch.push('\n');
+                }
+            }
+        }
+        r
+    }
+
+    pub fn carry_rejections(&mut self, old: &Diff) {
+        for f in &mut self.files {
+            let Some(o) = old.files.iter().find(|o| o.name == f.name) else {
+                continue;
+            };
+            let gone: BTreeSet<String> = o.rejected.iter().map(|&u| o.unit_text(u)).collect();
+            f.rejected = f
+                .units()
+                .into_iter()
+                .filter(|&u| gone.contains(&f.unit_text(u)))
+                .collect();
+        }
+    }
+
     pub fn adds_dels(&self) -> (usize, usize) {
         self.files
             .iter()
@@ -486,6 +649,13 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
             Style::new().fg(Color::Magenta),
         ),
     ]);
+    let rejected = diff.rejected_hunks();
+    if rejected > 0 {
+        spans.push(Span::styled(
+            format!("✗{rejected} rejected "),
+            Style::new().fg(Color::Red),
+        ));
+    }
     if let Some(r) = ai {
         spans.push(verdict_badge(r));
         if r.forwarded {
@@ -543,6 +713,15 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
                 .count();
             let mut spans = vec![if conflicted.contains(x.name.as_str()) {
                 Span::styled(format!("⚠ {base}"), Style::new().fg(Color::Red))
+            } else if x.fully_rejected() {
+                Span::styled(
+                    format!("✗ {base}"),
+                    Style::new()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                )
+            } else if !x.rejected.is_empty() {
+                Span::styled(format!("± {base}"), Style::new().fg(Color::Yellow))
             } else {
                 Span::raw(base.to_string())
             }];
@@ -573,18 +752,35 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
             cursor_row = rows.len();
         }
         let num = |n: Option<usize>| n.map_or("    ".to_string(), |n| format!("{n:>4}"));
-        let mut style = line_style(l.kind);
+        let rejected = file.line_rejected(i);
+        let mut style = if rejected {
+            Style::new().fg(Color::DarkGray)
+        } else {
+            line_style(l.kind)
+        };
+        if rejected && matches!(l.kind, Kind::Add | Kind::Del) {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
         if i == file.cursor {
             style = style.add_modifier(Modifier::REVERSED);
         }
         let gutter = if matches!(l.kind, Kind::Add | Kind::Del | Kind::Ctx) {
             format!("{} {} ", num(l.old), num(l.new))
+        } else if rejected && file.unit_at(i) == Some(i) {
+            " ✗ reject ".to_string()
         } else {
             "          ".to_string()
         };
         wrap_into(
             &mut rows,
-            Span::styled(gutter, Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                gutter,
+                Style::new().fg(if rejected {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                }),
+            ),
             10,
             &l.text.replace('\t', "    "),
             style,
@@ -642,6 +838,67 @@ mod tests {
         assert_eq!(d.files[0].lines[2].kind, Kind::Meta);
         assert_eq!(d.files[1].lines[3].kind, Kind::Meta);
         assert_eq!(d.files[0].cursor, 4);
+    }
+
+    const TWO_HUNKS: &str = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two\n@@ -9,2 +9,2 @@\n nine\n-ten\n+TEN\ndiff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n";
+
+    #[test]
+    fn rejects_hunks_and_files() {
+        let mut d = Diff::parse("x", TWO_HUNKS).with_commits("commit a\n\nmsg\n");
+        assert!(!d.mark_hunk(false));
+        d.next_file();
+        assert_eq!(d.files[1].cursor, 4);
+        assert!(d.mark_hunk(false));
+        assert_eq!(d.files[1].cursor, 8);
+        assert!(d.files[1].line_rejected(6) && !d.files[1].line_rejected(9));
+        assert!(!d.files[1].line_rejected(1));
+        assert!(d.mark_hunk(true));
+        assert_eq!(d.sel, 2);
+        assert!(d.mark_hunk(false));
+        assert!(d.files[2].fully_rejected());
+        assert_eq!(d.rejected_hunks(), 2);
+        assert!(!d.all_rejected());
+
+        let r = d.rejection();
+        assert_eq!(
+            r.patch,
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two\ndiff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n"
+        );
+        assert_eq!(r.restore, Vec::<String>::new());
+
+        d.sel = 1;
+        d.set_cursor(0);
+        assert!(d.mark_hunk(false));
+        assert!(d.files[1].fully_rejected());
+        assert!(d.all_rejected());
+        let r = d.rejection();
+        assert!(
+            r.patch
+                .starts_with("diff --git a/a.rs b/a.rs\nindex 1..2 100644\n")
+        );
+        assert!(r.patch.ends_with("+TEN\ndiff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n"));
+        d.sel = 1;
+        assert!(d.mark_file(true));
+        assert_eq!(d.rejected_hunks(), 1);
+        let bin = "diff --git a/i.png b/i.png\nindex 1..2 100644\nBinary files a/i.png and b/i.png differ\n";
+        let mut d = Diff::parse("x", bin);
+        d.mark_file(false);
+        assert_eq!(d.rejection().restore, ["i.png"]);
+    }
+
+    #[test]
+    fn rejections_survive_reload_by_content() {
+        let mut d = Diff::parse("x", TWO_HUNKS);
+        d.set_cursor(8);
+        d.mark_hunk(false);
+        let shifted = TWO_HUNKS.replace("@@ -9,2 +9,2 @@", "@@ -12,2 +12,2 @@");
+        let mut fresh = Diff::parse("x", &shifted);
+        fresh.carry_rejections(&d);
+        assert_eq!(fresh.files[0].rejected, BTreeSet::from([8]));
+        let edited = TWO_HUNKS.replace("+TEN", "+Ten");
+        let mut fresh = Diff::parse("x", &edited);
+        fresh.carry_rejections(&d);
+        assert!(fresh.files[0].rejected.is_empty());
     }
 
     #[test]

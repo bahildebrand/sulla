@@ -1236,7 +1236,22 @@ impl App {
         self.mode = Mode::Inspect { id, text, scroll };
     }
 
+    fn review_of(&self, id: &str) -> Option<&Diff> {
+        let open = match &self.view {
+            View::Review(d) => Some(d),
+            _ => None,
+        };
+        [open, self.parked_review.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|d| d.id == id)
+    }
+
     fn request_merge(&mut self, id: String, force: bool) {
+        if self.review_of(&id).is_some_and(Diff::all_rejected) {
+            self.status = format!("every change in {id} is rejected, D discards it");
+            return;
+        }
         let msg = match self.check_blocker(&id) {
             Some(why) if !force => {
                 self.status = format!("{why} for {id}, t shows output, M force merges");
@@ -1247,6 +1262,12 @@ impl App {
                 self.base
             ),
             None => format!("Rebase {id} onto {} and fast-forward merge? y/n", self.base),
+        };
+        let n = self.review_of(&id).map_or(0, Diff::rejected_hunks);
+        let msg = if n > 0 {
+            format!("{n} rejected hunk(s) will be dropped. {msg}")
+        } else {
+            msg
         };
         self.mode = Mode::Confirm {
             msg,
@@ -1893,7 +1914,11 @@ impl App {
         self.stop_check(id);
         let slot = self.take_agent(id);
         let msg = format!("{id}: {title}");
-        let r = self.git.merge(id, &self.base, &msg);
+        let rejection = self.review_of(id).map(Diff::rejection).unwrap_or_default();
+        let r = self
+            .git
+            .drop_rejected(id, &self.base, &msg, &rejection)
+            .and_then(|_| self.git.merge(id, &self.base, &msg));
         let outcome = if r.is_ok() {
             Outcome::Merged
         } else {
@@ -2148,11 +2173,23 @@ impl App {
             return;
         };
         let (id, sel, comments) = (d.id.clone(), d.sel, std::mem::take(&mut d.comments));
-        self.open_review(id);
+        self.reload_review(id);
         if let View::Review(d) = &mut self.view {
             d.comments = comments;
             d.sel = sel.min(d.files.len().saturating_sub(1));
         }
+    }
+
+    fn reload_review(&mut self, id: String) {
+        let r = self.load_diff(&id);
+        let Some(mut d) = self.report(r) else { return };
+        if let View::Review(old) = &self.view
+            && old.id == id
+        {
+            d.carry_rejections(old);
+        }
+        self.view = View::Review(d);
+        self.inject_ai(&id);
     }
 
     fn load_diff(&self, id: &str) -> Result<Diff> {
@@ -2423,8 +2460,21 @@ impl App {
             KeyCode::Char('V') => self.start_review(&id),
             KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
             KeyCode::Char('i') => self.swap_to_agent(true),
-            KeyCode::Char('R') => self.open_review(id),
+            KeyCode::Char('R') => self.reload_review(id),
             KeyCode::Char('e') => self.request_edit(&id),
+            KeyCode::Char(c @ ('y' | 'n' | 'Y' | 'N')) => {
+                let accept = c.eq_ignore_ascii_case(&'y');
+                let ok = if c.is_ascii_uppercase() {
+                    d.mark_file(accept)
+                } else {
+                    d.mark_hunk(accept)
+                };
+                self.status = if ok {
+                    format!("{} hunk(s) rejected", d.rejected_hunks())
+                } else {
+                    "commit messages cannot be rejected".into()
+                };
+            }
             _ => {}
         }
     }

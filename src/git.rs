@@ -1,7 +1,10 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use color_eyre::{Result, eyre::bail};
+
+use crate::ui::review::Rejection;
 
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -330,16 +333,68 @@ impl Git {
         )
     }
 
+    fn commit_all(wt: &Path, message: &str) -> Result<()> {
+        if !run(wt, &["status", "--porcelain"])?.trim().is_empty() {
+            run(wt, &["add", "-A"])?;
+            run(wt, &["commit", "-m", message])?;
+        }
+        Ok(())
+    }
+
+    pub fn drop_rejected(
+        &self,
+        id: &str,
+        base: &str,
+        message: &str,
+        rejection: &Rejection,
+    ) -> Result<()> {
+        if rejection.is_empty() {
+            return Ok(());
+        }
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            bail!("no worktree for {id}");
+        }
+        Self::commit_all(&wt, message)?;
+        if !rejection.patch.is_empty() {
+            let mut child = Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args(["apply", "-R", "--whitespace=nowarn", "-"])
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(rejection.patch.as_bytes())?;
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!(
+                    "rejected hunks no longer apply, reload the diff (R): {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        let up = self.upstream(id, base);
+        let mb = run(&wt, &["merge-base", &up, "HEAD"])?.trim().to_string();
+        for p in &rejection.restore {
+            if run(&wt, &["cat-file", "-e", &format!("{mb}:{p}")]).is_ok() {
+                run(&wt, &["checkout", &mb, "--", p])?;
+            } else {
+                run(&wt, &["rm", "-q", "-f", "--ignore-unmatch", "--", p])?;
+            }
+        }
+        Self::commit_all(&wt, &format!("Drop changes rejected in review of {id}"))
+    }
+
     pub fn merge(&self, id: &str, base: &str, message: &str) -> Result<()> {
         let wt = self.worktree_path(id);
         let br = branch(id);
         if !wt.join(".git").exists() {
             bail!("no worktree for {id}");
         }
-        if !run(&wt, &["status", "--porcelain"])?.trim().is_empty() {
-            run(&wt, &["add", "-A"])?;
-            run(&wt, &["commit", "-m", message])?;
-        }
+        Self::commit_all(&wt, message)?;
         let up = self.upstream(id, base);
         if run(&wt, &["rev-list", "--count", &format!("{up}..HEAD")])?.trim() == "0" {
             bail!("{br} has no commits beyond {up}");
@@ -584,6 +639,62 @@ mod tests {
                 .trim()
                 .is_empty()
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merge_drops_rejected_hunks_and_files() {
+        let (dir, g) = scratch("reject");
+        let body: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        std::fs::write(dir.join("a.txt"), &body).unwrap();
+        git(&dir, &["commit", "-qam", "lines"]);
+        let wt = g.ensure_worktree("x-4", "main").unwrap();
+        let changed = body.replace("2\n", "two\n").replace("19\n", "nineteen\n");
+        std::fs::write(wt.join("a.txt"), changed).unwrap();
+        std::fs::write(wt.join("junk.txt"), "junk\n").unwrap();
+        git(&wt, &["add", "junk.txt"]);
+        git(&wt, &["commit", "-qm", "work"]);
+        std::fs::write(wt.join("keep.txt"), "keep\n").unwrap();
+
+        let mut d = crate::ui::review::Diff::parse("x-4", &g.diff("x-4", "main").unwrap());
+        let file = |d: &crate::ui::review::Diff, n: &str| {
+            d.files.iter().position(|f| f.name == n).unwrap()
+        };
+        d.sel = file(&d, "a.txt");
+        d.mark_hunk(false);
+        d.sel = file(&d, "junk.txt");
+        d.mark_file(false);
+        let r = d.rejection();
+        assert!(r.patch.contains("junk") && r.restore.is_empty());
+
+        g.drop_rejected("x-4", "main", "x-4", &r).unwrap();
+        g.merge("x-4", "main", "x-4").unwrap();
+        let a = std::fs::read_to_string(dir.join("a.txt")).unwrap();
+        assert!(
+            a.starts_with("1\n2\n3\n") && a.contains("nineteen\n"),
+            "{a}"
+        );
+        assert!(!dir.join("junk.txt").exists());
+        assert!(dir.join("keep.txt").exists());
+        let log = run(&dir, &["log", "--format=%s", "main"]).unwrap();
+        assert!(
+            log.contains("Drop changes rejected in review of x-4"),
+            "{log}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_rejection_aborts_without_touching_tree() {
+        let (dir, g) = scratch("stale-reject");
+        let wt = g.ensure_worktree("x-5", "main").unwrap();
+        std::fs::write(wt.join("a.txt"), "b\n").unwrap();
+        let mut d = crate::ui::review::Diff::parse("x-5", &g.diff("x-5", "main").unwrap());
+        d.mark_hunk(false);
+        std::fs::write(wt.join("a.txt"), "c\n").unwrap();
+        let err = g.drop_rejected("x-5", "main", "x-5", &d.rejection());
+        assert!(err.unwrap_err().to_string().contains("no longer apply"));
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "c\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

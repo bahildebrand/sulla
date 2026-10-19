@@ -203,6 +203,8 @@ const HELP: &[(&str, &str)] = &[
     ("c / x", "comment on line / delete its comments"),
     ("C", "edit comment on line (yours or unsent ai)"),
     ("S", "send all comments to agent (incl. unsent ai)"),
+    ("y / n", "accept / reject hunk (whole file on header)"),
+    ("Y / N", "accept / reject whole file"),
     (
         "m",
         "rebase + fast-forward merge (blocked unless checks pass)",
