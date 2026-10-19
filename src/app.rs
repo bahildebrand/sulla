@@ -14,8 +14,9 @@ use crossterm::event::{
 
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Launch};
 use crate::beads::{Bead, Beads, Column, State};
-use crate::config::{AgentKind, Config};
+use crate::config::{AgentKind, Config, Trigger};
 use crate::git::{Git, RebaseConflict};
+use crate::notify::Notifier;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Snapshot};
 use crate::ui::keys;
@@ -26,6 +27,7 @@ pub enum Event {
     Tick,
     AgentOutput,
     AgentExited(String),
+    AgentBell(String),
     Snapshot(Result<Snapshot, String>),
 }
 
@@ -107,6 +109,8 @@ pub struct App {
     pub blocked: HashMap<String, Vec<String>>,
     pub agents: HashMap<String, Agent>,
     failed: HashSet<String>,
+    notifier: Notifier,
+    states: Option<HashMap<String, Option<State>>>,
     pub view: View,
     pub parked_review: Option<Diff>,
     pub ai_reviews: HashMap<String, AiReview>,
@@ -149,6 +153,8 @@ impl App {
             }),
         };
         Ok(Self {
+            notifier: Notifier::new(cfg.notify.clone()),
+            states: None,
             cfg,
             base,
             repo,
@@ -281,6 +287,56 @@ impl App {
     }
 
     pub fn handle(&mut self, ev: Event) {
+        self.dispatch(ev);
+        if let Some(id) = self.viewing() {
+            self.notifier.clear(&id);
+        }
+    }
+
+    fn viewing(&self) -> Option<String> {
+        match &self.view {
+            View::Board => None,
+            View::Progress(id) => Some(agent::reviewed_bead(id).unwrap_or(id).to_string()),
+            View::Review(d) => Some(d.id.clone()),
+        }
+    }
+
+    fn notify(&mut self, trigger: Trigger, id: &str, title: &str) {
+        if self.viewing().as_deref() != Some(id) {
+            self.notifier.fire(trigger, id, title);
+        }
+    }
+
+    fn on_bell(&mut self, id: &str) {
+        if id == CHAT_ID {
+            return self.notify(Trigger::Waiting, CHAT_ID, "conversation");
+        }
+        let reviewer = agent::reviewed_bead(id);
+        let Some(b) = self.bead(reviewer.unwrap_or(id)) else {
+            return;
+        };
+        if reviewer.is_none() && b.state() == Some(State::Review) {
+            return;
+        }
+        let (bid, title) = (b.id.clone(), b.title.clone());
+        self.notify(Trigger::Waiting, &bid, &title);
+    }
+
+    fn entered_review(&mut self) -> Vec<String> {
+        let now: HashMap<String, Option<State>> =
+            self.all.iter().map(|b| (b.id.clone(), b.state())).collect();
+        let Some(prev) = self.states.replace(now) else {
+            return Vec::new();
+        };
+        self.all
+            .iter()
+            .filter(|b| b.status != "closed" && b.state() == Some(State::Review))
+            .filter(|b| prev.get(&b.id).is_some_and(|s| *s != Some(State::Review)))
+            .map(|b| b.id.clone())
+            .collect()
+    }
+
+    fn dispatch(&mut self, ev: Event) {
         match ev {
             Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Input(CEvent::Paste(s)) => self.on_paste(&s),
@@ -293,6 +349,7 @@ impl App {
                     self.write_focused(&[0x1b]);
                 }
             }
+            Event::AgentBell(id) => self.on_bell(&id),
             Event::AgentExited(id) => {
                 if let Some(a) = self.agents.get_mut(&id) {
                     a.alive = false;
@@ -331,10 +388,29 @@ impl App {
                             && (r.forwarded || b.state() != Some(State::Running))
                     })
                 });
+                self.notifier.retain(|id, t| {
+                    id == CHAT_ID
+                        || all.iter().any(|b| {
+                            b.id == id
+                                && b.status != "closed"
+                                && (t != Trigger::Review || b.state() == Some(State::Review))
+                        })
+                });
+                let entered = self.entered_review();
                 self.clamp();
                 self.reconcile();
-                for id in finished {
-                    self.collect_ai_review(&id);
+                for id in &finished {
+                    self.collect_ai_review(id);
+                }
+                for id in entered {
+                    if finished.contains(&id)
+                        && self.ai_reviews.get(&id).is_some_and(|r| r.forwarded)
+                    {
+                        continue;
+                    }
+                    if let Some(title) = self.bead(&id).map(|b| b.title.clone()) {
+                        self.notify(Trigger::Review, &id, &title);
+                    }
                 }
                 self.schedule();
             }
@@ -1567,5 +1643,6 @@ impl App {
         }
         self.slots.clear();
         self.sandbox.shutdown();
+        self.notifier.shutdown();
     }
 }

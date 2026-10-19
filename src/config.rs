@@ -17,6 +17,45 @@ pub struct Config {
     pub copilot: CopilotConfig,
     pub claude: ClaudeConfig,
     pub incus: IncusConfig,
+    pub notify: NotifyConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMethod {
+    Bell,
+    Desktop,
+    Tmux,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    Review,
+    Stalled,
+    Waiting,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    pub methods: Vec<NotifyMethod>,
+    pub on: Vec<Trigger>,
+    pub cooldown_secs: u64,
+    pub notify_send: String,
+    pub tmux_option: String,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            methods: vec![NotifyMethod::Bell],
+            on: vec![Trigger::Review, Trigger::Stalled, Trigger::Waiting],
+            cooldown_secs: 60,
+            notify_send: "notify-send".into(),
+            tmux_option: "@sulla".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -100,6 +139,7 @@ impl Default for Config {
             copilot: CopilotConfig::default(),
             claude: ClaudeConfig::default(),
             incus: IncusConfig::default(),
+            notify: NotifyConfig::default(),
         }
     }
 }
@@ -224,6 +264,19 @@ mod tests {
         assert_eq!(cfg.incus.memory, "4GiB");
         assert_eq!(cfg.incus.golden, "sulla-golden");
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn notify_parses_methods_and_triggers() {
+        let cfg: Config =
+            toml::from_str("[notify]\nmethods = [\"desktop\", \"tmux\"]\non = [\"review\"]")
+                .unwrap();
+        assert_eq!(
+            cfg.notify.methods,
+            [NotifyMethod::Desktop, NotifyMethod::Tmux]
+        );
+        assert_eq!(cfg.notify.on, [Trigger::Review]);
+        assert_eq!(cfg.notify.tmux_option, "@sulla");
     }
 
     #[test]

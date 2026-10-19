@@ -105,9 +105,30 @@ reset_every = 10          # hard reset a slot after this many beads, 0 = never
 reset_volumes = true      # light reset also prunes Docker volumes
 mounts = ["~/.claude", "~/.copilot"] # host paths shared at the same path
 env = {}                  # extra env passed to agents in containers
+
+[notify]
+methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
+on = ["review", "stalled", "waiting"]
+cooldown_secs = 60        # min gap between repeat notifications for one bead
+notify_send = "notify-send"
+tmux_option = "@sulla"    # tmux user option set while beads need attention
 ```
 
 Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
+
+## Notifications
+
+Sulla notifies when a bead moves to Ready for Review, an agent stalls, or an agent rings the
+terminal bell (waiting on input). Opening the bead's progress or review view clears its flag.
+Notifications are skipped for the bead you are currently viewing.
+
+- `bell` rings the terminal bell in the terminal running sulla.
+- `desktop` runs `notify-send -a sulla <summary> <title>`.
+- `tmux` sets the `@sulla` user option to `sulla:<n>` while beads need attention, and unsets it
+  when none do. Show it with e.g. `set -g status-right '#{@sulla} ...'`.
+
+Waiting detection relies on the agent ringing the bell. For Claude Code, run
+`claude config set --global preferredNotifChannel terminal_bell`.
 
 ## Sandboxes
 

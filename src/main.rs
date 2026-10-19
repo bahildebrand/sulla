@@ -3,6 +3,7 @@ mod app;
 mod beads;
 mod config;
 mod git;
+mod notify;
 mod sandbox;
 mod scheduler;
 mod ui;

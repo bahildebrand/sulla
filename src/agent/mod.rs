@@ -156,8 +156,17 @@ pub fn session_id(repo: &std::path::Path, bead_id: &str) -> String {
     )
 }
 
+#[derive(Default)]
+pub struct Bell(bool);
+
+impl vt100::Callbacks for Bell {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.0 = true;
+    }
+}
+
 pub struct Agent {
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -206,7 +215,12 @@ impl Agent {
         let child = pair.slave.spawn_command(cmd).map_err(|e| eyre!(e))?;
         drop(pair.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 5000)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            5000,
+            Bell::default(),
+        )));
         let mut reader = pair.master.try_clone_reader().map_err(|e| eyre!(e))?;
         let writer = pair.master.take_writer().map_err(|e| eyre!(e))?;
         let id = id.to_string();
@@ -217,8 +231,15 @@ impl Agent {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        p.lock().unwrap().process(&buf[..n]);
+                        let rang = {
+                            let mut p = p.lock().unwrap();
+                            p.process(&buf[..n]);
+                            std::mem::take(&mut p.callbacks_mut().0)
+                        };
                         if tx.send(Event::AgentOutput).is_err() {
+                            return;
+                        }
+                        if rang && tx.send(Event::AgentBell(id.clone())).is_err() {
                             return;
                         }
                     }
@@ -321,6 +342,15 @@ mod tests {
         assert_eq!(parts, [8, 4, 4, 4, 12]);
         assert_eq!(&a[14..15], "4");
         assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn bell_ignores_osc_terminator() {
+        let mut p = vt100::Parser::new_with_callbacks(24, 80, 0, Bell::default());
+        p.process(b"\x1b]0;title\x07hello");
+        assert!(!p.callbacks().0);
+        p.process(b"\x07");
+        assert!(p.callbacks().0);
     }
 
     #[test]
