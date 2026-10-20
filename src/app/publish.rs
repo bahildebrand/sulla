@@ -80,6 +80,7 @@ impl Publish {
         let dir = self.git.worktree_path(id);
         let br = self.git.branch(id);
         let existed = pr::find(&self.repo, &br)?.is_some();
+        self.git.sync_trunk(&self.pr.remote, &self.trunk)?;
         let submit = || {
             graphite::track(&dir, &br, &self.base)?;
             graphite::submit(&dir, self.pr.draft)

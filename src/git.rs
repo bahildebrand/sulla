@@ -581,6 +581,34 @@ impl Git {
         Ok(r)
     }
 
+    pub fn sync_trunk(&self, remote: &str, trunk: &str) -> Result<()> {
+        let upstream = self.fetch_base(remote, trunk)?;
+        let local = format!("refs/heads/{trunk}");
+        if !self.ref_exists(&local) || self.rev(&local)? == self.rev(&upstream)? {
+            return Ok(());
+        }
+        if run(
+            &self.repo,
+            &["merge-base", "--is-ancestor", &local, &upstream],
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
+        if self.current_branch()? != trunk {
+            return run(&self.repo, &["fetch", ".", &format!("{upstream}:{local}")]).map(drop);
+        }
+        let blocked = self.dirty_overlap(trunk, &upstream)?;
+        if !blocked.is_empty() {
+            bail!(
+                "{trunk} is behind {remote} and uncommitted changes in {} block fast-forwarding it: {}. Commit or stash them first",
+                self.repo.display(),
+                blocked.join(", ")
+            );
+        }
+        run(&self.repo, &["merge", "--ff-only", "--quiet", &upstream]).map(drop)
+    }
+
     pub fn retire(&self, id: &str, base: &str) -> Result<()> {
         let br = self.branch(id);
         if self.branch_exists(&br) {
@@ -892,6 +920,73 @@ mod tests {
             Some(("feat: add b".into(), "### Summary\n\nAdds b.".into()))
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sync_trunk_fast_forwards_trunk_checked_out_in_the_main_repo() {
+        let (dir, g) = scratch("sync");
+        let remote = dir.with_extension("remote");
+        let other = dir.with_extension("other");
+        for d in [&remote, &other] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        git(&dir, &["init", "-q", "--bare", &remote.to_string_lossy()]);
+        git(
+            &dir,
+            &["remote", "add", "origin", &remote.to_string_lossy()],
+        );
+        git(&dir, &["push", "-q", "origin", "main"]);
+        g.ensure_worktree("s-1", "main").unwrap();
+        git(
+            &dir,
+            &[
+                "clone",
+                "-q",
+                "-b",
+                "main",
+                &remote.to_string_lossy(),
+                &other.to_string_lossy(),
+            ],
+        );
+        let advance = |name: &str| {
+            std::fs::write(other.join(name), "x\n").unwrap();
+            git(&other, &["add", name]);
+            git(
+                &other,
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-qm",
+                    name,
+                ],
+            );
+            git(&other, &["push", "-q", "origin", "main"]);
+            g.rev("main").unwrap()
+        };
+        let upstream = || g.rev("refs/remotes/origin/main").unwrap();
+
+        let stale = advance("u1.txt");
+        g.sync_trunk("origin", "main").unwrap();
+        assert_ne!(g.rev("main").unwrap(), stale);
+        assert_eq!(g.rev("main").unwrap(), upstream());
+        assert!(dir.join("u1.txt").exists());
+
+        advance("u2.txt");
+        std::fs::write(dir.join("u2.txt"), "mine\n").unwrap();
+        let err = g.sync_trunk("origin", "main").unwrap_err().to_string();
+        assert!(err.contains("u2.txt"), "{err}");
+        std::fs::remove_file(dir.join("u2.txt")).unwrap();
+
+        git(&dir, &["switch", "-q", "-c", "elsewhere"]);
+        g.sync_trunk("origin", "main").unwrap();
+        assert_eq!(g.rev("main").unwrap(), upstream());
+        g.sync_trunk("origin", "main").unwrap();
+        for d in [&dir, &remote, &other] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
     }
 
     #[test]
