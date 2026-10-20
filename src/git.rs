@@ -186,11 +186,19 @@ impl Git {
     pub fn adopt_parent(&self, id: &str, parent: &str) -> Result<()> {
         let r = stack_ref(id);
         let br = self.branch(id);
+        let tip = if self.has_branch(parent) {
+            self.branch(parent)
+        } else {
+            merged_ref(parent, "head")
+        };
+        let fork = run(&self.repo, &["merge-base", &tip, &br]).map(|f| f.trim().to_string());
+        let ancestor =
+            |a: &str, b: &str| run(&self.repo, &["merge-base", "--is-ancestor", a, b]).is_ok();
         let kept = self.ref_exists(&r)
-            && run(&self.repo, &["merge-base", "--is-ancestor", &r, &br]).is_ok();
+            && ancestor(&r, &br)
+            && !fork.as_ref().is_ok_and(|f| ancestor(&r, f));
         if !kept {
-            let fork = run(&self.repo, &["merge-base", &self.branch(parent), &br])?;
-            run(&self.repo, &["update-ref", &r, fork.trim()])?;
+            run(&self.repo, &["update-ref", &r, &fork?])?;
         }
         run(&self.repo, &["config", &parent_key(id), parent]).map(drop)
     }
@@ -659,6 +667,36 @@ impl Git {
             )?;
         }
         Ok(())
+    }
+
+    pub fn reclaim(&self, id: &str, base: &str) -> Result<String> {
+        let wt = self.ensure_worktree(id, &self.branch(id))?;
+        let r = released_ref(id);
+        if !self.ref_exists(&r) {
+            return Ok(String::new());
+        }
+        let released = self.rev(&r)?;
+        let mut log = String::new();
+        if released != self.head(id)? {
+            run(&self.repo, &["update-ref", &revision_ref(id), &released])?;
+            let up = self.upstream(id, base);
+            log = run(
+                &wt,
+                &[
+                    "log",
+                    "--oneline",
+                    "--no-color",
+                    "--no-decorate",
+                    "--right-only",
+                    "--cherry-pick",
+                    &format!("{released}...HEAD"),
+                    &format!("^{up}"),
+                    "--",
+                ],
+            )?;
+        }
+        run(&self.repo, &["update-ref", "-d", &r])?;
+        Ok(log.trim().to_string())
     }
 
     pub fn checked_out(&self, id: &str) -> Option<PathBuf> {

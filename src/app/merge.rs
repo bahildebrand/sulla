@@ -267,6 +267,35 @@ impl App {
         }
     }
 
+    pub(super) fn reclaim_stack(&mut self, id: &str) -> Restacked {
+        let closed = self
+            .git
+            .stack_parent(id)
+            .filter(|p| self.bead(p).is_some_and(|b| b.status == "closed"));
+        let mut restacked = None;
+        if let Some(p) = closed {
+            if self.git.unmerged_branch(&p, &self.base) {
+                tracing::info!("{p} closed without merging, unstacking {id}");
+                self.git.unstack(id);
+            } else {
+                restacked = Some(self.git.restack(id, &self.base));
+            }
+        }
+        let mut r = Restacked::default();
+        self.sync_graphite(&mut r, &[id.to_string()], None);
+        match restacked {
+            Some(Ok(())) => r.moved.push(id.to_string()),
+            Some(Err(e)) => {
+                tracing::warn!("restack of {id} failed: {e:#}");
+                let fp = self.git.fingerprint(id);
+                self.restack_stuck.insert(id.to_string(), fp);
+                r.stuck.push(id.to_string());
+            }
+            None => {}
+        }
+        r
+    }
+
     pub(super) fn sweep_stacks(&mut self) {
         let stacks = self.git.stacks();
         self.restack_stuck

@@ -42,6 +42,26 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
   still work once the branch is not checked out anywhere. Beads sulla still owns that are stacked
   on a released bead keep working: they fork from and restack onto the released branch's current
   tip. Its PR is still watched (see [Watching PRs](#watching-prs)).
+- **Reclaim** (`w` again on a released bead, on the board or in the review) hands the branch back
+  to sulla. sulla refuses with `<branch> is checked out in <path>, switch off it first` while the
+  branch is checked out in another worktree or the main checkout (`git worktree list --porcelain`),
+  and with `<branch> no longer exists, cannot reclaim <bead>` when you deleted it; either way
+  nothing changes. Otherwise it recreates `.sulla/worktrees/<bead>` on the branch. When the bead
+  has a stack parent and you restacked the branch (for example with `gt restack`) so that
+  `refs/sulla/stack/<bead>` is no longer its fork point, the fork point is re-derived as the merge
+  base with the parent's branch (or with the parent's recorded merge head if the parent merged and
+  its branch is gone). A parent closed without merging unstacks the bead, and a merged parent
+  restacks it onto the base, as the stack sweep does for any bead. With `tool = "graphite"` the
+  branch is `gt track`ed onto its parent's branch (when the parent has a PR) or the base, but not
+  submitted. If the branch moved while released, `refs/sulla/revise/<bead>` is set to the HEAD
+  recorded at release, so the review diff, log and line counts show only your changes, and the
+  bead's notes (which the agent prompt includes) get `Changes made by the user while released:`
+  followed by those commits as `git log --oneline` (commits that came from the parent through a
+  restack, and rebased copies of the bead's own commits, are left out). `refs/sulla/released/<bead>`
+  is deleted and the bead returns to Awaiting PR (`sulla:pr`) when it has a `pr:<number>` label,
+  else to Review (`sulla:review`). The agent is not started, it resumes on demand like any parked
+  review bead. The status line says `reclaimed <bead>`, plus `, <n> new commits` when you added
+  any.
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
@@ -247,7 +267,7 @@ sulla rebases stacks itself, so with `tool = "graphite"` it keeps Graphite's met
   when their PR merges while their branch is checked out elsewhere. Children sulla still owns that
   are stacked on a released bead with an open PR are tracked onto the released branch. Since
   `gt submit` pushes the downstack, re-submitting such a child also pushes the released branch as
-  it is in the repo.
+  it is in the repo. Reclaiming a released bead re-tracks it (`gt track`) without submitting.
 
 Failures show in the status line as `could not update Graphite for <bead>` and successful
 re-submits as `resubmitted <bead> with Graphite`. With `tool = "gh"` none of this runs.

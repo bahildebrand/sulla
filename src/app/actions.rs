@@ -197,12 +197,12 @@ impl App {
         busy
     }
 
-    fn branch_in_use(&mut self, id: &str) -> bool {
+    pub(super) fn branch_in_use(&mut self, id: &str) -> bool {
         let Some(path) = self.git.checked_out(id) else {
             return false;
         };
         self.status = format!(
-            "{} is checked out in {}, switch away from it first",
+            "{} is checked out in {}, switch off it first",
             self.git.branch(id),
             path.display()
         );

@@ -310,6 +310,9 @@ impl App {
     }
 
     pub(super) fn request_release(&mut self, id: String) {
+        if self.released(&id) {
+            return self.reclaim(&id);
+        }
         if !self.releasable(&id) {
             return;
         }
@@ -361,6 +364,64 @@ impl App {
             "released {id}, check out {} to work on it",
             self.git.branch(id)
         );
+        self.mutated();
+    }
+
+    pub(super) fn reclaim(&mut self, id: &str) {
+        if self.branch_in_use(id) {
+            return;
+        }
+        if !self.git.has_branch(id) {
+            self.status = format!(
+                "{} no longer exists, cannot reclaim {id}",
+                self.git.branch(id)
+            );
+            return;
+        }
+        if let Some(p) = self.git.stack_parent(id) {
+            let r = self.git.adopt_parent(id, &p);
+            if self.report(r).is_none() {
+                return;
+            }
+        }
+        let r = self.git.reclaim(id, &self.base);
+        let Some(log) = self.report(r) else {
+            return self.mutated();
+        };
+        let state = if self.bead(id).is_some_and(|b| b.label("pr").is_some()) {
+            State::Pr
+        } else {
+            State::Review
+        };
+        let note =
+            (!log.is_empty()).then(|| format!("Changes made by the user while released:\n{log}"));
+        self.edit_local(id, |b| {
+            b.set_state_label(Some(state));
+            if let Some(note) = &note {
+                if !b.notes.is_empty() {
+                    b.notes.push('\n');
+                }
+                b.notes.push_str(note);
+            }
+        });
+        let bead_id = id.to_string();
+        self.bd_run(move |beads| {
+            if let Some(note) = &note {
+                beads.append_notes(&bead_id, note)?;
+            }
+            beads.set_state_because(&bead_id, state, "reclaimed from the user")
+        });
+        self.status = format!("reclaimed {id}");
+        match log.lines().count() {
+            0 => {}
+            1 => self.status.push_str(", 1 new commit"),
+            n => self.status.push_str(&format!(", {n} new commits")),
+        }
+        let r = self.reclaim_stack(id);
+        self.status.push_str(&r.summary());
+        if matches!(&self.view, View::Review(d) if d.id == id) {
+            self.reload_review(id.to_string());
+        }
         self.mutated();
     }
 

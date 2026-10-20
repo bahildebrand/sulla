@@ -248,7 +248,7 @@ const HELP: &[(&str, &str)] = &[
     ("o", "open the bead's GitHub PR in the default browser"),
     (
         "w",
-        "release a Review or Awaiting PR bead's worktree so you can work on its branch",
+        "release a Review or Awaiting PR bead's worktree so you can work on its branch, or reclaim a released one",
     ),
     ("q", "quit"),
     ("Progress", ""),
@@ -282,7 +282,7 @@ const HELP: &[(&str, &str)] = &[
     ("U", "revise an Awaiting PR bead from its new PR feedback"),
     (
         "w",
-        "release the worktree so you can work on the branch yourself",
+        "release the worktree so you can work on the branch yourself, or reclaim it",
     ),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
