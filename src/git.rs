@@ -173,11 +173,11 @@ impl Git {
 
     pub fn adopt_parent(&self, id: &str, parent: &str) -> Result<()> {
         let r = stack_ref(id);
-        let br = branch(id);
+        let br = self.branch(id);
         let kept = self.ref_exists(&r)
             && run(&self.repo, &["merge-base", "--is-ancestor", &r, &br]).is_ok();
         if !kept {
-            let fork = run(&self.repo, &["merge-base", &branch(parent), &br])?;
+            let fork = run(&self.repo, &["merge-base", &self.branch(parent), &br])?;
             run(&self.repo, &["update-ref", &r, fork.trim()])?;
         }
         run(&self.repo, &["config", &parent_key(id), parent]).map(drop)
