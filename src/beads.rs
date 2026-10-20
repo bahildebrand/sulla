@@ -153,6 +153,7 @@ pub enum State {
     Held,
     Pr,
     Revise,
+    Released,
 }
 
 impl State {
@@ -165,6 +166,7 @@ impl State {
             State::Held => "held",
             State::Pr => "pr",
             State::Revise => "revise",
+            State::Released => "released",
         }
     }
 }
@@ -188,6 +190,7 @@ impl Bead {
                 "held" => Some(State::Held),
                 "pr" => Some(State::Pr),
                 "revise" => Some(State::Revise),
+                "released" => Some(State::Released),
                 _ => None,
             })
     }
@@ -243,6 +246,8 @@ impl Bead {
             }
             Some(State::Review) => Some(Column::Review),
             Some(State::Pr) => Some(Column::AwaitingPr),
+            Some(State::Released) if on_pr => Some(Column::AwaitingPr),
+            Some(State::Released) => Some(Column::Review),
             Some(State::Revise) => Some(Column::Pending),
             Some(State::Running | State::Reviewing) => Some(Column::InProgress),
             _ if self.status == "in_progress" => Some(Column::InProgress),
@@ -252,7 +257,7 @@ impl Bead {
 }
 
 const MUTATION_HOOKS: [&str; 3] = ["on_create", "on_update", "on_close"];
-const READY_EXCLUDES: [&str; 3] = ["sulla:held", "sulla:backlog", "sulla:pr"];
+const READY_EXCLUDES: [&str; 4] = ["sulla:held", "sulla:backlog", "sulla:pr", "sulla:released"];
 
 #[derive(Debug, Clone)]
 pub struct Beads {
@@ -832,6 +837,23 @@ mod tests {
         let held =
             bead(r#"{"id":"a","title":"t","status":"open","labels":["sulla:held","pr:42"]}"#);
         assert_eq!(held.column(Utc::now(), 3), Some(Column::Pending));
+    }
+
+    #[test]
+    fn released_bead_sits_in_review_or_awaiting_pr() {
+        let now = Utc::now();
+        let b =
+            bead(r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:released"]}"#);
+        assert_eq!(b.state(), Some(State::Released));
+        assert_eq!(State::Released.as_str(), "released");
+        assert_eq!(b.column(now, 3), Some(Column::Review));
+        assert!(!b.has_open_pr());
+        let pr = bead(
+            r#"{"id":"a","title":"t","status":"in_progress","labels":["sulla:released","pr:9"]}"#,
+        );
+        assert_eq!(pr.column(now, 3), Some(Column::AwaitingPr));
+        assert!(pr.has_open_pr());
+        assert!(READY_EXCLUDES.contains(&"sulla:released"));
     }
 
     #[test]

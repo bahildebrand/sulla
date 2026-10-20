@@ -167,6 +167,9 @@ impl App {
     }
 
     pub(super) fn deliver(&mut self, id: &str, text: &str) -> bool {
+        if self.refuse_released(id) {
+            return false;
+        }
         let alive = self.agents.get(id).is_some_and(|a| a.alive);
         if !alive {
             self.remove_agent(id, Outcome::Exited);
@@ -217,6 +220,9 @@ impl App {
         }
         if agent::reviewed_bead(id).is_some() || self.reviewing(id) {
             self.status = format!("{id} is under ai review, X to stop it");
+            return;
+        }
+        if self.refuse_released(id) {
             return;
         }
         self.remove_agent(id, Outcome::Exited);

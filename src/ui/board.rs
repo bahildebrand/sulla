@@ -21,6 +21,14 @@ fn badge(app: &App, b: &Bead) -> Span<'static> {
         .map_or(Span::raw(""), review::verdict_badge)
 }
 
+fn released_badge(b: &Bead) -> Span<'static> {
+    if b.status != "closed" && b.state() == Some(State::Released) {
+        review::released_badge()
+    } else {
+        Span::raw("")
+    }
+}
+
 fn stall_marker(s: Stall) -> Span<'static> {
     match s {
         Stall::Waiting => Span::styled("? ", Style::new().fg(Color::Yellow).bold()),
@@ -163,6 +171,7 @@ fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
         Span::styled(glyph, base.bold()),
         marker(app, b),
         conflict(app, b),
+        released_badge(b),
         badge(app, b),
         check_badge(app, b),
         Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),

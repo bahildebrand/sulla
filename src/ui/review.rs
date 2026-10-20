@@ -663,12 +663,17 @@ fn wrap_into(
     }
 }
 
+pub fn released_badge() -> Span<'static> {
+    Span::styled("released ", Style::new().fg(Color::LightBlue).bold())
+}
+
 pub struct Header<'a> {
     pub title: &'a str,
     pub loc: Option<&'a str>,
     pub ai: Option<&'a AiReview>,
     pub conflict: Option<(&'a Conflict, &'a str)>,
     pub check: Option<&'a Check>,
+    pub released: bool,
     pub marked: Option<(usize, usize)>,
 }
 
@@ -679,6 +684,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
         ai,
         conflict,
         check,
+        released,
         marked,
     } = h;
     let (adds, dels) = diff.adds_dels();
@@ -691,6 +697,9 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
             format!("[{loc}] "),
             Style::new().fg(Color::Blue),
         ));
+    }
+    if released {
+        spans.push(released_badge());
     }
     spans.extend([
         Span::styled(format!("+{adds} "), Style::new().fg(Color::Green)),

@@ -170,6 +170,7 @@ pub enum Action {
     ResolveConflicts(String),
     Discard(String),
     Delete(String),
+    Release(String),
     Quit,
 }
 
@@ -291,7 +292,7 @@ impl App {
         let pr_refresh = (cfg.workflow == Workflow::Pr).then(|| {
             scheduler::spawn_pr_watcher(
                 beads.clone(),
-                repo.clone(),
+                git.clone(),
                 Duration::from_secs(cfg.pr.poll_secs.max(1)),
                 tx.clone(),
             )
@@ -489,7 +490,7 @@ impl App {
                     b.status != "closed"
                         && !matches!(
                             b.state(),
-                            Some(State::Reviewing | State::Review | State::Pr)
+                            Some(State::Reviewing | State::Review | State::Pr | State::Released)
                         )
                 }))
     }

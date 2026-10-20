@@ -148,6 +148,9 @@ impl App {
             self.status = "no check command configured".into();
             return;
         }
+        if self.refuse_released(id) {
+            return;
+        }
         if !self.in_review(id) {
             self.status = format!("{id} is not in review");
             return;

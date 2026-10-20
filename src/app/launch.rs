@@ -239,7 +239,10 @@ impl App {
                 in_pr: self
                     .all
                     .iter()
-                    .filter(|b| b.status != "closed" && b.state() == Some(State::Pr))
+                    .filter(|b| {
+                        b.status != "closed"
+                            && matches!(b.state(), Some(State::Pr | State::Released))
+                    })
                     .map(|b| b.id.clone())
                     .collect(),
             });

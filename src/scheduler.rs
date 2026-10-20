@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -250,8 +249,16 @@ pub fn spawn_poller(
 
 pub fn watched_prs(all: &[Bead]) -> Vec<(String, u64)> {
     all.iter()
-        .filter(|b| b.status != "closed" && b.state() == Some(State::Pr))
+        .filter(|b| b.status != "closed" && matches!(b.state(), Some(State::Pr | State::Released)))
         .filter_map(|b| Some((b.id.clone(), b.label("pr")?.parse().ok()?)))
+        .collect()
+}
+
+pub fn unlinked_releases(all: &[Bead]) -> Vec<String> {
+    all.iter()
+        .filter(|b| b.status != "closed" && b.state() == Some(State::Released))
+        .filter(|b| b.label("pr").is_none())
+        .map(|b| b.id.clone())
         .collect()
 }
 
@@ -260,17 +267,27 @@ pub fn revisable(all: &[Bead]) -> impl Iterator<Item = &Bead> {
         .filter(|b| b.status != "closed" && b.state() == Some(State::Revise))
 }
 
-pub fn spawn_pr_watcher(
-    beads: Beads,
-    repo: PathBuf,
-    every: Duration,
-    tx: Sender<Event>,
-) -> Sender<()> {
+pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Duration, tx: Sender<Event>) -> Sender<()> {
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
+    let repo = git.repo.clone();
     std::thread::spawn(move || {
         loop {
             match beads.list_all() {
                 Ok(all) => {
+                    for id in unlinked_releases(&all) {
+                        let number = match pr::find(&repo, &git.branch(&id)) {
+                            Ok(Some(found)) => found.number,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                tracing::warn!("pr lookup for released {id}: {e:#}");
+                                continue;
+                            }
+                        };
+                        let found = Event::Finished(Box::new(move |app| app.pr_found(&id, number)));
+                        if tx.send(found).is_err() {
+                            return;
+                        }
+                    }
                     for (id, number) in watched_prs(&all) {
                         let r = pr::status(&repo, number).map_err(|e| e.to_string());
                         if tx.send(Event::Pr(id, number, r)).is_err() {
@@ -349,7 +366,12 @@ pub fn pick<'a>(
 ) -> Vec<&'a Bead> {
     let mut candidates: Vec<&Bead> = ready
         .iter()
-        .filter(|b| !matches!(b.state(), Some(State::Held | State::Backlog | State::Pr)))
+        .filter(|b| {
+            !matches!(
+                b.state(),
+                Some(State::Held | State::Backlog | State::Pr | State::Released)
+            )
+        })
         .filter(|b| !busy.contains(&b.id) && !skip.contains(&b.id))
         .collect();
     candidates.sort_by(|a, b| {
@@ -484,7 +506,7 @@ pub fn stack_parent<'a>(
         .filter(|b| {
             b.status != "closed"
                 && match b.state() {
-                    Some(State::Review | State::Reviewing) => true,
+                    Some(State::Review | State::Reviewing | State::Released) => true,
                     Some(State::Pr) => on_pr,
                     _ => false,
                 }
@@ -563,6 +585,25 @@ mod tests {
             .collect();
         assert_eq!(ids, ["old-p1", "new-p1"]);
         assert!(pick(&ready, &busy, &HashSet::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn released_beads_are_never_picked_but_can_be_stacked_on() {
+        let mut released = bead("rel", 0, "2026-01-01T00:00:00Z", &["sulla:released"]);
+        released.status = "in_progress".into();
+        let mut linked = bead("pr", 0, "2026-01-01T00:00:00Z", &["sulla:released", "pr:4"]);
+        linked.status = "in_progress".into();
+        let all = vec![
+            released,
+            linked,
+            bead("child", 1, "2026-01-01T00:00:00Z", &[]),
+        ];
+        assert!(pick(&all[..2], &HashSet::new(), &HashSet::new(), 2).is_empty());
+        let blocked = HashMap::from([("child".to_string(), vec!["rel".to_string()])]);
+        assert_eq!(stack_parent("child", &blocked, &all, false), Some("rel"));
+        assert_eq!(unlinked_releases(&all), ["rel"]);
+        assert_eq!(watched_prs(&all), [("pr".to_string(), 4)]);
+        assert!(orphans(&all, &HashSet::new()).is_empty());
     }
 
     #[test]

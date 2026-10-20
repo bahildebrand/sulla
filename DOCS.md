@@ -5,7 +5,7 @@ See [README.md](README.md) for setup, keys and config.
 ## Bead lifecycle
 
 Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:reviewing`,
-`sulla:review`, `sulla:held`, `sulla:pr`, `sulla:revise`.
+`sulla:review`, `sulla:held`, `sulla:pr`, `sulla:revise`, `sulla:released`.
 
 - **Backlog** beads are never auto scheduled. The `n` popup creates beads in Backlog or Pending,
   `B` moves a bead to Backlog, `s` releases it to Pending, `S` releases the whole Backlog.
@@ -25,6 +25,23 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Revise** (`sulla:revise`): an Awaiting PR bead with new PR feedback is picked like any other
   pending bead (see [Revising from PR feedback](#revising-from-pr-feedback)). A bead with a
   `pr:<number>` label stays in the Awaiting PR column while it is queued, revising or revised.
+- **Release** (`w` on the board or in the review, `sulla:released`) hands a bead's branch to you,
+  for example to finish it with `gt` in your own checkout. Only beads in Review or Awaiting PR
+  (including `revised` beads waiting for `P`) can be released, and only when the worktree has no
+  uncommitted changes (sulla refuses rather than committing or discarding them). sulla stops the
+  bead's agent, reviewer and checks, backs up the agent session when `[pr] backup_sessions` is on,
+  records the branch HEAD in `refs/sulla/released/<bead>` and removes the worktree with
+  `git worktree remove --force`. The branch, `refs/sulla/stack/<bead>`, the stack parent,
+  `refs/sulla/revise/<bead>`, the `pr:<number>` label and Graphite tracking are kept, and nothing
+  is untracked. The status line says `released <bead>, check out <branch> to work on it`, and the
+  card and review show `released`. A released bead stays in Awaiting PR when it has a
+  `pr:<number>` label, else in Review. From then on sulla never touches the branch: it is never
+  scheduled or resumed, never restacked, rebased, `gt track`ed or `gt submit`ted, and revise
+  (`U`), AI review (`V`), checks (`T`), `e`/`E`, `A`, `R`, `B`, `X`, feedback, merge (`m`) and publish (`P`)
+  only show `<bead> is released, check out <branch> to work on it`. Discard (`D`) and retry (`F`)
+  still work once the branch is not checked out anywhere. Beads sulla still owns that are stacked
+  on a released bead keep working: they fork from and restack onto the released branch's current
+  tip. Its PR is still watched (see [Watching PRs](#watching-prs)).
 - **Discard** (`D`) deletes the worktree and branch and holds the bead so it can rerun from
   scratch. **Retry** (`F`) does the same but asks why the attempt failed, appends that to the
   bead's notes (which the agent prompt includes) and returns it to Pending.
@@ -226,25 +243,40 @@ sulla rebases stacks itself, so with `tool = "graphite"` it keeps Graphite's met
   children too, and they are re-tracked as above once restacked.
 - When a revised Awaiting PR bead is published again, its Awaiting PR children are restacked onto
   the new parent tip, then re-tracked and re-submitted.
+- Released beads (`sulla:released`) are never re-tracked or re-submitted, and are not untracked
+  when their PR merges while their branch is checked out elsewhere. Children sulla still owns that
+  are stacked on a released bead with an open PR are tracked onto the released branch. Since
+  `gt submit` pushes the downstack, re-submitting such a child also pushes the released branch as
+  it is in the repo.
 
 Failures show in the status line as `could not update Graphite for <bead>` and successful
 re-submits as `resubmitted <bead> with Graphite`. With `tool = "gh"` none of this runs.
 
 ### Watching PRs
 
-With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR every
+With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR, and every released
+bead's (`sulla:released`) PR, every
 `[pr] poll_secs` (default 120) with `gh pr view <n> --json state,comments,reviews,statusCheckRollup`
 plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments.
 
 - **Merged**: the bead is closed with reason `merged via PR #<n>`, its agent and reviewer stop,
   and its worktree and branch are removed (the diff stays viewable in Done). Beads stacked on it
-  are restacked onto `<remote>/<base>` after a fetch (local base if the fetch fails).
+  are restacked onto `<remote>/<base>` after a fetch (local base if the fetch fails). When the
+  branch is checked out in another worktree or the main checkout (found with
+  `git worktree list --porcelain`), the merge is still recorded, sulla's refs for it (stack,
+  revise, released) are cleared and the bead is closed, but the branch is left alone and not
+  untracked from Graphite: the status line says
+  `PR #<n> merged, closed <bead>; <branch> is checked out in <path>, delete it yourself`.
 - **Closed without merging**: a `pr` notification fires and a status message is shown. The bead
   stays in Awaiting PR.
 - **New comments, reviews or failing checks**: new items are appended to the bead's notes (which
   the agent prompt includes) as `PR #<n> review activity:` and `PR #<n> checks failing: <names>`,
   and a `pr` notification fires. Reviews with an empty body count only when they approve or
-  request changes.
+  request changes. For a released bead nothing is queued for `U`, since the branch is yours.
+- **Released without a PR**: a bead released from Review before it was published has no
+  `pr:<number>` label. Each poll looks up `gh pr list --head <branch> --state open`, and once you
+  open a PR yourself (for example with `gt submit`), sulla adds `pr:<number>`, the bead moves to
+  Awaiting PR and its PR is watched from then on.
 
 Seen comment and review ids, the last checks result, the closed flag and unaddressed feedback are
 kept per bead in `.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the

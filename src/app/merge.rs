@@ -1,5 +1,6 @@
 use color_eyre::Result;
 
+use crate::beads::Bead;
 use crate::config::{PrTool, Workflow};
 use crate::git::RebaseConflict;
 use crate::graphite;
@@ -54,6 +55,9 @@ impl Restacked {
 
 impl App {
     pub(super) fn request_merge(&mut self, id: String, force: bool) {
+        if self.refuse_released(&id) {
+            return;
+        }
         if self.review_of(&id).is_some_and(Diff::all_rejected) {
             self.status = format!("every change in {id} is rejected, D discards it");
             return;
@@ -167,6 +171,9 @@ impl App {
     ) -> Restacked {
         let mut r = Restacked::default();
         while let Some(c) = queue.pop() {
+            if self.released(&c) {
+                continue;
+            }
             let fp = self.git.fingerprint(&c);
             if self.restack_stuck.get(&c) == Some(&fp) {
                 continue;
@@ -214,19 +221,26 @@ impl App {
         if !self.graphite() {
             return;
         }
+        let owned = |id: &&String| !self.released(id);
+        let moved: Vec<String> = r.moved.iter().filter(owned).cloned().collect();
         let unmoved: Vec<String> = r
             .deferred
             .iter()
             .chain(&r.stuck)
             .chain(unstacked)
+            .filter(owned)
             .cloned()
             .collect();
         let steps = graphite::plan(
             self.cfg.pr.tool,
-            &r.moved,
+            &moved,
             &unmoved,
             |id| self.git.stack_parent(id),
-            |id| published == Some(id) || self.awaiting_pr(id),
+            |id| {
+                published == Some(id)
+                    || self.awaiting_pr(id)
+                    || self.released(id) && self.bead(id).is_some_and(Bead::has_open_pr)
+            },
             |id| self.git.dirty(id).is_ok_and(|s| s.trim().is_empty()),
         );
         for step in steps {
@@ -260,7 +274,7 @@ impl App {
         let mut seeds = Vec::new();
         let mut unstacked = Vec::new();
         for (child, parent) in stacks {
-            if self.bead(&parent).is_none_or(|b| b.status != "closed") {
+            if self.released(&child) || self.bead(&parent).is_none_or(|b| b.status != "closed") {
                 continue;
             }
             if self.git.unmerged_branch(&parent, &self.base) {

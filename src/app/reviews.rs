@@ -11,6 +11,9 @@ use super::{App, View};
 
 impl App {
     pub(super) fn start_review(&mut self, id: &str) {
+        if self.refuse_released(id) {
+            return;
+        }
         let Some(b) = self.bead(id).cloned() else {
             return;
         };

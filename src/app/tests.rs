@@ -818,3 +818,238 @@ fn feedback_to_an_evicted_bead_makes_room_or_says_why_not() {
     assert_eq!(h.app.slots.get("r-1"), Some(1));
     assert_eq!(h.state("r-1"), review);
 }
+
+fn pr_status(state: crate::pr::PrState, comments: &[&str]) -> crate::pr::PrStatus {
+    crate::pr::PrStatus {
+        state,
+        comments: comments
+            .iter()
+            .map(|id| crate::pr::PrComment {
+                id: id.to_string(),
+                author: "rev".into(),
+                body: "rename this".into(),
+                path: None,
+                line: None,
+                created_at: None,
+                approval: false,
+            })
+            .collect(),
+        checks: crate::pr::Checks::None,
+    }
+}
+
+fn worked(h: &Harness, id: &str, onto: &str) -> std::path::PathBuf {
+    let wt = h.app.git.ensure_worktree(id, onto).unwrap();
+    std::fs::write(wt.join(format!("{id}.txt")), "x\n").unwrap();
+    h.app
+        .git
+        .commit_pending(id, &format!("{id}: work"))
+        .unwrap();
+    wt
+}
+
+#[test]
+fn release_frees_the_worktree_and_keeps_the_branch_and_refs() {
+    let mut h = Harness::new(
+        "release",
+        &[("p", Some(State::Pr)), ("a", Some(State::Review))],
+    );
+    h.app.all[0].labels.push("pr:3".into());
+    worked(&h, "p", "main");
+    h.app.git.ensure_stacked_worktree("a", "p").unwrap();
+    let wt = worked(&h, "a", "sulla/p");
+    h.app.git.mark_revision("a").unwrap();
+    let head = h.app.git.head("a").unwrap();
+    let stack = git_in(&h.dir, &["rev-parse", "refs/sulla/stack/a"]);
+    h.app.view = View::Progress("a".into());
+    h.app.request_release("a".into());
+    let Mode::Confirm {
+        msg,
+        action: Action::Release(id),
+    } = std::mem::replace(&mut h.app.mode, Mode::Normal)
+    else {
+        panic!("no confirm, status: {}", h.app.status);
+    };
+    assert!(msg.contains("check out sulla/a"), "{msg}");
+    h.app.confirm(Action::Release(id));
+    assert_eq!(h.app.status, "released a, check out sulla/a to work on it");
+    assert_eq!(h.state("a"), Some(State::Released));
+    assert!(matches!(h.app.view, View::Board));
+    assert!(!wt.exists());
+    assert!(h.app.git.has_branch("a"));
+    assert_eq!(
+        git_in(&h.dir, &["rev-parse", "refs/sulla/released/a"]),
+        head
+    );
+    assert_eq!(git_in(&h.dir, &["rev-parse", "refs/sulla/stack/a"]), stack);
+    assert_eq!(h.app.git.stack_parent("a").as_deref(), Some("p"));
+    assert!(!git_in(&h.dir, &["rev-parse", "refs/sulla/revise/a"]).is_empty());
+    assert_eq!(h.bead("a").column(Utc::now(), 3), Some(Column::Review));
+    h.app.request_release("a".into());
+    assert_eq!(
+        h.app.status,
+        "a is released, check out sulla/a to work on it"
+    );
+    let refusals: [fn(&mut App); 6] = [
+        |app: &mut App| app.start_review("a"),
+        |app: &mut App| app.request_publish("a".into()),
+        |app: &mut App| app.request_merge("a".into(), true),
+        |app: &mut App| app.relaunch("a"),
+        |app: &mut App| app.mark_review("a"),
+        |app: &mut App| app.request_shell("a"),
+    ];
+    for refuse in refusals {
+        h.app.status.clear();
+        refuse(&mut h.app);
+        assert_eq!(
+            h.app.status,
+            "a is released, check out sulla/a to work on it"
+        );
+    }
+    assert!(!h.app.deliver("a", "more"));
+    assert!(!h.app.is_starting("a"));
+    assert_eq!(h.state("a"), Some(State::Released));
+    git_in(&h.dir, &["checkout", "-q", "sulla/a"]);
+    assert_eq!(git_in(&h.dir, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn release_refuses_a_dirty_worktree_or_a_bead_not_in_review() {
+    let mut h = Harness::new(
+        "release-dirty",
+        &[("a", Some(State::Review)), ("b", Some(State::Running))],
+    );
+    let wt = worked(&h, "a", "main");
+    std::fs::write(wt.join("wip.txt"), "wip\n").unwrap();
+    h.app.request_release("a".into());
+    assert!(matches!(h.app.mode, Mode::Normal));
+    assert_eq!(
+        h.app.status,
+        "a has uncommitted changes in its worktree, commit or discard them before releasing"
+    );
+    h.app.release_worktree("a");
+    assert!(wt.join("wip.txt").exists());
+    assert_eq!(h.state("a"), Some(State::Review));
+    assert!(git_in(&h.dir, &["for-each-ref", "refs/sulla/released"]).is_empty());
+    h.app.request_release("b".into());
+    assert!(matches!(h.app.mode, Mode::Normal));
+    assert_eq!(
+        h.app.status,
+        "b is not in Review or Awaiting PR, only those can be released"
+    );
+}
+
+#[test]
+fn released_child_is_not_rebased_when_its_parent_merges() {
+    let mut h = Harness::new(
+        "release-child",
+        &[("p", Some(State::Pr)), ("c", Some(State::Released))],
+    );
+    h.app.cfg.workflow = Workflow::Pr;
+    h.app.all[0].labels.push("pr:7".into());
+    worked(&h, "p", "main");
+    h.app.git.ensure_stacked_worktree("c", "p").unwrap();
+    worked(&h, "c", "sulla/p");
+    h.app.git.release("c").unwrap();
+    let head = h.app.git.head("c").unwrap();
+    std::fs::write(h.dir.join("b.txt"), "b\n").unwrap();
+    git_in(&h.dir, &["add", "b.txt"]);
+    git_in(&h.dir, &["commit", "-qm", "base moves"]);
+    h.app
+        .on_pr("p", 7, Ok(pr_status(crate::pr::PrState::Merged, &[])));
+    assert!(h.app.status.starts_with("PR #7 merged"), "{}", h.app.status);
+    assert!(!h.app.status.contains("restack"), "{}", h.app.status);
+    assert!(!h.app.git.has_branch("p"));
+    assert_eq!(h.app.git.head("c").unwrap(), head);
+    assert_eq!(h.app.git.stack_parent("c").as_deref(), Some("p"));
+    h.app.edit_local("p", |b| b.status = "closed".into());
+    h.app.sweep_stacks();
+    assert_eq!(h.app.git.head("c").unwrap(), head);
+    assert_eq!(h.app.git.stack_parent("c").as_deref(), Some("p"));
+}
+
+#[test]
+fn released_pr_merge_closes_while_its_branch_is_checked_out_elsewhere() {
+    let mut h = Harness::new("release-merge", &[("a", Some(State::Released))]);
+    h.app.cfg.workflow = Workflow::Pr;
+    h.app.all[0].labels.push("pr:7".into());
+    worked(&h, "a", "main");
+    h.app.git.mark_revision("a").unwrap();
+    h.app.git.release("a").unwrap();
+    let other = h.dir.with_extension("mine");
+    let _ = std::fs::remove_dir_all(&other);
+    git_in(
+        &h.dir,
+        &["worktree", "add", "-q", &other.to_string_lossy(), "sulla/a"],
+    );
+    let kept = h.app.git.checked_out("a").unwrap();
+    h.app
+        .on_pr("a", 7, Ok(pr_status(crate::pr::PrState::Merged, &[])));
+    assert!(h.app.status.starts_with("PR #7 merged"), "{}", h.app.status);
+    assert!(
+        h.app.status.ends_with(&format!(
+            "; sulla/a is checked out in {}, delete it yourself",
+            kept.display()
+        )),
+        "{}",
+        h.app.status
+    );
+    assert!(h.app.git.has_branch("a"));
+    assert!(
+        git_in(
+            &h.dir,
+            &["for-each-ref", "refs/sulla/released", "refs/sulla/revise"]
+        )
+        .is_empty()
+    );
+    assert!(h.app.git.merged_diff("a").unwrap().contains("a.txt"));
+    git_in(
+        &h.dir,
+        &["worktree", "remove", "--force", &other.to_string_lossy()],
+    );
+}
+
+#[test]
+fn released_pr_feedback_is_noted_without_queueing_a_revision() {
+    let mut h = Harness::new("release-feedback", &[("a", Some(State::Released))]);
+    h.app.all[0].labels.push("pr:7".into());
+    h.app
+        .on_pr("a", 7, Ok(pr_status(crate::pr::PrState::Open, &["c1"])));
+    assert_eq!(h.app.status, "PR #7 for a: 1 new comment");
+    assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 0);
+    assert_eq!(h.app.pr_watch.beads["a"].comments.len(), 1);
+    let a = h.bead("a");
+    h.app.request_revise(&a);
+    assert_eq!(
+        h.app.status,
+        "a is released, check out sulla/a to work on it"
+    );
+    assert_eq!(h.state("a"), Some(State::Released));
+}
+
+#[test]
+fn released_bead_without_a_pr_label_adopts_the_pr_it_finds() {
+    let mut h = Harness::new(
+        "release-found",
+        &[("a", Some(State::Released)), ("b", Some(State::Review))],
+    );
+    assert_eq!(scheduler::unlinked_releases(&h.app.all), ["a"]);
+    assert!(scheduler::watched_prs(&h.app.all).is_empty());
+    h.app.pr_found("b", 4);
+    assert_eq!(h.bead("b").label("pr"), None);
+    h.app.pr_found("a", 5);
+    assert_eq!(h.bead("a").label("pr"), Some("5"));
+    assert_eq!(h.app.status, "found PR #5 for released a, watching it");
+    assert_eq!(h.bead("a").column(Utc::now(), 3), Some(Column::AwaitingPr));
+    assert!(scheduler::unlinked_releases(&h.app.all).is_empty());
+    assert_eq!(scheduler::watched_prs(&h.app.all), [("a".to_string(), 5)]);
+    h.app.pr_found("a", 6);
+    assert_eq!(
+        h.bead("a")
+            .labels
+            .iter()
+            .filter(|l| l.starts_with("pr:"))
+            .count(),
+        1
+    );
+}

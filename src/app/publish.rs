@@ -209,6 +209,9 @@ impl App {
     }
 
     pub(super) fn request_revise(&mut self, bead: &Bead) {
+        if self.refuse_released(&bead.id) {
+            return;
+        }
         if bead.state() != Some(State::Pr) {
             self.status = format!("{} is not awaiting a PR", bead.id);
             return;
@@ -262,6 +265,119 @@ impl App {
             .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Pr))
     }
 
+    pub(super) fn released(&self, id: &str) -> bool {
+        self.bead(id)
+            .is_some_and(|b| b.status != "closed" && b.state() == Some(State::Released))
+    }
+
+    pub(super) fn refuse_released(&mut self, id: &str) -> bool {
+        let released = self.released(id);
+        if released {
+            self.status = format!(
+                "{id} is released, check out {} to work on it",
+                self.git.branch(id)
+            );
+        }
+        released
+    }
+
+    fn releasable(&mut self, id: &str) -> bool {
+        if self.refuse_released(id) || self.busy_publishing(id) {
+            return false;
+        }
+        let open = self.bead(id).is_some_and(|b| {
+            b.status != "closed" && matches!(b.state(), Some(State::Review | State::Pr))
+        });
+        if !open {
+            self.status =
+                format!("{id} is not in Review or Awaiting PR, only those can be released");
+            return false;
+        }
+        if !self.git.worktree_path(id).join(".git").exists() {
+            return true;
+        }
+        let dirty = self.git.dirty(id);
+        match self.report(dirty) {
+            Some(s) if s.trim().is_empty() => true,
+            Some(_) => {
+                self.status = format!(
+                    "{id} has uncommitted changes in its worktree, commit or discard them before releasing"
+                );
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn request_release(&mut self, id: String) {
+        if !self.releasable(&id) {
+            return;
+        }
+        let br = self.git.branch(&id);
+        self.mode = Mode::Confirm {
+            msg: format!(
+                "Release {id}: stop its agent and remove its worktree so you can check out {br}? y/n"
+            ),
+            action: Action::Release(id),
+        };
+    }
+
+    pub(super) fn release_worktree(&mut self, id: &str) {
+        let key = id.to_string();
+        if self.stop_launch_then(id, "release it", move |app| app.release_worktree(&key)) {
+            return;
+        }
+        if !self.releasable(id) {
+            return;
+        }
+        let Some(bead) = self.bead(id).cloned() else {
+            return;
+        };
+        self.stop_check(id);
+        self.remove_agent(&agent::review_id(id), Outcome::Killed);
+        self.remove_agent(id, Outcome::Killed);
+        if self.cfg.pr.backup_sessions {
+            self.backup_session(&bead);
+        }
+        let r = self.git.release(id);
+        if self.report(r).is_none() {
+            return self.mutated();
+        }
+        if self.parked_review.as_ref().is_some_and(|d| d.id == id) {
+            self.parked_review = None;
+        }
+        if self.viewing().as_deref() == Some(id) {
+            if matches!(self.mode, Mode::Insert) {
+                self.mode = Mode::Normal;
+            }
+            self.view = View::Board;
+        }
+        self.edit_local(id, |b| b.set_state_label(Some(State::Released)));
+        let bead_id = id.to_string();
+        self.bd_run(move |beads| {
+            beads.set_state_because(&bead_id, State::Released, "released to the user")
+        });
+        self.status = format!(
+            "released {id}, check out {} to work on it",
+            self.git.branch(id)
+        );
+        self.mutated();
+    }
+
+    pub fn pr_found(&mut self, id: &str, number: u64) {
+        if !self.released(id) || self.bead(id).is_some_and(|b| b.label("pr").is_some()) {
+            return;
+        }
+        let label = format!("pr:{number}");
+        self.edit_local(id, |b| b.labels.push(label.clone()));
+        let bead_id = id.to_string();
+        self.bd_run(move |beads| beads.add_label(&bead_id, &label));
+        self.status = format!("found PR #{number} for released {id}, watching it");
+        if let Some(tx) = &self.pr_refresh {
+            let _ = tx.send(());
+        }
+    }
+
     fn pr_parent(&self, id: &str) -> Option<String> {
         self.git
             .stack_parent(id)
@@ -291,6 +407,9 @@ impl App {
     }
 
     pub(super) fn request_publish(&mut self, id: String) {
+        if self.refuse_released(&id) {
+            return;
+        }
         if self.cfg.workflow != Workflow::Pr {
             self.status = "publishing needs workflow = \"pr\", m merges locally".into();
             return;
@@ -626,14 +745,14 @@ impl App {
             }
         };
         let n = number.to_string();
-        let Some(title) = self
+        let Some((title, released)) = self
             .bead(id)
             .filter(|b| {
                 b.status != "closed"
-                    && b.state() == Some(State::Pr)
+                    && matches!(b.state(), Some(State::Pr | State::Released))
                     && b.label("pr") == Some(n.as_str())
             })
-            .map(|b| b.title.clone())
+            .map(|b| (b.title.clone(), b.state() == Some(State::Released)))
         else {
             return;
         };
@@ -643,7 +762,7 @@ impl App {
         let seen = self.pr_watch.beads.entry(id.to_string()).or_default();
         let before = seen.clone();
         let activity = seen.update(&s);
-        let queued = s.state == PrState::Open && seen.queue(&activity);
+        let queued = !released && s.state == PrState::Open && seen.queue(&activity);
         if *seen != before
             && let Err(e) = self.pr_watch.save()
         {
@@ -686,15 +805,24 @@ impl App {
         self.remove_agent(&agent::review_id(id), Outcome::Merged);
         self.remove_agent(id, Outcome::Merged);
         let children = self.git.children(id);
-        self.untrack(id);
-        let r = self.git.retire(id, &self.base);
-        if self.report(r).is_none() {
-            return self.mutated();
+        if self.git.checked_out(id).is_none() {
+            self.untrack(id);
         }
+        let r = self.git.retire(id, &self.base);
+        let Some(kept) = self.report(r) else {
+            return self.mutated();
+        };
         self.status = match self.close_with(id, &format!("merged via PR #{number}")) {
             Ok(()) => format!("PR #{number} merged, closed {id}"),
             Err(e) => format!("PR #{number} merged but bd close of {id} failed: {e}"),
         };
+        if let Some(path) = kept {
+            self.status.push_str(&format!(
+                "; {} is checked out in {}, delete it yourself",
+                self.git.branch(id),
+                path.display()
+            ));
+        }
         if self.pr_watch.beads.remove(id).is_some()
             && let Err(e) = self.pr_watch.save()
         {

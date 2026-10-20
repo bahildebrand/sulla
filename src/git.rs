@@ -69,6 +69,18 @@ fn revision_ref(id: &str) -> String {
     format!("refs/sulla/revise/{id}")
 }
 
+fn released_ref(id: &str) -> String {
+    format!("refs/sulla/released/{id}")
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || a.canonicalize()
+            .ok()
+            .zip(b.canonicalize().ok())
+            .is_some_and(|(a, b)| a == b)
+}
+
 fn parent_key(id: &str) -> String {
     format!("sulla.{id}.parent")
 }
@@ -235,7 +247,10 @@ impl Git {
 
     pub fn unmerged_branch(&self, id: &str, base: &str) -> bool {
         let br = self.branch(id);
+        let merged = merged_ref(id, "head");
         self.branch_exists(&br)
+            && !(self.ref_exists(&merged)
+                && run(&self.repo, &["merge-base", "--is-ancestor", &merged, &br]).is_ok())
             && run(&self.repo, &["merge-base", "--is-ancestor", &br, base]).is_err()
     }
 
@@ -609,7 +624,7 @@ impl Git {
         run(&self.repo, &["merge", "--ff-only", "--quiet", &upstream]).map(drop)
     }
 
-    pub fn retire(&self, id: &str, base: &str) -> Result<()> {
+    pub fn retire(&self, id: &str, base: &str) -> Result<Option<PathBuf>> {
         let br = self.branch(id);
         if self.branch_exists(&br) {
             let up = self.upstream(id, base);
@@ -626,7 +641,35 @@ impl Git {
                 &["update-ref", &merged_ref(id, "head"), &merged_head],
             )?;
         }
-        self.remove(id)
+        let Some(kept) = self.checked_out(id) else {
+            return self.remove(id).map(|()| None);
+        };
+        self.forget(id)?;
+        Ok(Some(kept))
+    }
+
+    pub fn release(&self, id: &str) -> Result<()> {
+        let head = self.head(id)?;
+        run(&self.repo, &["update-ref", &released_ref(id), &head])?;
+        let wt = self.worktree_path(id);
+        if wt.exists() {
+            run(
+                &self.repo,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn checked_out(&self, id: &str) -> Option<PathBuf> {
+        let head = format!("branch refs/heads/{}", self.branch(id));
+        let own = self.worktree_path(id);
+        let out = run(&self.repo, &["worktree", "list", "--porcelain"]).ok()?;
+        out.split("\n\n")
+            .filter(|w| w.lines().any(|l| l == head))
+            .filter_map(|w| w.lines().find_map(|l| l.strip_prefix("worktree ")))
+            .map(PathBuf::from)
+            .find(|p| !same_path(p, &own))
     }
 
     pub fn commit_pending(&self, id: &str, message: &str) -> Result<()> {
@@ -759,9 +802,10 @@ impl Git {
         Some(format!("{head}{status}"))
     }
 
-    pub fn remove(&self, id: &str) -> Result<()> {
+    fn forget(&self, id: &str) -> Result<()> {
         self.unstack(id);
         self.clear_revision(id);
+        let _ = run(&self.repo, &["update-ref", "-d", &released_ref(id)]);
         let wt = self.worktree_path(id);
         if wt.exists() {
             run(
@@ -769,6 +813,11 @@ impl Git {
                 &["worktree", "remove", "--force", &wt.to_string_lossy()],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
+        self.forget(id)?;
         let br = self.branch(id);
         if self.branch_exists(&br) {
             run(&self.repo, &["branch", "-D", &br])?;
@@ -1037,7 +1086,7 @@ mod tests {
         git(&squash, &["push", "-q", "origin", "main"]);
 
         let children = g.children("p");
-        g.retire("p", "main").unwrap();
+        assert_eq!(g.retire("p", "main").unwrap(), None);
         assert!(!wt.exists());
         assert!(!g.branch_exists("sulla/p"));
         assert!(g.merged_diff("p").unwrap().contains("p.txt"));
@@ -1051,6 +1100,50 @@ mod tests {
         for d in [&dir, &remote, &squash] {
             std::fs::remove_dir_all(d).unwrap();
         }
+    }
+
+    #[test]
+    fn released_branch_checked_out_elsewhere_survives_retire() {
+        let (dir, g) = scratch("release");
+        let wt = g.ensure_worktree("p", "main").unwrap();
+        std::fs::write(wt.join("p.txt"), "p\n").unwrap();
+        g.commit_pending("p", "p: work").unwrap();
+        let cwt = g.ensure_stacked_worktree("c", "p").unwrap();
+        g.mark_revision("p").unwrap();
+        let head = g.head("p").unwrap();
+        g.release("p").unwrap();
+        assert!(!wt.exists());
+        assert!(g.has_branch("p"));
+        assert_eq!(g.rev("refs/sulla/released/p").unwrap(), head);
+        assert!(g.ref_exists("refs/sulla/revise/p"));
+        assert_eq!(g.checked_out("p"), None);
+        assert_eq!(g.checked_out("c"), None);
+
+        let other = dir.with_extension("other");
+        let _ = std::fs::remove_dir_all(&other);
+        git(
+            &dir,
+            &["worktree", "add", &other.to_string_lossy(), "sulla/p"],
+        );
+        let kept = g.checked_out("p").unwrap();
+        assert!(same_path(&kept, &other), "{}", kept.display());
+        assert!(g.unmerged_branch("p", "main"));
+
+        assert_eq!(g.retire("p", "main").unwrap(), Some(kept));
+        assert!(g.has_branch("p"));
+        assert!(!g.ref_exists("refs/sulla/released/p"));
+        assert!(!g.ref_exists("refs/sulla/revise/p"));
+        assert!(g.merged_diff("p").unwrap().contains("p.txt"));
+        assert!(!g.unmerged_branch("p", "main"));
+        assert_eq!(g.stack_parent("c").as_deref(), Some("p"));
+        g.restack("c", "main").unwrap();
+        assert_eq!(g.stack_parent("c"), None);
+        assert!(cwt.exists());
+        git(
+            &dir,
+            &["worktree", "remove", "--force", &other.to_string_lossy()],
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

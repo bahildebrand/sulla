@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
+use crate::beads::State;
 use crate::config::AgentKind;
 use crate::health::Status;
 use review::{DLine, Diff};
@@ -21,12 +22,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::Board => board::render(f, main, app),
         View::Progress(id) => progress::render(f, main, app, id),
         View::Review(d) => {
-            let title = app
-                .all
-                .iter()
-                .find(|b| b.id == d.id)
-                .map(|b| b.title.as_str())
-                .unwrap_or("");
+            let bead = app.all.iter().find(|b| b.id == d.id);
+            let title = bead.map(|b| b.title.as_str()).unwrap_or("");
             review::render(
                 f,
                 main,
@@ -37,6 +34,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                     ai: app.ai_reviews.get(&d.id),
                     conflict: app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
                     check: app.checks.get(&d.id),
+                    released: bead.is_some_and(|b| {
+                        b.status != "closed" && b.state() == Some(State::Released)
+                    }),
                     marked: match app.mode {
                         Mode::Input {
                             kind: InputKind::Comment(n),
@@ -246,6 +246,10 @@ const HELP: &[(&str, &str)] = &[
     ("t / T", "show pre-merge check output / rerun checks"),
     ("U", "revise an Awaiting PR bead from its new PR feedback"),
     ("o", "open the bead's GitHub PR in the default browser"),
+    (
+        "w",
+        "release a Review or Awaiting PR bead's worktree so you can work on its branch",
+    ),
     ("q", "quit"),
     ("Progress", ""),
     ("i / a", "insert mode (type into agent, resumes if exited)"),
@@ -276,6 +280,10 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("o", "open the bead's GitHub PR in the default browser"),
     ("U", "revise an Awaiting PR bead from its new PR feedback"),
+    (
+        "w",
+        "release the worktree so you can work on the branch yourself",
+    ),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),

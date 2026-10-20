@@ -50,6 +50,9 @@ impl App {
     }
 
     pub(super) fn confirm_kill(&mut self, id: String) {
+        if self.refuse_released(&id) {
+            return;
+        }
         if id == CHAT_ID {
             self.mode = Mode::Confirm {
                 msg: "End the conversation? y/n".into(),
@@ -79,6 +82,7 @@ impl App {
             Action::ResolveConflicts(id) => self.resolve_conflicts(&id),
             Action::Discard(id) => self.discard(&id),
             Action::Delete(id) => self.delete(&id),
+            Action::Release(id) => self.release_worktree(&id),
         }
     }
 
@@ -160,6 +164,9 @@ impl App {
     }
 
     pub(super) fn move_to_backlog(&mut self, bead: &Bead) {
+        if self.refuse_released(&bead.id) {
+            return;
+        }
         if self.agents.contains_key(&bead.id)
             || self.is_starting(&bead.id)
             || bead.status == "closed"
@@ -173,6 +180,9 @@ impl App {
     }
 
     pub(super) fn mark_review(&mut self, id: &str) {
+        if self.refuse_released(id) {
+            return;
+        }
         self.edit_local(id, |b| b.set_state_label(Some(State::Review)));
         self.status = format!("{id} ready for review");
         let id = id.to_string();
@@ -187,8 +197,20 @@ impl App {
         busy
     }
 
+    fn branch_in_use(&mut self, id: &str) -> bool {
+        let Some(path) = self.git.checked_out(id) else {
+            return false;
+        };
+        self.status = format!(
+            "{} is checked out in {}, switch away from it first",
+            self.git.branch(id),
+            path.display()
+        );
+        true
+    }
+
     pub(super) fn confirm_discard(&mut self, id: String) {
-        if self.busy_publishing(&id) {
+        if self.busy_publishing(&id) || self.branch_in_use(&id) {
             return;
         }
         self.mode = Mode::Confirm {
@@ -219,7 +241,7 @@ impl App {
     }
 
     pub(super) fn confirm_delete(&mut self, id: String) {
-        if self.busy_publishing(&id) {
+        if self.busy_publishing(&id) || self.branch_in_use(&id) {
             return;
         }
         self.mode = Mode::Confirm {
@@ -256,7 +278,11 @@ impl App {
     }
 
     pub(super) fn request_retry(&mut self, id: String) {
-        if agent::reviewed_bead(&id).is_some() || id == CHAT_ID || self.busy_publishing(&id) {
+        if agent::reviewed_bead(&id).is_some()
+            || id == CHAT_ID
+            || self.busy_publishing(&id)
+            || self.branch_in_use(&id)
+        {
             return;
         }
         self.mode = Mode::Input {
@@ -307,7 +333,7 @@ impl App {
     }
 
     pub(super) fn request_edit(&mut self, id: &str) {
-        if id == CHAT_ID {
+        if id == CHAT_ID || self.refuse_released(id) {
             return;
         }
         let path = self.git.worktree_path(id);
@@ -322,7 +348,7 @@ impl App {
     }
 
     pub(super) fn request_shell(&mut self, id: &str) {
-        if id == CHAT_ID {
+        if id == CHAT_ID || self.refuse_released(id) {
             return;
         }
         let dir = self.git.worktree_path(id);
