@@ -275,6 +275,7 @@ const HELP: &[(&str, &str)] = &[
         "publish: push branch and open a GitHub PR (workflow = \"pr\")",
     ),
     ("o", "open the bead's GitHub PR in the default browser"),
+    ("U", "revise an Awaiting PR bead from its new PR feedback"),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
     ("s", "send feedback to agent"),

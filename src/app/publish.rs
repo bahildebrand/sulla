@@ -670,16 +670,7 @@ impl App {
             what.push("checks failing".into());
         }
         if queued {
-            if self.cfg.pr.auto_revise {
-                self.edit_local(id, |b| b.set_state_label(Some(State::Revise)));
-                let bead = id.to_string();
-                self.bd_run(move |beads| {
-                    beads.set_state_because(&bead, State::Revise, "PR feedback")
-                });
-                what.push("queued for revision".into());
-            } else {
-                what.push("U revises".into());
-            }
+            what.push("U to revise".into());
         }
         let what = what.join(", ");
         self.status = format!("PR #{number} for {id}: {what}");

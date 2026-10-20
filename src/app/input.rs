@@ -597,6 +597,11 @@ impl App {
             KeyCode::Char('M') => self.request_merge(id, true),
             KeyCode::Char('P') => self.request_publish(id),
             KeyCode::Char('o') => self.open_pr(&id),
+            KeyCode::Char('U') => {
+                if let Some(b) = self.bead(&id).cloned() {
+                    self.request_revise(&b);
+                }
+            }
             KeyCode::Char('t') => self.show_check(id),
             KeyCode::Char('T') => self.rerun_check(&id),
             KeyCode::Char('s') => {

@@ -634,6 +634,30 @@ fn open_pr_needs_a_valid_pr_label() {
     assert_eq!(h.app.status, "b has an invalid PR label pr:x");
 }
 
+#[test]
+fn pr_feedback_notifies_without_queueing_a_revision() {
+    let mut h = Harness::new("pr-feedback", &[("a", Some(State::Pr))]);
+    h.app.all[0].labels.push("pr:7".into());
+    let comment = crate::pr::PrComment {
+        id: "c1".into(),
+        author: "rev".into(),
+        body: "rename this".into(),
+        path: None,
+        line: None,
+        created_at: None,
+        approval: false,
+    };
+    let status = crate::pr::PrStatus {
+        state: crate::pr::PrState::Open,
+        comments: vec![comment],
+        checks: crate::pr::Checks::None,
+    };
+    h.app.on_pr("a", 7, Ok(status));
+    assert_eq!(h.state("a"), Some(State::Pr));
+    assert_eq!(h.app.status, "PR #7 for a: 1 new comment, U to revise");
+    assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 1);
+}
+
 fn park(h: &mut Harness, ids: &[&str]) {
     for (age, id) in ids.iter().enumerate() {
         let bead = h.bead(id);

@@ -59,7 +59,6 @@ pub struct PrConfig {
     pub draft: bool,
     pub poll_secs: u64,
     pub backup_sessions: bool,
-    pub auto_revise: bool,
     pub reply: bool,
 }
 
@@ -71,7 +70,6 @@ impl Default for PrConfig {
             draft: false,
             poll_secs: 120,
             backup_sessions: true,
-            auto_revise: true,
             reply: false,
         }
     }
@@ -428,14 +426,13 @@ mod tests {
         assert!(!cfg.pr.draft);
         assert_eq!(cfg.pr.poll_secs, 120);
         assert!(cfg.pr.backup_sessions);
-        assert!(cfg.pr.auto_revise);
         assert!(!cfg.pr.reply);
     }
 
     #[test]
     fn workflow_pr_parses_pr_table() {
         let cfg: Config = toml::from_str(
-            "workflow = \"pr\"\n[pr]\ntool = \"graphite\"\nremote = \"upstream\"\ndraft = true\npoll_secs = 30\nbackup_sessions = false\nauto_revise = false\nreply = true",
+            "workflow = \"pr\"\n[pr]\ntool = \"graphite\"\nremote = \"upstream\"\ndraft = true\npoll_secs = 30\nbackup_sessions = false\nreply = true",
         )
         .unwrap();
         assert_eq!(cfg.workflow, Workflow::Pr);
@@ -447,7 +444,6 @@ mod tests {
                 draft: true,
                 poll_secs: 30,
                 backup_sessions: false,
-                auto_revise: false,
                 reply: true,
             }
         );

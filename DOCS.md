@@ -49,8 +49,6 @@ the `gh` CLI, configured by the `[pr]` table:
 - `poll_secs` (default `120`): how often open pull requests are polled.
 - `backup_sessions` (default `true`): back up agent sessions so agents can resume on review
   comments (see [Session backups](#session-backups)).
-- `auto_revise` (default `true`): queue a revision when a PR gets new comments or failing checks.
-  When `false`, sulla only notifies and `U` on the board queues it.
 - `reply` (default `false`): when a revised bead is published again, comment on the PR with the
   pushed commit and what it addressed.
 
@@ -250,17 +248,18 @@ plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments
 
 Seen comment and review ids, the last checks result, the closed flag and unaddressed feedback are
 kept per bead in `.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the
-number of PR comments seen, `↻<n>` for unaddressed feedback, `⟳ci`, `✓ci` or `✗ci` for the checks
-result and `closed` when the PR was closed. Publishing triggers an immediate poll.
+number of PR comments seen, `↻<n>` for unaddressed feedback (`↻<n>, U to revise` while the bead
+waits on its PR), `⟳ci`, `✓ci` or `✗ci` for the checks result and `closed` when the PR was closed.
+Publishing triggers an immediate poll.
 
 ### Revising from PR feedback
 
 New comments and reviews (approvals excluded) and newly failing checks on an open PR are queued
-as unaddressed feedback. With `[pr] auto_revise = true` (the default) the bead moves to
-`sulla:revise`, otherwise only the notification fires and `U` on the board
-queues it. Revise beads are scheduled like pending work, so they wait for a free slot under
-`max_agents`, ordered by priority, and evict parked Review agents (including `revised` beads
-waiting for `P`) like pending work does. Through the whole revision the card stays in Awaiting PR
+as unaddressed feedback. Sulla never revises on its own: it notifies (the `pr` trigger), appends
+the feedback to the bead notes and shows `↻<n>, U to revise` on the card. `U` on the board or in
+the bead's review moves it to `sulla:revise`. Revise beads are scheduled like pending work, so
+they wait for a free slot under `max_agents`, ordered by priority, and evict parked Review agents
+(including `revised` beads waiting for `P`) like pending work does. Through the whole revision the card stays in Awaiting PR
 and shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review
 runs on it, and `revised, Enter to review` once it is waiting on you: `Enter` opens the review and
 `P` there publishes it (`P` on the board pauses scheduling instead).

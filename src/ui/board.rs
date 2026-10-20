@@ -72,10 +72,15 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
         ));
     }
     if !seen.pending.is_empty() {
-        spans.push(Span::styled(
-            format!("↻{} ", seen.pending.count()),
-            Style::new().fg(Color::Magenta),
-        ));
+        let n = seen.pending.count();
+        spans.push(if b.state() == Some(State::Pr) {
+            Span::styled(
+                format!("↻{n}, U to revise "),
+                Style::new().fg(Color::Magenta).bold(),
+            )
+        } else {
+            Span::styled(format!("↻{n} "), Style::new().fg(Color::Magenta))
+        });
     }
     if seen.closed {
         spans.push(Span::styled("closed ", Style::new().fg(Color::Red)));
