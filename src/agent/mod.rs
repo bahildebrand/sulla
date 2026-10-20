@@ -169,7 +169,7 @@ pub fn chat_prompt(base: &str, prefix: &str, max_agents: usize) -> String {
          (closed).\n\
          - Sulla claims ready Pending beads (open, no unmet blockers, not epics) in priority \
          order (P0 first, then oldest) and runs up to {max_agents} agents at once.\n\
-         - Each bead gets a fresh agent in its own git worktree on branch `{prefix}<short-title>` off \
+         - Each bead gets a fresh agent in its own git worktree on branch `{prefix}<id>` off \
          {base}. That agent sees only the bead title and description, so every description \
          must be self-contained: goal, relevant files, constraints, and acceptance criteria.\n\
          - The human reviews each diff in sulla and merges it into {base}, which closes the \

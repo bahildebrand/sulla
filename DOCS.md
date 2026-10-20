@@ -12,14 +12,9 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Pending** beads are claimed in priority order until `max_agents` agents are in progress. Only
   beads whose dependencies are closed start. Blocked beads show `⊘`. `A` on a blocked bead without
   a worktree only releases it to Pending, unless it can be stacked.
-- **Running**: the agent works in `.sulla/worktrees/<bead>` on its own branch (`<branch>` below)
-  and is told to run `bd set-state <bead> sulla=review` when done. The branch is `branch_prefix`
-  (default `sulla/`) followed by up to three words of the bead title joined by `-`, skipping filler
-  words like `the` and `to` and capped at 24 characters (`Fix the login bug` becomes
-  `sulla/fix-login-bug`). A name already used by a local or remote branch or another bead gets
-  `-2`, `-3` and so on. The name is picked once, when the worktree is first created, and kept in
-  `sulla.<bead>.branch` in the git config, so renaming the bead or changing the prefix later does
-  not move it. Branches created before naming existed stay `sulla/<bead>`.
+- **Running**: the agent works in `.sulla/worktrees/<bead>` on branch `<branch>`, which is
+  `branch_prefix` (default `sulla/`) followed by the bead id, e.g. `sulla/<bead>`, and is told to
+  run `bd set-state <bead> sulla=review` when done.
 - **Review**: you read the diff, comment, run checks, request an AI review, and merge.
 - **Merge** rebases the branch onto base and fast-forwards (no merge commits), removes the
   worktree and branch, and closes the bead.

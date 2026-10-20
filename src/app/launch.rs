@@ -54,7 +54,6 @@ impl Prelaunch {
         let id = self.bead.id.as_str();
         let worktree = {
             let _git = WORKTREES.lock().unwrap_or_else(PoisonError::into_inner);
-            self.git.name_branch(id, &self.bead.title)?;
             let fresh =
                 !self.git.worktree_path(id).join(".git").exists() && !self.git.has_branch(id);
             match self
