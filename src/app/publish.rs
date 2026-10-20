@@ -267,6 +267,22 @@ impl App {
             .filter(|p| self.bead(p).is_some_and(Bead::has_open_pr))
     }
 
+    fn adopt_pr_blocker(&self, id: &str, open: &[String]) {
+        let [p] = open else {
+            return;
+        };
+        if self.git.stack_parent(id).is_some()
+            || !self.bead(p).is_some_and(Bead::has_open_pr)
+            || !self.git.has_branch(p)
+        {
+            return;
+        }
+        match self.git.adopt_parent(id, p) {
+            Ok(()) => tracing::info!("stacking {id} onto {p}, its only blocker, which has a PR"),
+            Err(e) => tracing::warn!("stacking {id} onto {p}: {e:#}"),
+        }
+    }
+
     pub(super) fn pr_base(&self, id: &str) -> String {
         self.pr_parent(id)
             .map(|p| self.git.branch(&p))
@@ -339,6 +355,9 @@ impl App {
                 chain.join(", ")
             );
             return;
+        }
+        if let Some(open) = blockers.first() {
+            self.adopt_pr_blocker(&chain[0], open);
         }
         let parents =
             std::iter::once(self.pr_parent(&chain[0])).chain(chain.iter().cloned().map(Some));

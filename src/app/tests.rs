@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -458,6 +459,99 @@ fn confirm_publish_stacks_onto_a_parent_revising_its_pr() {
     };
     assert_eq!(c, &chain(&["b", "c"]));
     assert!(msg.contains("onto sulla/a"), "{msg}");
+}
+
+fn commit_on(dir: &Path, parent: &str, msg: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["commit-tree", "HEAD^{tree}", "-p", parent, "-m", msg])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "commit-tree {parent}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn confirmed_publish(h: &Harness) -> (String, Vec<String>) {
+    let Mode::Confirm {
+        msg,
+        action: Action::Publish(c),
+    } = &h.app.mode
+    else {
+        panic!("no confirm, status: {}", h.app.status);
+    };
+    (msg.clone(), c.clone())
+}
+
+#[test]
+fn confirm_publish_restacks_onto_a_pr_blocker_that_lost_its_stack_parent() {
+    let mut h = Harness::new(
+        "adopt-stale",
+        &[("a", Some(State::Pr)), ("b", Some(State::Review))],
+    );
+    h.app.all[0].labels.push("pr:7".into());
+    let old = commit_on(&h.dir, "main", "a v1");
+    let child = commit_on(&h.dir, &old, "b");
+    let amended = commit_on(&h.dir, "main", "a v2");
+    git_in(&h.dir, &["branch", "sulla/a", &amended]);
+    git_in(&h.dir, &["branch", "sulla/b", &child]);
+    git_in(&h.dir, &["update-ref", "refs/sulla/stack/b", &old]);
+    assert_eq!(h.app.git.stack_parent("b"), None);
+    h.app.view = View::Progress("b".into());
+    h.app
+        .confirm_publish("b".into(), chain(&["b"]), Ok(vec![vec!["a".to_string()]]));
+    let (msg, c) = confirmed_publish(&h);
+    assert_eq!(c, chain(&["b"]));
+    assert!(msg.contains("against sulla/a"), "{msg}");
+    assert_eq!(h.app.git.stack_parent("b").as_deref(), Some("a"));
+    assert_eq!(git_in(&h.dir, &["rev-parse", "refs/sulla/stack/b"]), old);
+}
+
+#[test]
+fn confirm_publish_stacks_onto_a_pr_blocker_from_the_fork_point() {
+    let mut h = Harness::new(
+        "adopt-fresh",
+        &[("a", Some(State::Revise)), ("b", Some(State::Review))],
+    );
+    h.app.all[0].labels.push("pr:7".into());
+    let a = commit_on(&h.dir, "main", "a");
+    let b = commit_on(&h.dir, "main", "b");
+    git_in(&h.dir, &["branch", "sulla/a", &a]);
+    git_in(&h.dir, &["branch", "sulla/b", &b]);
+    h.app.view = View::Progress("b".into());
+    h.app
+        .confirm_publish("b".into(), chain(&["b"]), Ok(vec![vec!["a".to_string()]]));
+    let (msg, _) = confirmed_publish(&h);
+    assert!(msg.contains("against sulla/a"), "{msg}");
+    assert_eq!(h.app.git.stack_parent("b").as_deref(), Some("a"));
+    let main = git_in(&h.dir, &["rev-parse", "main"]);
+    assert_eq!(git_in(&h.dir, &["rev-parse", "refs/sulla/stack/b"]), main);
+}
+
+#[test]
+fn confirm_publish_keeps_blocking_on_a_blocker_without_a_pr() {
+    let mut h = Harness::new(
+        "adopt-none",
+        &[("a", Some(State::Running)), ("b", Some(State::Review))],
+    );
+    let a = commit_on(&h.dir, "main", "a");
+    git_in(&h.dir, &["branch", "sulla/a", &a]);
+    git_in(&h.dir, &["branch", "sulla/b", "main"]);
+    h.app.view = View::Progress("b".into());
+    h.app
+        .confirm_publish("b".into(), chain(&["b"]), Ok(vec![vec!["a".to_string()]]));
+    assert!(matches!(h.app.mode, Mode::Normal));
+    assert_eq!(h.app.status, "cannot publish b: blocked by open a");
+    assert_eq!(h.app.git.stack_parent("b"), None);
 }
 
 #[test]

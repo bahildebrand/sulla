@@ -180,6 +180,11 @@ Awaiting PR: the bottom one targets the Awaiting PR parent's branch or base, eve
 targets the branch below it. Rejected hunks in each bead's review are dropped. If one fails, the
 beads above it are not published and stay in Review. A stack parent without a PR in any other
 state (running, under AI review, held) still blocks the publish, and the status line names it.
+A bead with no stack parent whose only open blocker has an open PR (its stack parent was closed
+without merging and the bead was moved onto another one, or the blocker was added after it
+started) is stacked onto that blocker when `P` checks blockers, so the PR targets the blocker's
+branch. Its fork point is kept when `refs/sulla/stack/<bead>` is still in its branch, otherwise
+it becomes the merge base with the blocker's branch.
 
 With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of `git push` and
 `gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
