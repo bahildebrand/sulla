@@ -9,7 +9,7 @@ use color_eyre::{Result, eyre::eyre};
 use crate::agent::{self, Launch};
 use crate::beads::{Bead, State};
 use crate::config::{AgentKind, Workflow};
-use crate::git::{self, Git};
+use crate::git::Git;
 use crate::pr;
 use crate::presets;
 use crate::sandbox::Outcome;
@@ -54,6 +54,7 @@ impl Prelaunch {
         let id = self.bead.id.as_str();
         let worktree = {
             let _git = WORKTREES.lock().unwrap_or_else(PoisonError::into_inner);
+            self.git.name_branch(id, &self.bead.title)?;
             let fresh =
                 !self.git.worktree_path(id).join(".git").exists() && !self.git.has_branch(id);
             match self
@@ -88,8 +89,11 @@ impl Prelaunch {
 
     fn task(&self, parent: Option<&str>) -> String {
         let preset = presets::for_bead(&self.presets, &self.bead);
+        let branch = self.git.branch(&self.bead.id);
+        let parent = parent.map(|p| (p, self.git.branch(p)));
+        let parent = parent.as_ref().map(|(p, b)| (*p, b.as_str()));
         agent::with_system(
-            agent::task_prompt(&self.bead, parent, preset),
+            agent::task_prompt(&self.bead, &branch, parent, preset),
             self.system_prompt.as_deref(),
         )
     }
@@ -126,7 +130,7 @@ impl Prelaunch {
         });
         let base = parent
             .filter(|p| r.in_pr.contains(*p))
-            .map(git::branch)
+            .map(|p| self.git.branch(p))
             .unwrap_or_else(|| self.base.clone());
         let log = self.git.summary(id, &base).unwrap_or_else(|e| {
             tracing::warn!("git log for {id}: {e:#}");

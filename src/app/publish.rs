@@ -8,7 +8,7 @@ use color_eyre::{
 use crate::agent;
 use crate::beads::{Bead, Beads, State};
 use crate::config::{PrConfig, PrTool, Trigger, Workflow};
-use crate::git::{self, Git, RebaseConflict};
+use crate::git::{Git, RebaseConflict};
 use crate::graphite;
 use crate::pr::{self, PrState, PrStatus};
 use crate::sandbox::Outcome;
@@ -55,7 +55,7 @@ impl Publish {
                 let (title, body) = self.text(&bead, &msg)?;
                 pr::create(
                     &self.repo,
-                    &git::branch(id),
+                    &self.git.branch(id),
                     &self.base,
                     &title,
                     &body,
@@ -78,7 +78,7 @@ impl Publish {
     fn submit_graphite(&self, bead: &Bead, auto_msg: &str) -> Result<pr::Pr> {
         let id = self.id.as_str();
         let dir = self.git.worktree_path(id);
-        let br = git::branch(id);
+        let br = self.git.branch(id);
         let existed = pr::find(&self.repo, &br)?.is_some();
         let submit = || {
             graphite::track(&dir, &br, &self.base)?;
@@ -269,7 +269,7 @@ impl App {
 
     pub(super) fn pr_base(&self, id: &str) -> String {
         self.pr_parent(id)
-            .map(|p| git::branch(&p))
+            .map(|p| self.git.branch(&p))
             .unwrap_or_else(|| self.base.clone())
     }
 
@@ -357,12 +357,12 @@ impl App {
         }
         let base = self.pr_base(&chain[0]);
         let remote = &self.cfg.pr.remote;
-        let br = git::branch(&id);
+        let br = self.git.branch(&id);
         let msg = match (self.cfg.pr.tool, self.bead(&id).and_then(|b| b.label("pr"))) {
             (tool, _) if chain.len() > 1 => {
                 let branches = chain
                     .iter()
-                    .map(|c| git::branch(c))
+                    .map(|c| self.git.branch(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 match tool {
@@ -415,7 +415,7 @@ impl App {
         let mut jobs = Vec::new();
         for id in chain {
             let rejection = self.review_of(&id).map(Diff::rejection).unwrap_or_default();
-            let next = git::branch(&id);
+            let next = self.git.branch(&id);
             self.publishing.insert(id.clone());
             jobs.push(Publish {
                 id,

@@ -79,7 +79,7 @@ impl App {
         let system_prompt = self.cfg.system_prompt.clone();
         let session = rid.clone();
         let build = move || {
-            let prompt = agent::review_prompt(&b, &git.upstream(&b.id, &base));
+            let prompt = agent::review_prompt(&b, &git.branch(&b.id), &git.upstream(&b.id, &base));
             let launch = Launch {
                 session: agent::session_id(&repo, &session),
                 id: session,

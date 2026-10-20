@@ -88,7 +88,7 @@ impl App {
             resume,
             prompt: (!resume).then(|| {
                 agent::with_system(
-                    agent::chat_prompt(&self.base, self.cfg.max_agents),
+                    agent::chat_prompt(&self.base, self.git.prefix(), self.cfg.max_agents),
                     self.cfg.system_prompt.as_deref(),
                 )
             }),

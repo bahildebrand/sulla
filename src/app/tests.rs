@@ -154,13 +154,13 @@ impl Harness {
         };
         for b in [id, parent] {
             if !self.app.git.has_branch(b) {
-                git(&["branch", &git::branch(b)]);
+                git(&["branch", &self.app.git.branch(b)]);
             }
         }
         git(&[
             "update-ref",
             &format!("refs/sulla/stack/{id}"),
-            &git::branch(parent),
+            &self.app.git.branch(parent),
         ]);
         git(&["config", &format!("sulla.{id}.parent"), parent]);
     }

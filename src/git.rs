@@ -1,14 +1,27 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use color_eyre::{Result, eyre::bail};
 
 use crate::ui::review::Rejection;
 
+pub const DEFAULT_PREFIX: &str = "sulla/";
+
+const SLUG_WORDS: usize = 3;
+const SLUG_LEN: usize = 24;
+const FILLER: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it", "of",
+    "on", "or", "so", "that", "the", "their", "this", "to", "when", "with",
+];
+
 #[derive(Debug, Clone)]
 pub struct Git {
     pub repo: PathBuf,
+    prefix: String,
+    names: Arc<Mutex<Option<HashMap<String, String>>>>,
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
@@ -54,8 +67,30 @@ pub fn toplevel(path: &Path) -> Result<PathBuf> {
     ))
 }
 
-pub fn branch(id: &str) -> String {
-    format!("sulla/{id}")
+fn slug(title: &str) -> String {
+    let title = title.replace(['\'', '\u{2019}'], "").to_ascii_lowercase();
+    let words: Vec<&str> = title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let kept: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| !FILLER.contains(w))
+        .collect();
+    let kept = if kept.is_empty() { words } else { kept };
+    let mut out = String::new();
+    for w in kept.into_iter().take(SLUG_WORDS) {
+        if out.is_empty() {
+            out.extend(w.chars().take(SLUG_LEN));
+        } else if out.len() + 1 + w.len() <= SLUG_LEN {
+            out.push('-');
+            out.push_str(w);
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 fn merged_ref(id: &str, part: &str) -> String {
@@ -74,9 +109,94 @@ fn parent_key(id: &str) -> String {
     format!("sulla.{id}.parent")
 }
 
+fn branch_key(id: &str) -> String {
+    format!("sulla.{id}.branch")
+}
+
 impl Git {
     pub fn new(repo: PathBuf) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            prefix: DEFAULT_PREFIX.into(),
+            names: Arc::default(),
+        }
+    }
+
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    fn names(&self) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+        let mut names = self.names.lock().unwrap_or_else(PoisonError::into_inner);
+        if names.is_none() {
+            let out = run(
+                &self.repo,
+                &["config", "--get-regexp", r"^sulla\..*\.branch$"],
+            )
+            .unwrap_or_default();
+            *names = Some(
+                out.lines()
+                    .filter_map(|l| {
+                        let (k, v) = l.split_once(' ')?;
+                        let id = k.strip_prefix("sulla.")?.strip_suffix(".branch")?;
+                        Some((id.to_string(), v.trim().to_string()))
+                    })
+                    .collect(),
+            );
+        }
+        names
+    }
+
+    pub fn branch(&self, id: &str) -> String {
+        self.names()
+            .as_ref()
+            .and_then(|n| n.get(id).cloned())
+            .unwrap_or_else(|| format!("{DEFAULT_PREFIX}{id}"))
+    }
+
+    pub fn name_branch(&self, id: &str, title: &str) -> Result<String> {
+        let mut guard = self.names();
+        let names = guard.get_or_insert_default();
+        if let Some(b) = names.get(id) {
+            return Ok(b.clone());
+        }
+        let legacy = format!("{DEFAULT_PREFIX}{id}");
+        if self.branch_exists(&legacy) || self.worktree_path(id).join(".git").exists() {
+            return Ok(legacy);
+        }
+        let mut taken: Vec<String> = names.values().cloned().collect();
+        for (refs, strip) in [("refs/heads", 2), ("refs/remotes", 3)] {
+            let format = format!("--format=%(refname:lstrip={strip})");
+            taken.extend(
+                run(&self.repo, &["for-each-ref", &format, refs])?
+                    .lines()
+                    .map(str::to_string),
+            );
+        }
+        let clash = |name: &str| {
+            taken
+                .iter()
+                .any(|t| t == name || t.strip_prefix(name).is_some_and(|r| r.starts_with('/')))
+        };
+        let slug = Some(slug(title)).filter(|s| !s.is_empty());
+        let stem = format!("{}{}", self.prefix, slug.as_deref().unwrap_or(id));
+        let mut name = stem.clone();
+        let mut n = 2;
+        while clash(&name) {
+            name = format!("{stem}-{n}");
+            n += 1;
+        }
+        if run(&self.repo, &["check-ref-format", "--branch", &name]).is_err() {
+            bail!("{name} is not a valid branch name, check branch_prefix");
+        }
+        run(&self.repo, &["config", &branch_key(id), &name])?;
+        names.insert(id.to_string(), name.clone());
+        Ok(name)
     }
 
     pub fn current_branch(&self) -> Result<String> {
@@ -112,7 +232,7 @@ impl Git {
     }
 
     pub fn has_branch(&self, id: &str) -> bool {
-        self.branch_exists(&branch(id))
+        self.branch_exists(&self.branch(id))
     }
 
     fn branch_exists(&self, name: &str) -> bool {
@@ -133,7 +253,7 @@ impl Git {
         if path.join(".git").exists() {
             return Ok(path);
         }
-        let br = branch(id);
+        let br = self.branch(id);
         let p = path.to_string_lossy();
         if self.branch_exists(&br) {
             run(&self.repo, &["worktree", "add", &p, &br])?;
@@ -144,10 +264,10 @@ impl Git {
     }
 
     pub fn ensure_stacked_worktree(&self, id: &str, parent: &str) -> Result<PathBuf> {
-        if self.worktree_path(id).join(".git").exists() || self.branch_exists(&branch(id)) {
-            return self.ensure_worktree(id, &branch(parent));
+        if self.worktree_path(id).join(".git").exists() || self.branch_exists(&self.branch(id)) {
+            return self.ensure_worktree(id, &self.branch(parent));
         }
-        let tip = run(&self.repo, &["rev-parse", &branch(parent)])?
+        let tip = run(&self.repo, &["rev-parse", &self.branch(parent)])?
             .trim()
             .to_string();
         let path = self.ensure_worktree(id, &tip)?;
@@ -170,7 +290,12 @@ impl Git {
         self.stack_parent(id).is_some_and(|p| {
             run(
                 &self.repo,
-                &["merge-base", "--is-ancestor", &branch(&p), &branch(id)],
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &self.branch(&p),
+                    &self.branch(id),
+                ],
             )
             .is_err()
         })
@@ -202,7 +327,7 @@ impl Git {
     }
 
     pub fn unmerged_branch(&self, id: &str, base: &str) -> bool {
-        let br = branch(id);
+        let br = self.branch(id);
         self.branch_exists(&br)
             && run(&self.repo, &["merge-base", "--is-ancestor", &br, base]).is_err()
     }
@@ -217,7 +342,7 @@ impl Git {
         let head = if self.worktree_path(id).join(".git").exists() {
             "HEAD".to_string()
         } else {
-            branch(id)
+            self.branch(id)
         };
         let dir = if head == "HEAD" {
             self.worktree_path(id)
@@ -240,7 +365,7 @@ impl Git {
             bail!("no worktree for {id}");
         }
         let onto = if self.unmerged_branch(&parent, base) {
-            branch(&parent)
+            self.branch(&parent)
         } else {
             base.to_string()
         };
@@ -322,7 +447,7 @@ impl Git {
 
     pub fn diff(&self, id: &str, base: &str) -> Result<String> {
         let wt = self.worktree_path(id);
-        let br = branch(id);
+        let br = self.branch(id);
         if !wt.join(".git").exists() {
             let up = self.upstream(id, base);
             return run(
@@ -380,7 +505,7 @@ impl Git {
             Self::log_range(&wt, &format!("{up}..HEAD"))
         } else {
             let up = self.upstream(id, base);
-            Self::log_range(&self.repo, &format!("{up}..{}", branch(id)))
+            Self::log_range(&self.repo, &format!("{up}..{}", self.branch(id)))
         }
     }
 
@@ -488,7 +613,7 @@ impl Git {
 
     pub fn land(&self, id: &str, base: &str, message: &str) -> Result<()> {
         let wt = self.worktree_path(id);
-        let br = branch(id);
+        let br = self.branch(id);
         if !wt.join(".git").exists() {
             bail!("no worktree for {id}");
         }
@@ -532,7 +657,7 @@ impl Git {
     }
 
     pub fn push(&self, id: &str, remote: &str, force: bool) -> Result<()> {
-        let br = branch(id);
+        let br = self.branch(id);
         let refspec = format!("{br}:{br}");
         let mut args = vec!["push", "--set-upstream"];
         if force {
@@ -550,7 +675,7 @@ impl Git {
     }
 
     pub fn retire(&self, id: &str, base: &str) -> Result<()> {
-        let br = branch(id);
+        let br = self.branch(id);
         if self.branch_exists(&br) {
             let up = self.upstream(id, base);
             let merged_base = run(&self.repo, &["merge-base", &up, &br])?
@@ -591,7 +716,7 @@ impl Git {
             &[
                 "rev-parse",
                 "--verify",
-                &format!("refs/heads/{}", branch(id)),
+                &format!("refs/heads/{}", self.branch(id)),
             ],
         )?
         .trim()
@@ -619,14 +744,29 @@ impl Git {
             &self.repo,
             &[
                 "for-each-ref",
-                "--format=%(refname:strip=3) %(objectname)",
-                "refs/heads/sulla/",
+                "--format=%(refname:lstrip=2) %(objectname)",
+                "refs/heads/",
             ],
         )?;
+        let guard = self.names();
+        let names = guard.as_ref();
+        let owner: HashMap<&str, &str> = names
+            .into_iter()
+            .flatten()
+            .map(|(id, br)| (br.as_str(), id.as_str()))
+            .collect();
         Ok(out
             .lines()
             .filter_map(|l| l.split_once(' '))
-            .map(|(id, sha)| (id.to_string(), sha.to_string()))
+            .filter_map(|(br, sha)| {
+                let id = match owner.get(br) {
+                    Some(id) => id,
+                    None => br
+                        .strip_prefix(DEFAULT_PREFIX)
+                        .filter(|id| !names.is_some_and(|n| n.contains_key(*id)))?,
+                };
+                Some((id.to_string(), sha.to_string()))
+            })
             .collect())
     }
 
@@ -707,7 +847,7 @@ impl Git {
                 &["worktree", "remove", "--force", &wt.to_string_lossy()],
             )?;
         }
-        let br = branch(id);
+        let br = self.branch(id);
         if self.branch_exists(&br) {
             run(&self.repo, &["branch", "-D", &br])?;
         }
@@ -736,6 +876,88 @@ mod tests {
         let g = Git::new(dir.clone());
         g.ensure_ignored().unwrap();
         (dir, g)
+    }
+
+    #[test]
+    fn slug_keeps_first_meaningful_words() {
+        assert_eq!(slug("Branch naming"), "branch-naming");
+        assert_eq!(
+            slug("Seed Claude's config in incus containers before launch"),
+            "seed-claudes-config"
+        );
+        assert_eq!(
+            slug("Show when revised PR beads and full slots are waiting"),
+            "show-revised-pr"
+        );
+        assert_eq!(slug("Add the a"), "add");
+        assert_eq!(slug("The"), "the");
+        assert_eq!(
+            slug("Internationalization-everywhere"),
+            "internationalization"
+        );
+        assert_eq!(
+            slug("Supercalifragilisticexpialidocious"),
+            "supercalifragilisticexpi"
+        );
+        assert_eq!(slug("!!! ???"), "");
+    }
+
+    #[test]
+    fn names_branches_with_prefix_and_keeps_them_unique() {
+        let (dir, g) = scratch("names");
+        let g = g.with_prefix("blake/");
+        assert_eq!(
+            g.name_branch("n-1", "Fix the login bug").unwrap(),
+            "blake/fix-login-bug"
+        );
+        assert_eq!(
+            g.name_branch("n-1", "Renamed later").unwrap(),
+            "blake/fix-login-bug"
+        );
+        assert_eq!(
+            g.name_branch("n-2", "Fix login bug").unwrap(),
+            "blake/fix-login-bug-2"
+        );
+        git(&dir, &["branch", "blake/fix-login-bug-3"]);
+        assert_eq!(
+            g.name_branch("n-3", "fix login bug").unwrap(),
+            "blake/fix-login-bug-4"
+        );
+        git(
+            &dir,
+            &["update-ref", "refs/remotes/origin/blake/tidy", "HEAD"],
+        );
+        assert_eq!(g.name_branch("n-4", "Tidy").unwrap(), "blake/tidy-2");
+        assert_eq!(g.name_branch("n-5", "???").unwrap(), "blake/n-5");
+        assert_eq!(g.branch("n-6"), "sulla/n-6");
+        assert!(
+            g.clone()
+                .with_prefix("bad prefix/")
+                .name_branch("n-7", "x")
+                .is_err()
+        );
+        assert_eq!(g.branch("n-7"), "sulla/n-7");
+
+        let wt = g.ensure_worktree("n-1", "main").unwrap();
+        assert_eq!(
+            run(&wt, &["branch", "--show-current"]).unwrap().trim(),
+            "blake/fix-login-bug"
+        );
+        assert!(g.has_branch("n-1"));
+        g.ensure_worktree("legacy", "main").unwrap();
+        assert_eq!(g.name_branch("legacy", "Anything").unwrap(), "sulla/legacy");
+
+        let fresh = Git::new(dir.clone()).with_prefix("other/");
+        assert_eq!(fresh.branch("n-2"), "blake/fix-login-bug-2");
+        let mut ids: Vec<String> = fresh
+            .bead_branches()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["legacy", "n-1"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

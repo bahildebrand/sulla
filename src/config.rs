@@ -11,6 +11,7 @@ pub struct Config {
     pub done_retention_days: i64,
     pub poll_secs: u64,
     pub base_branch: Option<String>,
+    pub branch_prefix: String,
     pub kache: bool,
     pub check: Option<String>,
     pub system_prompt: Option<String>,
@@ -232,6 +233,7 @@ impl Default for Config {
             done_retention_days: 3,
             poll_secs: 2,
             base_branch: None,
+            branch_prefix: crate::git::DEFAULT_PREFIX.into(),
             kache: true,
             check: None,
             system_prompt: None,
@@ -317,6 +319,9 @@ mod tests {
         assert_eq!(cfg.done_retention_days, 3);
         assert_eq!(cfg.copilot.bin, "copilot");
         assert_eq!(cfg.copilot.model.as_deref(), Some("x"));
+        assert_eq!(cfg.branch_prefix, "sulla/");
+        let cfg: Config = toml::from_str("branch_prefix = \"blake/\"").unwrap();
+        assert_eq!(cfg.branch_prefix, "blake/");
     }
 
     #[test]

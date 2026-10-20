@@ -27,7 +27,7 @@ beads over HTTP instead of spawning `bd` for every call, see
 ## How it works
 
 Ready beads are claimed in priority order, up to `max_agents` at once. Each agent works in its own
-worktree on `sulla/<bead>`, then moves the bead to Review, where you (or an AI reviewer) comment,
+worktree on a short branch named from its title (`sulla/fix-login-bug`), then moves the bead to Review, where you (or an AI reviewer) comment,
 run checks and merge. See [DOCS.md](DOCS.md) for the full lifecycle, stacking, budgets, AI review
 and checks.
 
@@ -55,6 +55,7 @@ max_agents = 3
 done_retention_days = 3
 poll_secs = 2
 base_branch = "main"
+branch_prefix = "sulla/" # bead branches are this plus a short slug of the title
 kache = true
 check = "cargo test && cargo clippy" # pre-merge check, unset by default
 agent = "copilot" # or "claude"

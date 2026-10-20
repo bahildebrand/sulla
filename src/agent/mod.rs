@@ -64,7 +64,12 @@ const NO_GITHUB: &str = "Never post comments, reviews or replies to GitHub, and 
      use gh or the GitHub API to change pull requests. PR feedback in the notes is for you to \
      address in code only.";
 
-pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str)>) -> String {
+pub fn task_prompt(
+    bead: &Bead,
+    branch: &str,
+    parent: Option<(&str, &str)>,
+    preset: Option<(&str, &str)>,
+) -> String {
     let id = &bead.id;
     let mut desc = if bead.description.trim().is_empty() {
         String::new()
@@ -83,15 +88,15 @@ pub fn task_prompt(bead: &Bead, parent: Option<&str>, preset: Option<(&str, &str
             bead.notes.trim()
         )
     };
-    if let Some(p) = parent {
+    if let Some((p, parent_branch)) = parent {
         desc.push_str(&format!(
             "\n\nThis bead depends on {p}, which is not merged yet. Your branch is stacked on \
-             sulla/{p}, so its changes are already in your worktree. Only commit work for {id}."
+             {parent_branch}, so its changes are already in your worktree. Only commit work for {id}."
         ));
     }
     format!(
         "You are working on bead {id}: {title}{desc}{notes}\n\n\
-         You are in a dedicated git worktree on branch sulla/{id}. Commit your work to this \
+         You are in a dedicated git worktree on branch {branch}. Commit your work to this \
          branch. Do not switch branches, rebase, or touch other worktrees. Rust builds are cached \
          with kache through RUSTC_WRAPPER, leave that alone. {NO_GITHUB}\n\n\
          When the task is complete and committed, run \
@@ -119,7 +124,7 @@ pub fn reviewed_bead(agent_id: &str) -> Option<&str> {
     agent_id.strip_suffix(REVIEW_SUFFIX)
 }
 
-pub fn review_prompt(bead: &Bead, base: &str) -> String {
+pub fn review_prompt(bead: &Bead, branch: &str, base: &str) -> String {
     let id = &bead.id;
     let desc = if bead.description.trim().is_empty() {
         String::new()
@@ -128,7 +133,7 @@ pub fn review_prompt(bead: &Bead, base: &str) -> String {
     };
     format!(
         "You are reviewing work on bead {id}: {title}{desc}\n\n\
-         Another agent implemented this on branch sulla/{id}, which is checked out in this \
+         Another agent implemented this on branch {branch}, which is checked out in this \
          worktree. Inspect `git diff {base}...HEAD` and `git log {base}..HEAD`. Check \
          correctness, bugs, edge cases, and whether the acceptance criteria above are met. Run \
          the build and tests. Do NOT edit tracked files, commit, rebase, or change branches. \
@@ -150,7 +155,7 @@ pub fn review_prompt(bead: &Bead, base: &str) -> String {
     )
 }
 
-pub fn chat_prompt(base: &str, max_agents: usize) -> String {
+pub fn chat_prompt(base: &str, prefix: &str, max_agents: usize) -> String {
     format!(
         "You are a planning assistant inside sulla, a TUI that runs coding agents off a beads \
          (`bd`) queue. You are in the main checkout of the repo on branch {base}. The user wants \
@@ -164,7 +169,7 @@ pub fn chat_prompt(base: &str, max_agents: usize) -> String {
          (closed).\n\
          - Sulla claims ready Pending beads (open, no unmet blockers, not epics) in priority \
          order (P0 first, then oldest) and runs up to {max_agents} agents at once.\n\
-         - Each bead gets a fresh agent in its own git worktree on branch `sulla/<id>` off \
+         - Each bead gets a fresh agent in its own git worktree on branch `{prefix}<short-title>` off \
          {base}. That agent sees only the bead title and description, so every description \
          must be self-contained: goal, relevant files, constraints, and acceptance criteria.\n\
          - The human reviews each diff in sulla and merges it into {base}, which closes the \
@@ -1040,9 +1045,9 @@ mod tests {
     fn task_prompt_includes_notes_only_when_present() {
         let mut b: Bead =
             serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
-        assert!(!task_prompt(&b, None, None).contains("Notes"));
+        assert!(!task_prompt(&b, "sulla/x", None, None).contains("Notes"));
         b.notes = "Retry after discarded attempt: broke the build".into();
-        let p = task_prompt(&b, None, None);
+        let p = task_prompt(&b, "sulla/x", None, None);
         assert!(p.contains("Notes"));
         assert!(p.contains("broke the build"));
     }
@@ -1050,14 +1055,14 @@ mod tests {
     #[test]
     fn prompts_forbid_posting_to_github() {
         let b: Bead = serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
-        assert!(task_prompt(&b, None, None).contains(NO_GITHUB));
-        assert!(review_prompt(&b, "main").contains(NO_GITHUB));
+        assert!(task_prompt(&b, "sulla/x", None, None).contains(NO_GITHUB));
+        assert!(review_prompt(&b, "sulla/x", "main").contains(NO_GITHUB));
     }
 
     #[test]
     fn task_prompt_includes_preset() {
         let b: Bead = serde_json::from_str(r#"{"id":"x-1","title":"t","status":"open"}"#).unwrap();
-        let p = task_prompt(&b, None, Some(("bugfix", "reproduce first")));
+        let p = task_prompt(&b, "sulla/x", None, Some(("bugfix", "reproduce first")));
         assert!(p.contains("Approach (bugfix): reproduce first"));
     }
 

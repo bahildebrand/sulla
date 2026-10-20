@@ -272,7 +272,7 @@ pub struct App {
 impl App {
     pub fn new(cfg: Config, repo: PathBuf, tx: Sender<Event>) -> Result<Self> {
         let sandbox = sandbox::build(&cfg, &repo)?;
-        let git = Git::new(repo.clone());
+        let git = Git::new(repo.clone()).with_prefix(&cfg.branch_prefix);
         git.ensure_ignored()?;
         let base = match &cfg.base_branch {
             Some(b) => b.clone(),

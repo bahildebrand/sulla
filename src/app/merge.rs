@@ -1,7 +1,7 @@
 use color_eyre::Result;
 
 use crate::config::{PrTool, Workflow};
-use crate::git::{self, RebaseConflict};
+use crate::git::RebaseConflict;
 use crate::graphite;
 use crate::sandbox::Outcome;
 use crate::sessions;
@@ -200,7 +200,7 @@ impl App {
         if !self.graphite() {
             return;
         }
-        if let Err(e) = graphite::untrack(&self.repo, &git::branch(id)) {
+        if let Err(e) = graphite::untrack(&self.repo, &self.git.branch(id)) {
             tracing::debug!("gt untrack {id}: {e:#}");
         }
     }
@@ -223,7 +223,6 @@ impl App {
             .collect();
         let steps = graphite::plan(
             self.cfg.pr.tool,
-            &self.base,
             &r.moved,
             &unmoved,
             |id| self.git.stack_parent(id),
@@ -233,7 +232,8 @@ impl App {
         for step in steps {
             let (id, res) = match step {
                 graphite::Step::Track { id, parent } => {
-                    let res = graphite::track(&self.repo, &git::branch(&id), &parent);
+                    let parent = parent.map_or_else(|| self.base.clone(), |p| self.git.branch(&p));
+                    let res = graphite::track(&self.repo, &self.git.branch(&id), &parent);
                     (id, res)
                 }
                 graphite::Step::Submit(id) => {

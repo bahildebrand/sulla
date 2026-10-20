@@ -4,7 +4,6 @@ use std::process::Command;
 use color_eyre::{Report, Result, eyre::bail};
 
 use crate::config::PrTool;
-use crate::git;
 use crate::health::Probe;
 
 pub const GT: &str = "gt";
@@ -68,13 +67,12 @@ pub fn needs_rebase(e: &Report) -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
-    Track { id: String, parent: String },
+    Track { id: String, parent: Option<String> },
     Submit(String),
 }
 
 pub fn plan(
     tool: PrTool,
-    base: &str,
     moved: &[String],
     unmoved: &[String],
     stack_parent: impl Fn(&str) -> Option<String>,
@@ -91,10 +89,7 @@ pub fn plan(
             continue;
         }
         seen.push(id);
-        let parent = stack_parent(id)
-            .filter(|p| awaiting(p))
-            .map(|p| git::branch(&p))
-            .unwrap_or_else(|| base.to_string());
+        let parent = stack_parent(id).filter(|p| awaiting(p));
         steps.push(Step::Track {
             id: id.clone(),
             parent,
@@ -118,10 +113,10 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    fn track(id: &str, parent: &str) -> Step {
+    fn track(id: &str, parent: Option<&str>) -> Step {
         Step::Track {
             id: id.into(),
-            parent: parent.into(),
+            parent: parent.map(Into::into),
         }
     }
 
@@ -137,7 +132,6 @@ mod tests {
     fn plan_is_a_noop_for_gh() {
         let steps = plan(
             PrTool::Gh,
-            "main",
             &ids(&["b"]),
             &ids(&["c"]),
             stack,
@@ -152,7 +146,6 @@ mod tests {
         let awaiting = |id: &str| id == "a";
         let steps = plan(
             PrTool::Graphite,
-            "main",
             &ids(&["b", "d"]),
             &ids(&["e"]),
             stack,
@@ -161,11 +154,7 @@ mod tests {
         );
         assert_eq!(
             steps,
-            [
-                track("b", "sulla/a"),
-                track("d", "main"),
-                track("e", "main"),
-            ]
+            [track("b", Some("a")), track("d", None), track("e", None),]
         );
     }
 
@@ -175,7 +164,6 @@ mod tests {
         let clean = |id: &str| id != "d";
         let steps = plan(
             PrTool::Graphite,
-            "main",
             &ids(&["b", "d"]),
             &ids(&["c", "b"]),
             stack,
@@ -185,9 +173,9 @@ mod tests {
         assert_eq!(
             steps,
             [
-                track("b", "sulla/a"),
-                track("d", "sulla/b"),
-                track("c", "sulla/a"),
+                track("b", Some("a")),
+                track("d", Some("b")),
+                track("c", Some("a")),
                 Step::Submit("b".into()),
             ]
         );

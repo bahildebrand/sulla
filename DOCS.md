@@ -12,8 +12,14 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - **Pending** beads are claimed in priority order until `max_agents` agents are in progress. Only
   beads whose dependencies are closed start. Blocked beads show `⊘`. `A` on a blocked bead without
   a worktree only releases it to Pending, unless it can be stacked.
-- **Running**: the agent works in `.sulla/worktrees/<bead>` on branch `sulla/<bead>` and is told
-  to run `bd set-state <bead> sulla=review` when done.
+- **Running**: the agent works in `.sulla/worktrees/<bead>` on its own branch (`<branch>` below)
+  and is told to run `bd set-state <bead> sulla=review` when done. The branch is `branch_prefix`
+  (default `sulla/`) followed by up to three words of the bead title joined by `-`, skipping filler
+  words like `the` and `to` and capped at 24 characters (`Fix the login bug` becomes
+  `sulla/fix-login-bug`). A name already used by a local or remote branch or another bead gets
+  `-2`, `-3` and so on. The name is picked once, when the worktree is first created, and kept in
+  `sulla.<bead>.branch` in the git config, so renaming the bead or changing the prefix later does
+  not move it. Branches created before naming existed stay `sulla/<bead>`.
 - **Review**: you read the diff, comment, run checks, request an AI review, and merge.
 - **Merge** rebases the branch onto base and fast-forwards (no merge commits), removes the
   worktree and branch, and closes the bead.
@@ -156,8 +162,8 @@ a new AI review, when you send feedback, or when the bead goes back to running.
 ### Publishing
 
 With `workflow = "pr"`, `P` publishes the reviewed bead instead of `m`. Pending changes are
-committed and rejected hunks dropped as on merge, then `sulla/<bead>` is pushed to the `[pr]`
-remote with `--set-upstream` and `gh pr create --head sulla/<bead> --base <base>` opens a PR (a
+committed and rejected hunks dropped as on merge, then `<branch>` is pushed to the `[pr]`
+remote with `--set-upstream` and `gh pr create --head <branch> --base <base>` opens a PR (a
 draft when `draft = true`). The PR takes its title from the subject of the branch's first commit
 and its body from that commit's body, so a commit written to the repo's PR conventions becomes the
 PR description. When that commit's body is empty, the bead description is used as the body
@@ -184,12 +190,12 @@ With `[pr] tool = "graphite"`, publishing uses the Graphite `gt` CLI instead of 
 `gh pr create`, so stacked beads show up as a Graphite stack. After committing and dropping
 rejected hunks, a stacked bead whose parent branch was rewritten since it was stacked (the parent
 was amended in review or rebased before a revision) is first restacked onto the parent's current
-tip, with either tool. sulla then runs `gt track sulla/<bead> --parent <parent> --no-interactive` in the bead's
+tip, with either tool. sulla then runs `gt track <branch> --parent <parent> --no-interactive` in the bead's
 worktree, where the parent is the stack parent's branch or base as above. Re-tracking only updates
 Graphite's metadata and never rebases. It then runs
 `gt submit --no-interactive --no-edit --no-ai --no-stack` (plus `--draft` when `draft = true`),
 which pushes the branch and its downstack and opens or updates their PRs, never touching branches
-stacked above it. The PR is looked up with `gh pr list --head sulla/<bead>`, and when it was just
+stacked above it. The PR is looked up with `gh pr list --head <branch>`, and when it was just
 created its title and body are set with `gh pr edit` the same way as with `gh`. The rest (labels, Awaiting PR,
 watching, revising and merge detection) is the same as with `gh`. A stacked bead's parent must
 already be tracked by Graphite, which it is when the parent was also published with Graphite.
@@ -197,7 +203,7 @@ Only sulla runs `gt`; agents never push or submit.
 
 A Graphite publish that fails because of a bad rebase is repaired automatically:
 
-- When `gt track` rejects the parent (`<parent> is not in the history of sulla/<bead>`) or `gt track`
+- When `gt track` rejects the parent (`<parent> is not in the history of <branch>`) or `gt track`
   or `gt submit` asks for a restack, sulla rebases the branch itself (onto the stack parent's
   current tip when stacked, else base), then runs `gt track` and `gt submit` once more.
 - When that rebase, or the restack onto a rewritten parent before it, hits conflicts, the rebase is
@@ -218,7 +224,7 @@ sulla rebases stacks itself, so with `tool = "graphite"` it keeps Graphite's met
 - A restacked branch that is Awaiting PR, whose rebase succeeded and whose worktree is clean, is
   then re-submitted with `gt submit` from its worktree so its PR base and commits update.
 - When a bead is closed or discarded and its branch removed, sulla first runs
-  `gt untrack sulla/<bead> --force`, ignoring errors when it was not tracked. Graphite untracks its
+  `gt untrack <branch> --force`, ignoring errors when it was not tracked. Graphite untracks its
   children too, and they are re-tracked as above once restacked.
 - When a revised Awaiting PR bead is published again, its Awaiting PR children are restacked onto
   the new parent tip, then re-tracked and re-submitted.
@@ -261,7 +267,7 @@ runs on it, and `revised, Enter to review` once it is waiting on you: `Enter` op
 
 When a Revise bead is picked, sulla:
 
-1. Fetches `<remote>/<base>` and rebases `sulla/<bead>` onto it in the worktree (a bead stacked on
+1. Fetches `<remote>/<base>` and rebases `<branch>` onto it in the worktree (a bead stacked on
    a parent that is still open is restacked onto the parent instead). On conflicts the rebase is
    aborted and the prompt tells the agent to run it and resolve the conflicts first.
 2. Records the rebased HEAD in `refs/sulla/revise/<bead>`. Until the next publish, the Review diff,
