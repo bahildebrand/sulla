@@ -38,9 +38,6 @@ if [ -z "$name" ]; then
 elif [ "$(id -g "$name")" != "$gid" ]; then
     usermod -g "$gid" "$name"
 fi
-if getent group docker >/dev/null && ! id -nG "$name" | tr ' ' '\n' | grep -qx docker; then
-    usermod -aG docker "$name"
-fi
 "#;
 
 #[derive(Debug, Clone)]
