@@ -10,7 +10,7 @@ mod reviews;
 mod schedule;
 mod views;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use crossterm::event::{Event as CEvent, KeyEventKind};
 
 use crate::agent::{self, Agent, Backend, CHAT_ID, Claude, Copilot, Stall};
 use crate::beads::{Bead, Beads, Column, State};
+use crate::browse;
 use crate::budget;
 use crate::checks::{self, Check};
 use crate::config::{AgentKind, Config, Trigger, Workflow};
@@ -210,6 +211,7 @@ pub struct App {
     backends: HashMap<AgentKind, Box<dyn Backend>>,
     sandbox: Box<dyn Sandbox>,
     slots: Slots,
+    published_slots: Option<BTreeMap<String, usize>>,
     deferred: HashMap<usize, Outcome>,
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
@@ -334,6 +336,7 @@ impl App {
             backends,
             sandbox,
             slots: Slots::default(),
+            published_slots: None,
             deferred: HashMap::new(),
             all: Vec::new(),
             ready: Vec::new(),
@@ -401,11 +404,41 @@ impl App {
 
     pub fn slot_location(&self, id: &str) -> Option<String> {
         let slot = self.slots.get(id)?;
-        let name = self.sandbox.instance(slot)?;
-        Some(match self.sandbox.address(slot) {
-            Some(ip) => format!("{name} {ip}"),
-            None => name,
-        })
+        let mut loc = self.sandbox.instance(slot)?;
+        if let Some(ip) = self.sandbox.address(slot) {
+            loc.push_str(&format!(" {ip}"));
+        }
+        if let Some(ip) = self.sandbox.loopback(slot) {
+            loc.push_str(&format!(" host {ip}"));
+        }
+        Some(loc)
+    }
+
+    fn publish_slots(&mut self) {
+        let slots = self.slots.snapshot();
+        if self.published_slots.as_ref() == Some(&slots) {
+            return;
+        }
+        if let Err(e) = browse::write_slots(&self.repo, &slots) {
+            tracing::warn!("writing slot map failed: {e:#}");
+        }
+        self.published_slots = Some(slots);
+    }
+
+    pub(super) fn browse(&mut self, target: &str) {
+        let target = match target {
+            "" => match self.viewing().or_else(|| self.selected().map(|b| b.id)) {
+                Some(id) => id,
+                None => return self.status = "browse: no bead selected".into(),
+            },
+            t => t.to_string(),
+        };
+        self.status = match browse::resolve(&target, &self.slots.snapshot())
+            .and_then(|slot| browse::launch(&self.cfg, &self.repo, slot))
+        {
+            Ok(m) => m,
+            Err(e) => format!("browse: {e:#}"),
+        };
     }
 
     pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {
@@ -559,6 +592,7 @@ impl App {
         self.dispatch(ev);
         self.check_stalls();
         self.check_budgets();
+        self.publish_slots();
         if let Some(id) = self.viewing() {
             self.notifier.clear(&id);
         }
@@ -742,6 +776,7 @@ impl App {
             c.stop();
         }
         self.slots.clear();
+        self.publish_slots();
         self.deferred.clear();
         self.sandbox.shutdown();
         self.notifier.shutdown();

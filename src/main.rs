@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod beads;
+mod browse;
 mod budget;
 mod checks;
 mod config;
@@ -64,6 +65,13 @@ enum Cmd {
     Init,
     #[command(about = "Run the `[hooks] setup` command again in a bead's worktree")]
     Setup { bead: String },
+    #[command(about = "Open the app a slot serves in a browser")]
+    Browse {
+        #[arg(help = "Slot number, or a bead the running sulla holds a slot for")]
+        target: String,
+    },
+    #[command(about = "List each slot with its container, host address and beads")]
+    Status,
 }
 
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -97,6 +105,11 @@ fn main() -> Result<()> {
     }
     if let Some(n) = args.max_agents {
         cfg.max_agents = n;
+    }
+    match &args.cmd {
+        Some(Cmd::Browse { target }) => return browse::run(&cfg, &repo, target),
+        Some(Cmd::Status) => return browse::status(&cfg, &repo),
+        _ => {}
     }
     if args.base.is_some() {
         cfg.base_branch = args.base;

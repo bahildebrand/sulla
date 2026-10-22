@@ -129,6 +129,10 @@ closing it without merging, unstacks its children so they keep its commits in th
   `bash` in the bead's container (as your user, in the worktree, after `[incus] init`), otherwise `$SHELL`
   in the worktree on the host. A bead with no container left gets a host shell. Exit the shell to
   return, the review diff reloads like after `e`.
+- `:browse [bead|slot]` opens the app the bead's container serves in a Chrome profile of its own,
+  through the slot's loopback IP (`[incus.browse]`, see the README). Without an argument it uses
+  the bead being viewed or selected. `sulla browse <slot|bead>` does the same from a shell, and
+  `sulla status` lists slots with their IP and beads.
 
 ### Worktree setup
 

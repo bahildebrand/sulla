@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::{Outcome, Prepare, Sandbox};
 use crate::agent::Launch;
 use crate::beads;
+use crate::browse;
 use crate::config::{AgentKind, IncusConfig};
 use crate::sessions;
 
@@ -39,6 +40,7 @@ elif [ "$(id -g "$name")" != "$gid" ]; then
     usermod -g "$gid" "$name"
 fi
 "#;
+const BROWSE_DEVICE: &str = "browse-";
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -345,7 +347,32 @@ impl Driver {
             self.run(&["config", "device", "remove", name, BEADS_DEVICE])?;
         }
         tracing::info!("incus: forwarding {addr} in {name} to the host Dolt server");
-        self.run(&proxy_args(name, &addr)).map(drop)
+        self.run(&proxy_args(name, BEADS_DEVICE, &addr, &addr, true))
+            .map(drop)
+    }
+
+    fn browse_proxies(&self, name: &str, slot: usize) -> Result<()> {
+        let want = browse_devices(&self.cfg.browse.ports, slot);
+        let inst = self.cli.query(&format!("/1.0/instances/{name}"))?;
+        let have = inst["devices"].as_object().cloned().unwrap_or_default();
+        let current = |dev: &str| {
+            want.get(dev).is_some_and(|(l, c)| {
+                have.get(dev)
+                    .is_some_and(|v| v["listen"] == l.as_str() && v["connect"] == c.as_str())
+            })
+        };
+        for dev in have.keys() {
+            if dev.starts_with(BROWSE_DEVICE) && !current(dev) {
+                self.run(&["config", "device", "remove", name, dev])?;
+            }
+        }
+        for (dev, (listen, connect)) in &want {
+            if !current(dev) {
+                tracing::info!("incus: forwarding host {listen} to {connect} in {name}");
+                self.run(&proxy_args(name, dev, listen, connect, false))?;
+            }
+        }
+        Ok(())
     }
 
     fn idmap_error(&self, e: color_eyre::Report) -> color_eyre::Report {
@@ -590,6 +617,10 @@ impl Driver {
             tracing::warn!("incus: [incus] init failed in {name}: {e:#}");
             warnings.push(format!("[incus] init failed: {e}"));
         }
+        if let Err(e) = self.browse_proxies(&name, slot) {
+            tracing::warn!("incus: forwarding browse ports to {name} failed: {e:#}");
+            warnings.push(format!("forwarding browse ports failed: {e}"));
+        }
         tracing::info!("incus: {name} ready");
         self.refresh_address(slot);
         Ok(warnings)
@@ -680,6 +711,10 @@ impl Sandbox for Incus {
 
     fn address(&self, slot: usize) -> Option<String> {
         self.driver.addrs.lock().unwrap().get(&slot).cloned()
+    }
+
+    fn loopback(&self, slot: usize) -> Option<String> {
+        browse::loopback(slot).filter(|_| !self.driver.cfg.browse.ports.is_empty())
     }
 
     fn isolated(&self) -> bool {
@@ -791,21 +826,39 @@ fn init_probe(init: &str) -> Vec<OsString> {
         .collect()
 }
 
-fn proxy_args(name: &str, addr: &str) -> Vec<String> {
-    [
+fn proxy_args(name: &str, device: &str, listen: &str, connect: &str, inside: bool) -> Vec<String> {
+    let mut args: Vec<String> = [
         "config",
         "device",
         "add",
         name,
-        BEADS_DEVICE,
+        device,
         "proxy",
-        &format!("listen={addr}"),
-        &format!("connect={addr}"),
-        "bind=instance",
+        &format!("listen={listen}"),
+        &format!("connect={connect}"),
     ]
     .into_iter()
     .map(String::from)
-    .collect()
+    .collect();
+    if inside {
+        args.push("bind=instance".into());
+    }
+    args
+}
+
+fn browse_devices(ports: &[u16], slot: usize) -> BTreeMap<String, (String, String)> {
+    let Some(ip) = browse::loopback(slot) else {
+        return BTreeMap::new();
+    };
+    ports
+        .iter()
+        .map(|p| {
+            (
+                format!("{BROWSE_DEVICE}{p}"),
+                (format!("tcp:{ip}:{p}"), format!("tcp:127.0.0.1:{p}")),
+            )
+        })
+        .collect()
 }
 
 fn parse_ipv4(json: &str, name: &str) -> Option<String> {
@@ -1115,7 +1168,13 @@ mod tests {
 
     #[test]
     fn beads_proxy_listens_on_container_loopback_only() {
-        let args = proxy_args("c", "tcp:127.0.0.1:46509");
+        let args = proxy_args(
+            "c",
+            BEADS_DEVICE,
+            "tcp:127.0.0.1:46509",
+            "tcp:127.0.0.1:46509",
+            true,
+        );
         assert_eq!(
             args,
             [
@@ -1128,6 +1187,52 @@ mod tests {
                 "listen=tcp:127.0.0.1:46509",
                 "connect=tcp:127.0.0.1:46509",
                 "bind=instance",
+            ]
+        );
+    }
+
+    #[test]
+    fn browse_proxies_listen_on_slot_loopback_and_connect_inside() {
+        let devs = browse_devices(&[8000, 8002], 1);
+        assert_eq!(
+            devs,
+            BTreeMap::from([
+                (
+                    "browse-8000".to_string(),
+                    (
+                        "tcp:127.0.100.2:8000".to_string(),
+                        "tcp:127.0.0.1:8000".to_string()
+                    )
+                ),
+                (
+                    "browse-8002".to_string(),
+                    (
+                        "tcp:127.0.100.2:8002".to_string(),
+                        "tcp:127.0.0.1:8002".to_string()
+                    )
+                ),
+            ])
+        );
+        assert!(browse_devices(&[], 1).is_empty());
+        assert!(browse_devices(&[8000], 254).is_empty());
+        let args = proxy_args(
+            "c",
+            "browse-8000",
+            "tcp:127.0.100.2:8000",
+            "tcp:127.0.0.1:8000",
+            false,
+        );
+        assert_eq!(
+            args,
+            [
+                "config",
+                "device",
+                "add",
+                "c",
+                "browse-8000",
+                "proxy",
+                "listen=tcp:127.0.100.2:8000",
+                "connect=tcp:127.0.0.1:8000",
             ]
         );
     }

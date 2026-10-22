@@ -174,6 +174,15 @@ pub struct IncusConfig {
     pub mounts: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub init: Option<String>,
+    pub browse: BrowseConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowseConfig {
+    pub ports: Vec<u16>,
+    pub hosts: Vec<String>,
+    pub url: Option<String>,
 }
 
 impl Default for IncusConfig {
@@ -192,6 +201,7 @@ impl Default for IncusConfig {
             mounts: vec!["~/.claude".into(), "~/.copilot".into()],
             env: BTreeMap::new(),
             init: None,
+            browse: BrowseConfig::default(),
         }
     }
 }
@@ -437,6 +447,24 @@ mod tests {
         assert_eq!(cfg.hooks.setup_script(), None);
         let cfg: Config = toml::from_str("[hooks]\nsetup = \"bin/setup\"").unwrap();
         assert_eq!(cfg.hooks.setup_script(), Some("bin/setup"));
+    }
+
+    #[test]
+    fn incus_browse_parses_nested_table() {
+        assert_eq!(Config::default().incus.browse, BrowseConfig::default());
+        let cfg: Config = toml::from_str(
+            "[incus.browse]\nports = [8000, 8001]\nhosts = [\"*.memfault.test\"]\nurl = \"http://app.memfault.test:8000\"",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.incus.browse,
+            BrowseConfig {
+                ports: vec![8000, 8001],
+                hosts: vec!["*.memfault.test".into()],
+                url: Some("http://app.memfault.test:8000".into()),
+            }
+        );
+        assert_eq!(cfg.incus.golden, "sulla-golden");
     }
 
     #[test]

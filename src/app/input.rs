@@ -336,6 +336,7 @@ impl App {
             },
             "chat" => self.open_chat(rest == "new"),
             "health" => self.open_health(),
+            "browse" => self.browse(rest),
             _ => self.status = format!("unknown command: {cmd}"),
         }
     }

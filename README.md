@@ -41,7 +41,7 @@ Press `?` in the app for the full list.
 | Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log, `h` the timeline), `H` bead timeline (time per state, review rounds, ai verdicts), `e` open `$EDITOR` in worktree, `E` shell in the container or worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `dd` delete bead, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `U` revise from PR feedback (also in the review), `w` release the worktree of a Review or Awaiting PR bead so you can work on its branch (`sulla:released`, also in the review), `w` again reclaims it once the branch is not checked out elsewhere, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree, `E` shell |
 | Review | `jk` `Ctrl-d/u` scroll (counts like `5j` work), `]f` `[f` files, `c` comment (`10c` covers ten lines from the cursor), `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR, with its unpublished stack parents in Review (`workflow = "pr"`), `w` release the worktree to work on the branch yourself (`w` again reclaims it), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree, `E` shell (diff reloads on return from either) |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:browse [bead\|slot]` |
 
 ## Config
 
@@ -90,6 +90,12 @@ reset_every = 10          # hard reset a slot after this many beads, 0 = never
 reset_volumes = true      # light reset also prunes Docker volumes
 mounts = ["~/.claude", "~/.copilot"] # host paths shared at the same path
 env = {}                  # extra env passed to agents in containers
+
+# Host browser access to slot apps, see "Browsing a slot's app"
+[incus.browse]
+ports = []                # container ports forwarded to the slot's host loopback IP
+hosts = []                # host patterns the slot's browser resolves to that IP
+# url = "http://app.example.test:8000" # page `sulla browse` opens, {ip} is substituted
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
@@ -259,3 +265,34 @@ export PATH="$PWD/.venv/bin:$PATH"
 slot are reachable from the host at that IP, or by name via Incus DNS as `<container>.incus`
 (for example `http://sulla-myrepo-1a2b3c-0.incus:3000`) when your host resolver forwards the
 `incus` domain to the Incus bridge.
+
+### Browsing a slot's app
+
+Apps that hardcode hostnames and ports (in CORS lists, dev proxies, Vite config) cannot be moved
+to other host ports, so sulla gives each slot its own loopback IP instead and keeps the ports:
+
+```toml
+[incus.browse]
+ports = [8000, 8001, 8002]
+hosts = ["*.memfault.test"]
+url = "http://app.memfault.test:8000"
+```
+
+- Slot `N` gets `127.0.100.<N+1>` (slot 0 is `127.0.100.1`). Before every bead sulla adds an
+  Incus proxy device `browse-<port>` per port that listens on that IP on the host and connects
+  to `127.0.0.1:<port>` in the container, and removes `browse-*` devices for ports no longer
+  listed. Linux routes all of `127.0.0.0/8` to loopback, so nothing needs configuring on the
+  host, and anything already on `127.0.0.1:<port>` (a host dev stack) is untouched. A device that
+  cannot be added (say the address is taken) is shown as a slot warning and the bead still starts.
+- `sulla browse <slot|bead>` (or `:browse [bead|slot]` in the TUI, defaulting to the selected
+  bead) starts Chrome with its own profile in `.sulla/browser/slot-<N>`,
+  `--host-resolver-rules="MAP <host> 127.0.100.<N+1>"` for each `hosts` entry, and opens `url`
+  (default `http://<ip>:<first port>`). The separate profile is what makes Chrome honour the
+  resolver rules while your normal browser is open, and keeps each slot's cookies apart. The
+  binary is `$SULLA_BROWSER`, else the first of `google-chrome`, `chromium`, `chromium-browser`
+  on `PATH`.
+- A bead is resolved to its slot through `.sulla/slots.json`, which the running sulla keeps up to
+  date. `sulla status` prints each slot with its container, loopback IP, the beads it holds and
+  its URL, and the board shows `host <ip>` next to the container of a bead with a slot.
+- Two repos running incus sulla at once would want the same IPs, so only one of them gets the
+  browse devices.

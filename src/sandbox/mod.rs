@@ -1,6 +1,6 @@
 mod incus;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,7 +8,7 @@ use std::process::Command;
 use color_eyre::Result;
 use portable_pty::CommandBuilder;
 
-pub use incus::Incus;
+pub use incus::{Incus, container_name};
 
 use crate::agent::Launch;
 use crate::config::{AgentKind, Config, SandboxKind};
@@ -52,6 +52,9 @@ pub trait Sandbox: Send {
         None
     }
     fn address(&self, _slot: usize) -> Option<String> {
+        None
+    }
+    fn loopback(&self, _slot: usize) -> Option<String> {
         None
     }
     fn isolated(&self) -> bool {
@@ -167,6 +170,10 @@ impl Slots {
 
     pub fn clear(&mut self) {
         self.taken.clear();
+    }
+
+    pub fn snapshot(&self) -> BTreeMap<String, usize> {
+        self.taken.iter().map(|(id, s)| (id.clone(), *s)).collect()
     }
 }
 

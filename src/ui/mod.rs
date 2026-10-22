@@ -195,7 +195,7 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health)",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :browse [bead|slot])",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
