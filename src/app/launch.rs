@@ -143,6 +143,14 @@ impl Prelaunch {
     }
 }
 
+fn join_notes(id: &str, note: Option<String>, warnings: Vec<String>) -> Option<String> {
+    let warnings = (!warnings.is_empty()).then(|| format!("{id}: {}", warnings.join("; ")));
+    match (note, warnings) {
+        (Some(n), Some(w)) => Some(format!("{n}; {w}")),
+        (n, w) => n.or(w),
+    }
+}
+
 fn stopped(id: &str) -> color_eyre::Report {
     eyre!("{id} was stopped before its agent started")
 }
@@ -274,8 +282,12 @@ impl App {
         let tx = self.tx.clone();
         let key = id.clone();
         let job = std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(AssertUnwindSafe(|| prepare().and_then(|()| build())))
-                .unwrap_or_else(|_| Err(eyre!("launching {key} panicked")));
+            let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let warnings = prepare()?;
+                let (launch, note) = build()?;
+                Ok((launch, join_notes(&key, note, warnings)))
+            }))
+            .unwrap_or_else(|_| Err(eyre!("launching {key} panicked")));
             let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
                 app.launched(&key, slot, kind, r, done)
             })));
@@ -308,11 +320,11 @@ impl App {
         let r = if l.stopped || self.launch_stopped(id, l.was) {
             Err(stopped(id))
         } else {
-            r.and_then(|(launch, rebuilt)| {
+            r.and_then(|(launch, note)| {
                 self.spawn_agent(slot, launch, kind)?;
-                if let Some(m) = rebuilt {
+                if let Some(m) = note {
                     self.status = m.clone();
-                    self.rebuilt = Some(m);
+                    self.note = Some(m);
                 }
                 Ok(())
             })
@@ -378,8 +390,8 @@ impl App {
         }
     }
 
-    pub(super) fn rebuilt_status(&mut self) {
-        if let Some(m) = self.rebuilt.take() {
+    pub(super) fn show_note(&mut self) {
+        if let Some(m) = self.note.take() {
             self.status = m;
         }
     }

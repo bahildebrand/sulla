@@ -76,7 +76,7 @@ impl App {
                     if app.report(r).is_none() {
                         app.failed.insert(id);
                     }
-                    app.rebuilt_status();
+                    app.show_note();
                 });
             } else {
                 tracing::info!("resetting orphaned bead {}", b.id);

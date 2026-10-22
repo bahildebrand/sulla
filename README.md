@@ -222,8 +222,13 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
   networks (and volumes when `reset_volumes = true`) and kill the agent user's processes.
 - Hard reset when a slot has run `reset_every` beads, when a bead is discarded, or when the light
   reset fails: the container is restored to its `clean` snapshot.
-- Mounts are added when a slot is created and the snapshot keeps them, so after changing `mounts`
-  delete the repo's slot containers (`incus delete --force <name>`) to have them recreated.
+- Before every bead sulla reconciles the slot's disk devices against `mounts`, so editing the list
+  takes effect on the next bead without recreating the container: missing paths are mounted,
+  and the `mount<N>` devices sulla owns are removed when their path was dropped or their source
+  no longer matches. Other disk devices are left alone, and one already mounted at a listed path
+  counts as that mount. A `mounts` entry that does not exist on the host is skipped with a
+  warning in the status line. Mounts use the container's `raw.idmap`, so files keep your uid and
+  gid.
 
 ### Shell init
 
@@ -231,7 +236,9 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
 (agents, AI reviewers and checks), for setup a static `env` cannot express, like activating a
 conda environment or putting a worktree-relative directory on `PATH`. The command is then started
 with `exec` from that shell, so exported variables carry over. If the snippet fails, the command
-still starts.
+still starts. Before every bead sulla also runs the snippet once in the repo and, if a command
+in it fails outside a condition such as `|| true` or `if`, shows the first error in the status
+line.
 
 ```toml
 [incus]

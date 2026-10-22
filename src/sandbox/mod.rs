@@ -40,7 +40,7 @@ impl Outcome {
     }
 }
 
-pub type Prepare = Box<dyn FnOnce() -> Result<()> + Send>;
+pub type Prepare = Box<dyn FnOnce() -> Result<Vec<String>> + Send>;
 
 pub trait Sandbox: Send {
     fn name(&self) -> &str;
@@ -97,7 +97,7 @@ impl Sandbox for Worktree {
     }
 
     fn prepare(&mut self, _slot: usize, _id: &str) -> Prepare {
-        Box::new(|| Ok(()))
+        Box::new(|| Ok(Vec::new()))
     }
 
     fn wrap(&self, _slot: usize, _launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {

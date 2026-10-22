@@ -397,18 +397,72 @@ impl Driver {
             .map_err(|e| self.idmap_error(e))?;
         let repo = self.repo.to_string_lossy();
         self.add_disk(name, "repo", &repo)?;
-        for (i, m) in self.cfg.mounts.iter().enumerate() {
-            let path = expand_home(m, &self.host.home);
-            if !Path::new(&path).exists() {
-                tracing::info!("incus: skipping missing mount {path}");
-                continue;
-            }
-            self.add_disk(name, &format!("mount{i}"), &path)?;
-        }
         self.docker_volume(name)?;
         tracing::info!("incus: snapshotting {name} as {}", self.cfg.snapshot);
         self.run(&["snapshot", "create", name, &self.cfg.snapshot])?;
         Ok(())
+    }
+
+    fn mounts(&self, name: &str) -> Result<Vec<String>> {
+        let mut warnings = Vec::new();
+        let mut want: Vec<String> = Vec::new();
+        for m in &self.cfg.mounts {
+            let path = expand_home(m, &self.host.home);
+            if !Path::new(&path).exists() {
+                tracing::warn!(
+                    "incus: not mounting {path} into {name}, it does not exist on the host"
+                );
+                warnings.push(format!("mount {path} does not exist on the host"));
+            } else if !want.contains(&path) {
+                want.push(path);
+            }
+        }
+        let inst = self.cli.query(&format!("/1.0/instances/{name}"))?;
+        for change in plan_mounts(&inst["devices"], &want) {
+            match change {
+                Mount::Remove(device) => {
+                    tracing::info!("incus: removing mount {device} from {name}");
+                    self.run(&["config", "device", "remove", name, &device])?;
+                }
+                Mount::Add(device, path) => {
+                    tracing::info!("incus: mounting {path} into {name} as {device}");
+                    self.add_disk(name, &device, &path)?;
+                }
+            }
+        }
+        Ok(warnings)
+    }
+
+    fn check_init(&self, name: &str) -> Result<()> {
+        let Some(init) = self.cfg.init.as_deref().filter(|s| !s.trim().is_empty()) else {
+            return Ok(());
+        };
+        let env = exec_env(std::iter::empty(), &self.host, &self.cfg.env);
+        let argv = exec_argv(
+            &self.cfg.bin,
+            name,
+            &self.host,
+            &self.repo.to_string_lossy(),
+            &env,
+            &init_probe(init),
+            false,
+        );
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(
+            match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
+                Some(line) => eyre!("{line}"),
+                None => eyre!("{}", out.status),
+            },
+        )
     }
 
     fn add_disk(&self, name: &str, device: &str, path: &str) -> Result<()> {
@@ -513,12 +567,13 @@ impl Driver {
         self.cli.feed(&write, &serde_json::to_string_pretty(&v)?)
     }
 
-    fn prepare(&self, slot: usize, id: &str) -> Result<()> {
+    fn prepare(&self, slot: usize, id: &str) -> Result<Vec<String>> {
         let name = self.name(slot);
         tracing::info!("incus: preparing {name} for {id}");
         if !self.exists(&name) {
             self.create(&name)?;
         }
+        let mut warnings = self.mounts(&name)?;
         if !self.running(&name)? {
             self.docker_volume(&name)?;
             tracing::info!("incus: starting {name}");
@@ -531,9 +586,13 @@ impl Driver {
             tracing::warn!("incus: seeding Claude config in {name} failed: {e:#}");
         }
         self.beads_proxy(&name)?;
+        if let Err(e) = self.check_init(&name) {
+            tracing::warn!("incus: [incus] init failed in {name}: {e:#}");
+            warnings.push(format!("[incus] init failed: {e}"));
+        }
         tracing::info!("incus: {name} ready");
         self.refresh_address(slot);
-        Ok(())
+        Ok(warnings)
     }
 }
 
@@ -674,6 +733,62 @@ impl Driver {
         c.args(&argv[1..]);
         c
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Mount {
+    Add(String, String),
+    Remove(String),
+}
+
+fn mount_device(device: &str) -> bool {
+    device
+        .strip_prefix("mount")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn plan_mounts(devices: &Value, want: &[String]) -> Vec<Mount> {
+    let empty = serde_json::Map::new();
+    let devices = devices.as_object().unwrap_or(&empty);
+    let field = |d: &Value, k: &str| d[k].as_str().unwrap_or_default().to_string();
+    let mut plan = Vec::new();
+    let mut covered: Vec<String> = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
+    for (device, d) in devices {
+        let (source, path) = (field(d, "source"), field(d, "path"));
+        if !mount_device(device) {
+            if d["type"] == "disk" {
+                covered.push(path);
+            }
+            taken.push(device.clone());
+        } else if d["type"] == "disk"
+            && source == path
+            && want.contains(&path)
+            && !covered.contains(&path)
+        {
+            covered.push(path);
+            taken.push(device.clone());
+        } else {
+            plan.push(Mount::Remove(device.clone()));
+        }
+    }
+    for path in want.iter().filter(|p| !covered.contains(p)) {
+        let device = (0..)
+            .map(|i| format!("mount{i}"))
+            .find(|d| !taken.contains(d))
+            .unwrap_or_default();
+        taken.push(device.clone());
+        plan.push(Mount::Add(device, path.clone()));
+    }
+    plan
+}
+
+fn init_probe(init: &str) -> Vec<OsString> {
+    let script = format!("trap 'sulla_init=$?' ERR\n{init}\nexit \"${{sulla_init:-0}}\"");
+    ["bash", "-c", &script, "sulla"]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
 }
 
 fn proxy_args(name: &str, addr: &str) -> Vec<String> {
@@ -1172,6 +1287,108 @@ mod tests {
         );
         assert_eq!(parse_ipv4(r#"[{"name": "a", "state": null}]"#, "a"), None);
         assert_eq!(parse_ipv4("not json", "a"), None);
+    }
+
+    fn want(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn plan_mounts_adds_missing_to_existing_container() {
+        let devices = json!({
+            "repo": {"type": "disk", "source": "/r", "path": "/r"},
+            "docker": {"type": "disk", "pool": "default", "source": "c-docker", "path": "/var/lib/docker"},
+            "beads-dolt": {"type": "proxy", "listen": "tcp:127.0.0.1:1"},
+            "mount0": {"type": "disk", "source": "/h/.claude", "path": "/h/.claude"}
+        });
+        assert_eq!(
+            plan_mounts(
+                &devices,
+                &want(&["/h/.claude", "/h/.copilot", "/h/.cache/uv"])
+            ),
+            [
+                Mount::Add("mount1".into(), "/h/.copilot".into()),
+                Mount::Add("mount2".into(), "/h/.cache/uv".into()),
+            ]
+        );
+        assert_eq!(plan_mounts(&devices, &want(&["/h/.claude"])), []);
+    }
+
+    #[test]
+    fn plan_mounts_removes_dropped_and_changed_but_keeps_foreign() {
+        let devices = json!({
+            "mount0": {"type": "disk", "source": "/h/a", "path": "/h/a"},
+            "mount1": {"type": "disk", "source": "/h/b", "path": "/h/b"},
+            "mount2": {"type": "disk", "source": "/elsewhere", "path": "/h/c"},
+            "mount3": {"type": "disk", "source": "/h/a", "path": "/h/a"},
+            "home-cache-uv": {"type": "disk", "source": "/h/.cache/uv", "path": "/h/.cache/uv"},
+            "mounted": {"type": "disk", "source": "/x", "path": "/x"}
+        });
+        assert_eq!(
+            plan_mounts(&devices, &want(&["/h/a", "/h/c", "/h/.cache/uv"])),
+            [
+                Mount::Remove("mount1".into()),
+                Mount::Remove("mount2".into()),
+                Mount::Remove("mount3".into()),
+                Mount::Add("mount1".into(), "/h/c".into()),
+            ]
+        );
+        assert_eq!(
+            plan_mounts(&devices, &[]),
+            [
+                Mount::Remove("mount0".into()),
+                Mount::Remove("mount1".into()),
+                Mount::Remove("mount2".into()),
+                Mount::Remove("mount3".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_mounts_handles_missing_devices() {
+        assert_eq!(
+            plan_mounts(&Value::Null, &want(&["/h/a"])),
+            [Mount::Add("mount0".into(), "/h/a".into())]
+        );
+    }
+
+    #[test]
+    fn mount_device_owns_only_numbered_names() {
+        assert!(mount_device("mount0"));
+        assert!(mount_device("mount12"));
+        assert!(!mount_device("mount"));
+        assert!(!mount_device("mounted"));
+        assert!(!mount_device("repo"));
+        assert!(!mount_device("home-cache-uv"));
+    }
+
+    fn probe(init: &str) -> std::process::Output {
+        let argv = init_probe(init);
+        Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn init_probe_fails_when_any_line_fails() {
+        let out = probe(
+            "false || true\neval \"$(/no/such/micromamba shell hook -s bash)\" && micromamba activate x\nexport A=1",
+        );
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("sulla: line 3: /no/such/micromamba"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn init_probe_passes_clean_init() {
+        let out = probe("false || true\nexport A=1\n[ \"$A\" = 1 ]");
+        assert!(out.status.success(), "{out:?}");
+        assert!(out.stderr.is_empty());
     }
 
     #[test]

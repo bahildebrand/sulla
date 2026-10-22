@@ -191,7 +191,7 @@ impl App {
             let id = id.to_string();
             self.start_agent(b, true, Some(text.to_string()), move |app, r| {
                 if app.report(r).is_some() {
-                    app.rebuilt_status();
+                    app.show_note();
                 } else {
                     app.undeliver(&id, was);
                 }
@@ -266,7 +266,7 @@ impl App {
                 app.bd_run(move |beads| beads.set_state(&bead, State::Running));
             }
             app.status = format!("launched {id}");
-            app.rebuilt_status();
+            app.show_note();
         });
     }
 

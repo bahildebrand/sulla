@@ -118,7 +118,7 @@ impl App {
         if self.report(r).is_some() {
             self.failed.remove(&id);
             self.status = format!("revising {id} from PR feedback");
-            self.rebuilt_status();
+            self.show_note();
         } else {
             self.revision_failed(id);
         }
@@ -168,7 +168,7 @@ impl App {
                 let rid = id.to_string();
                 self.start_agent(bead.clone(), true, Some(text), move |app, r| {
                     if app.report(r).is_some() {
-                        app.rebuilt_status();
+                        app.show_note();
                     } else {
                         app.revision_failed(rid);
                     }

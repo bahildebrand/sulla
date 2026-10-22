@@ -31,7 +31,7 @@ impl Sandbox for Gated {
         Box::new(move || {
             drop(gate.lock().unwrap());
             prepared.lock().unwrap().push(id);
-            Ok(())
+            Ok(Vec::new())
         })
     }
 
