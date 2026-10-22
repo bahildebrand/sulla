@@ -204,6 +204,10 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
   first use and reused across beads. The repo is bind-mounted at the same absolute path, along
   with each `mounts` entry, so worktrees, `.beads` and agent logins work unchanged. Agents run
   the real `bd` inside the container against the shared `.beads`.
+- Before every bead sulla makes sure the container has a user with your uid whose primary group
+  has your gid and who is in `docker`, creating or fixing the user and group if needed. Sessions
+  run as that user through `setpriv --init-groups`, so they get its supplementary groups and
+  `docker` works without `sg` or `sudo`.
 - With a server-mode beads database, each slot gets an Incus proxy device (`beads-dolt`) that
   listens on the container's `127.0.0.1:<dolt port>` and forwards to the host's Dolt server on
   `127.0.0.1`, so `bd` in the container uses the port in `.beads/dolt-server.port` unchanged.

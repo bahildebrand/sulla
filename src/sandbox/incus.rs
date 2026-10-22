@@ -22,6 +22,26 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 const BOOT_POLL: Duration = Duration::from_secs(1);
 const ADDR_TRIES: u32 = 30;
 const BEADS_DEVICE: &str = "beads-dolt";
+const USER_SCRIPT: &str = r#"set -e
+uid=$1 gid=$2 user=$3 home=$4
+if ! getent group "$gid" >/dev/null; then
+    if getent group "$user" >/dev/null; then
+        groupmod -g "$gid" "$user"
+    else
+        groupadd -g "$gid" "$user"
+    fi
+fi
+name=$(getent passwd "$uid" | cut -d: -f1)
+if [ -z "$name" ]; then
+    useradd -u "$uid" -g "$gid" -M -d "$home" -s /bin/bash "$user"
+    name=$user
+elif [ "$(id -g "$name")" != "$gid" ]; then
+    usermod -g "$gid" "$name"
+fi
+if getent group docker >/dev/null && ! id -nG "$name" | tr ' ' '\n' | grep -qx docker; then
+    usermod -aG docker "$name"
+fi
+"#;
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -453,6 +473,26 @@ impl Driver {
         });
     }
 
+    fn ensure_user(&self, name: &str) -> Result<()> {
+        let uid = self.host.uid.to_string();
+        let gid = self.host.gid.to_string();
+        self.run(&[
+            "exec",
+            name,
+            "--",
+            "sh",
+            "-c",
+            USER_SCRIPT,
+            "sh",
+            &uid,
+            &gid,
+            &self.host.user,
+            &self.host.home,
+        ])
+        .map(drop)
+        .map_err(|e| eyre!("incus: setting up user {} in {name}: {e:#}", self.host.user))
+    }
+
     fn seed_claude(&self, name: &str) -> Result<()> {
         let path = claude_config(&self.cfg, &self.host.home);
         let path = path.to_string_lossy();
@@ -489,6 +529,7 @@ impl Driver {
                 .map_err(|e| self.idmap_error(e))?;
         }
         self.wait_ready(&name)?;
+        self.ensure_user(&name)?;
         if let Err(e) = self.seed_claude(&name) {
             tracing::warn!("incus: seeding Claude config in {name} failed: {e:#}");
         }
@@ -805,10 +846,6 @@ fn exec_argv(
         bin,
         "exec",
         name,
-        "--user",
-        &host.uid.to_string(),
-        "--group",
-        &host.gid.to_string(),
         "--cwd",
         cwd,
         if tty { "-t" } else { "-T" },
@@ -820,7 +857,17 @@ fn exec_argv(
         out.push("--env".into());
         out.push(format!("{k}={v}").into());
     }
-    out.push("--".into());
+    out.extend(
+        [
+            "--".into(),
+            "setpriv".into(),
+            format!("--reuid={}", host.uid),
+            format!("--regid={}", host.gid),
+            "--init-groups".into(),
+            "--".into(),
+        ]
+        .map(OsString::from),
+    );
     out.extend(argv.iter().cloned());
     out
 }
@@ -1009,10 +1056,6 @@ mod tests {
                 "incus",
                 "exec",
                 "sulla-r-abcdef-1",
-                "--user",
-                "1000",
-                "--group",
-                "1001",
                 "--cwd",
                 "/repo/.sulla/worktrees/x-1",
                 "-t",
@@ -1020,6 +1063,11 @@ mod tests {
                 "A=1",
                 "--env",
                 "B=x y",
+                "--",
+                "setpriv",
+                "--reuid=1000",
+                "--regid=1001",
+                "--init-groups",
                 "--",
                 "copilot",
                 "--yolo",
