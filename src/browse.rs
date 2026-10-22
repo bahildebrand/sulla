@@ -12,6 +12,7 @@ use crate::config::{BrowseConfig, Config, SandboxKind};
 use crate::sandbox;
 
 const BROWSERS: [&str; 3] = ["google-chrome", "chromium", "chromium-browser"];
+const CHROMIUM: [&str; 6] = ["chrome", "chromium", "brave", "edge", "vivaldi", "opera"];
 const MAX_SLOTS: usize = 254;
 
 pub fn loopback(slot: usize) -> Option<String> {
@@ -53,15 +54,91 @@ fn browser_args(profile: &Path, cfg: &BrowseConfig, ip: &str) -> Vec<OsString> {
     out
 }
 
-fn find_browser(over: Option<OsString>, path: Option<OsString>) -> Option<PathBuf> {
+#[derive(Debug, PartialEq, Eq)]
+enum Browser {
+    Chromium(PathBuf),
+    Default,
+}
+
+fn pick(
+    over: Option<OsString>,
+    mapped: bool,
+    default: impl FnOnce() -> Option<PathBuf>,
+    path: Option<OsString>,
+) -> Option<Browser> {
     if let Some(b) = over.filter(|b| !b.is_empty()) {
-        return Some(b.into());
+        return Some(Browser::Chromium(b.into()));
     }
+    if !mapped {
+        return Some(Browser::Default);
+    }
+    default()
+        .filter(|b| is_chromium(b))
+        .or_else(|| find_on_path(path))
+        .map(Browser::Chromium)
+}
+
+fn is_chromium(bin: &Path) -> bool {
+    let name = bin
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    CHROMIUM.iter().any(|c| name.contains(c))
+}
+
+fn find_on_path(path: Option<OsString>) -> Option<PathBuf> {
     let dirs: Vec<PathBuf> = path.map(|p| std::env::split_paths(&p).collect())?;
     BROWSERS
         .iter()
         .flat_map(|b| dirs.iter().map(move |d| d.join(b)))
         .find(|p| p.is_file())
+}
+
+fn default_browser() -> Option<PathBuf> {
+    let out = Command::new("xdg-settings")
+        .args(["get", "default-web-browser"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || id.is_empty() {
+        return None;
+    }
+    desktop_exec(&id, &data_dirs())
+}
+
+fn data_dirs() -> Vec<PathBuf> {
+    let set = |v: &str| std::env::var_os(v).filter(|v| !v.is_empty());
+    let home = set("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| set("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    let rest = set("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    home.into_iter()
+        .chain(std::env::split_paths(&rest))
+        .collect()
+}
+
+fn desktop_exec(id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let body = dirs
+        .iter()
+        .find_map(|d| std::fs::read_to_string(d.join("applications").join(id)).ok())?;
+    body.lines()
+        .find_map(|l| l.strip_prefix("Exec="))?
+        .split_whitespace()
+        .find(|t| *t != "env" && !t.contains('='))
+        .map(PathBuf::from)
+}
+
+fn spawn(cmd: &mut Command) -> Result<()> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| eyre!("starting {}: {e}", cmd.get_program().to_string_lossy()))?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 pub fn launch(cfg: &Config, repo: &Path, slot: usize) -> Result<String> {
@@ -73,26 +150,36 @@ pub fn launch(cfg: &Config, repo: &Path, slot: usize) -> Result<String> {
         return Err(eyre!("browse needs [incus.browse] ports"));
     }
     let ip = loopback(slot).ok_or_else(|| eyre!("slot {slot} has no loopback address"))?;
-    let bin = find_browser(std::env::var_os("SULLA_BROWSER"), std::env::var_os("PATH"))
-        .ok_or_else(|| {
-            eyre!(
-                "no browser found, set SULLA_BROWSER or install one of {}",
-                BROWSERS.join(", ")
-            )
-        })?;
-    let profile = profile_dir(repo, slot);
-    std::fs::create_dir_all(&profile)?;
-    let mut child = Command::new(&bin)
-        .args(browser_args(&profile, browse, &ip))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| eyre!("starting {}: {e}", bin.display()))?;
-    std::thread::spawn(move || child.wait());
-    let target = url(browse, &ip).unwrap_or(ip);
-    Ok(format!("opened {target} for slot {slot}"))
+    let target = url(browse, &ip).unwrap_or_else(|| ip.clone());
+    let browser = pick(
+        std::env::var_os("SULLA_BROWSER"),
+        !browse.hosts.is_empty(),
+        default_browser,
+        std::env::var_os("PATH"),
+    )
+    .ok_or_else(|| {
+        eyre!(
+            "mapping [incus.browse] hosts needs a Chromium-based browser, set SULLA_BROWSER or install one of {}",
+            BROWSERS.join(", ")
+        )
+    })?;
+    match browser {
+        Browser::Default => {
+            spawn(Command::new("xdg-open").arg(&target))?;
+            Ok(format!(
+                "opened {target} for slot {slot} in the default browser"
+            ))
+        }
+        Browser::Chromium(bin) => {
+            let profile = profile_dir(repo, slot);
+            std::fs::create_dir_all(&profile)?;
+            spawn(Command::new(&bin).args(browser_args(&profile, browse, &ip)))?;
+            Ok(format!(
+                "opened {target} for slot {slot} in {}",
+                bin.display()
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -277,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn find_browser_prefers_env_then_path_order() {
+    fn find_on_path_follows_candidate_order() {
         let d = std::env::temp_dir().join(format!("sulla-browse-{}", std::process::id()));
         let (a, b) = (d.join("a"), d.join("b"));
         std::fs::create_dir_all(&a).unwrap();
@@ -285,21 +372,85 @@ mod tests {
         std::fs::write(b.join("chromium"), "").unwrap();
         std::fs::write(a.join("chromium-browser"), "").unwrap();
         let path = std::env::join_paths([&a, &b]).unwrap();
-        assert_eq!(
-            find_browser(Some("/opt/chrome".into()), Some(path.clone())),
-            Some(PathBuf::from("/opt/chrome"))
-        );
-        assert_eq!(
-            find_browser(Some("".into()), Some(path.clone())),
-            Some(b.join("chromium"))
-        );
+        assert_eq!(find_on_path(Some(path.clone())), Some(b.join("chromium")));
         std::fs::write(a.join("google-chrome"), "").unwrap();
+        assert_eq!(find_on_path(Some(path)), Some(a.join("google-chrome")));
+        assert_eq!(find_on_path(Some(d.join("none").into())), None);
+        assert_eq!(find_on_path(None), None);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn pick_uses_default_browser_unless_hosts_need_chromium() {
+        let d = std::env::temp_dir().join(format!("sulla-pick-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("chromium"), "").unwrap();
+        let path = Some(d.clone().into_os_string());
+        let firefox = || Some(PathBuf::from("/snap/bin/firefox"));
+        let chrome = || Some(PathBuf::from("/usr/bin/google-chrome-stable"));
+        let chromium = |p: &str| Some(Browser::Chromium(p.into()));
         assert_eq!(
-            find_browser(None, Some(path)),
-            Some(a.join("google-chrome"))
+            pick(Some("/opt/brave".into()), false, firefox, path.clone()),
+            chromium("/opt/brave")
         );
-        assert_eq!(find_browser(None, Some(d.join("none").into())), None);
-        assert_eq!(find_browser(None, None), None);
+        assert_eq!(
+            pick(Some("".into()), false, firefox, path.clone()),
+            Some(Browser::Default)
+        );
+        assert_eq!(pick(None, false, || None, None), Some(Browser::Default));
+        assert_eq!(
+            pick(None, true, chrome, path.clone()),
+            chromium("/usr/bin/google-chrome-stable")
+        );
+        assert_eq!(
+            pick(None, true, firefox, path.clone()),
+            chromium(d.join("chromium").to_str().unwrap())
+        );
+        assert_eq!(pick(None, true, firefox, None), None);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn is_chromium_matches_chromium_family_binaries() {
+        for b in [
+            "/usr/bin/google-chrome-stable",
+            "/snap/bin/chromium",
+            "brave-browser",
+            "/usr/bin/microsoft-edge-stable",
+            "vivaldi-stable",
+        ] {
+            assert!(is_chromium(Path::new(b)), "{b}");
+        }
+        assert!(!is_chromium(Path::new("/snap/bin/firefox")));
+        assert!(!is_chromium(Path::new("/usr/bin/flatpak")));
+    }
+
+    #[test]
+    fn desktop_exec_reads_first_exec_binary() {
+        let d = std::env::temp_dir().join(format!("sulla-desktop-{}", std::process::id()));
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::create_dir_all(a.join("applications")).unwrap();
+        std::fs::create_dir_all(b.join("applications")).unwrap();
+        std::fs::write(
+            b.join("applications/chromium_chromium.desktop"),
+            "[Desktop Entry]\nName=Chromium\nExec=env BAMF_DESKTOP_FILE_HINT=/x.desktop /snap/bin/chromium %U\n[Desktop Action new]\nExec=/other\n",
+        )
+        .unwrap();
+        std::fs::write(
+            a.join("applications/google-chrome.desktop"),
+            "[Desktop Entry]\nExec=/usr/bin/google-chrome-stable %U\n",
+        )
+        .unwrap();
+        let dirs = [a, b];
+        assert_eq!(
+            desktop_exec("chromium_chromium.desktop", &dirs),
+            Some(PathBuf::from("/snap/bin/chromium"))
+        );
+        assert_eq!(
+            desktop_exec("google-chrome.desktop", &dirs),
+            Some(PathBuf::from("/usr/bin/google-chrome-stable"))
+        );
+        assert_eq!(desktop_exec("firefox.desktop", &dirs), None);
         std::fs::remove_dir_all(d).unwrap();
     }
 

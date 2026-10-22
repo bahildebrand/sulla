@@ -283,14 +283,18 @@ url = "http://app.memfault.test:8000"
   to `127.0.0.1:<port>` in the container, and removes `browse-*` devices for ports no longer
   listed. Linux routes all of `127.0.0.0/8` to loopback, so nothing needs configuring on the
   host, and anything already on `127.0.0.1:<port>` (a host dev stack) is untouched. A device that
-  cannot be added (say the address is taken) is shown as a slot warning and the bead still starts.
+  cannot be added (say the address is taken) gives a warning in the status line and the bead
+  still starts.
 - `sulla browse <slot|bead>` (or `:browse [bead|slot]` in the TUI, defaulting to the selected
-  bead) starts Chrome with its own profile in `.sulla/browser/slot-<N>`,
-  `--host-resolver-rules="MAP <host> 127.0.100.<N+1>"` for each `hosts` entry, and opens `url`
-  (default `http://<ip>:<first port>`). The separate profile is what makes Chrome honour the
-  resolver rules while your normal browser is open, and keeps each slot's cookies apart. The
-  binary is `$SULLA_BROWSER`, else the first of `google-chrome`, `chromium`, `chromium-browser`
-  on `PATH`.
+  bead) opens `url` (default `http://<ip>:<first port>`) for the slot. Without `hosts` the URL
+  names the slot's IP directly, so it opens in your default browser through `xdg-open`.
+- With `hosts`, the browser has to resolve those names to the slot's IP, which needs Chrome's
+  `--host-resolver-rules` (Firefox has no per-host equivalent). sulla uses your default browser
+  when it is Chromium-based, else the first of `google-chrome`, `chromium`, `chromium-browser` on
+  `PATH`, and starts it with its own profile in `.sulla/browser/slot-<N>` and
+  `--host-resolver-rules="MAP <host> 127.0.100.<N+1>"` for each `hosts` entry. The separate
+  profile is what makes Chrome honour the rules while another Chrome window is open, and keeps
+  each slot's cookies apart. `$SULLA_BROWSER` names a Chromium-based browser to always use.
 - A bead is resolved to its slot through `.sulla/slots.json`, which the running sulla keeps up to
   date. `sulla status` prints each slot with its container, loopback IP, the beads it holds and
   its URL, and the board shows `host <ip>` next to the container of a bead with a slot.
