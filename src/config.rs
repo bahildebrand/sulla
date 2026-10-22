@@ -25,7 +25,20 @@ pub struct Config {
     pub budget: BudgetConfig,
     pub workflow: Workflow,
     pub pr: PrConfig,
+    pub hooks: HooksConfig,
     pub presets: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    pub setup: Option<String>,
+}
+
+impl HooksConfig {
+    pub fn setup_script(&self) -> Option<&str> {
+        self.setup.as_deref().filter(|s| !s.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -245,6 +258,7 @@ impl Default for Config {
             budget: BudgetConfig::default(),
             workflow: Workflow::default(),
             pr: PrConfig::default(),
+            hooks: HooksConfig::default(),
             presets: BTreeMap::new(),
         }
     }
@@ -414,6 +428,15 @@ mod tests {
         assert_eq!(Config::default().sandbox, SandboxKind::Worktree);
         let cfg: Config = toml::from_str("sandbox = \"incus\"").unwrap();
         assert_eq!(cfg.sandbox, SandboxKind::Incus);
+    }
+
+    #[test]
+    fn setup_hook_is_optional_and_ignores_blank() {
+        assert_eq!(Config::default().hooks.setup_script(), None);
+        let cfg: Config = toml::from_str("[hooks]\nsetup = \"  \"").unwrap();
+        assert_eq!(cfg.hooks.setup_script(), None);
+        let cfg: Config = toml::from_str("[hooks]\nsetup = \"bin/setup\"").unwrap();
+        assert_eq!(cfg.hooks.setup_script(), Some("bin/setup"));
     }
 
     #[test]

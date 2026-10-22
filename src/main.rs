@@ -16,6 +16,7 @@ mod presets;
 mod sandbox;
 mod scheduler;
 mod sessions;
+mod setup;
 mod timeline;
 mod ui;
 mod usage;
@@ -61,6 +62,8 @@ struct Args {
 enum Cmd {
     /// Set up the repo for sulla and write .sulla/config.toml
     Init,
+    #[command(about = "Run the `[hooks] setup` command again in a bead's worktree")]
+    Setup { bead: String },
 }
 
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -89,6 +92,9 @@ fn main() -> Result<()> {
     }
     let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
     let mut cfg = Config::load(&repo).wrap_err("loading config")?;
+    if let Some(Cmd::Setup { bead }) = &args.cmd {
+        return setup::cli(&repo, &cfg, bead);
+    }
     if let Some(n) = args.max_agents {
         cfg.max_agents = n;
     }

@@ -213,6 +213,12 @@ fn configure<R: BufRead, W: Write>(
     let check = p.optional("Pre-merge check command", cfg.check.as_deref())?;
     w.set(&["check"], check.map(Into::into));
 
+    let setup = p.optional(
+        "Worktree setup command, run once per new worktree",
+        cfg.hooks.setup.as_deref(),
+    )?;
+    w.set(&["hooks", "setup"], setup.map(Into::into));
+
     Ok(w.table)
 }
 
@@ -360,7 +366,8 @@ mod tests {
 
     #[test]
     fn answers_are_written_and_invalid_input_reprompts() {
-        let input = "Claude\nopus\nlots\n5\n-\npr\ngraphite\nupstream\ny\nincus\n\ncargo test\n";
+        let input =
+            "Claude\nopus\nlots\n5\n-\npr\ngraphite\nupstream\ny\nincus\n\ncargo test\nbin/setup\n";
         let (t, out) = answers(input, "poll_secs = 9\n[claude]\nbin = \"/x\"");
         let cfg: Config = toml::Value::Table(t.clone()).try_into().unwrap();
         assert!(out.contains("enter a whole number"));
@@ -376,6 +383,7 @@ mod tests {
         assert_eq!(cfg.sandbox, SandboxKind::Incus);
         assert!(!cfg.kache);
         assert_eq!(cfg.check.as_deref(), Some("cargo test"));
+        assert_eq!(cfg.hooks.setup.as_deref(), Some("bin/setup"));
         assert_eq!(cfg.poll_secs, 9);
         assert!(!t.contains_key("base_branch"));
     }

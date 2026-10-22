@@ -170,6 +170,30 @@ impl Git {
         Ok(path)
     }
 
+    fn setup_marker(&self, id: &str) -> Result<PathBuf> {
+        let wt = self.worktree_path(id);
+        if !wt.join(".git").exists() {
+            bail!("{id} has no worktree");
+        }
+        let dir = run(&wt, &["rev-parse", "--absolute-git-dir"])?;
+        Ok(PathBuf::from(dir.trim()).join("sulla-setup"))
+    }
+
+    pub fn needs_setup(&self, id: &str) -> bool {
+        self.setup_marker(id).is_ok_and(|m| !m.exists())
+    }
+
+    pub fn mark_setup(&self, id: &str) -> Result<()> {
+        Ok(std::fs::write(self.setup_marker(id)?, "")?)
+    }
+
+    pub fn clear_setup(&self, id: &str) -> Result<()> {
+        match std::fs::remove_file(self.setup_marker(id)?) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
     pub fn ensure_stacked_worktree(&self, id: &str, parent: &str) -> Result<PathBuf> {
         if self.worktree_path(id).join(".git").exists() || self.branch_exists(&self.branch(id)) {
             return self.ensure_worktree(id, &self.branch(parent));
@@ -907,6 +931,27 @@ mod tests {
             .collect();
         ids.sort();
         assert_eq!(ids, ["n-1"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn setup_marker_lives_and_dies_with_the_worktree() {
+        let (dir, g) = scratch("setup");
+        assert!(!g.needs_setup("s-1"));
+        assert!(g.mark_setup("s-1").is_err());
+        g.ensure_worktree("s-1", "main").unwrap();
+        assert!(g.needs_setup("s-1"));
+        g.mark_setup("s-1").unwrap();
+        assert!(!g.needs_setup("s-1"));
+        assert!(g.dirty("s-1").unwrap().is_empty());
+        g.clear_setup("s-1").unwrap();
+        g.clear_setup("s-1").unwrap();
+        assert!(g.needs_setup("s-1"));
+        g.mark_setup("s-1").unwrap();
+        g.release("s-1").unwrap();
+        assert!(!g.needs_setup("s-1"));
+        g.ensure_worktree("s-1", "main").unwrap();
+        assert!(g.needs_setup("s-1"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

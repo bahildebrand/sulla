@@ -1277,3 +1277,50 @@ fn reclaim_unstacks_from_a_parent_closed_without_merging() {
     assert_eq!(h.app.git.stack_parent("c"), None);
     assert!(h.app.git.worktree_path("c").join(".git").exists());
 }
+
+#[test]
+fn setup_runs_once_per_worktree_and_reports_failure() {
+    let mut h = Harness::new("setup", &[("t-1", Some(State::Running))]);
+    h.app.cfg.hooks.setup = Some("echo $SULLA_BEAD >> ../setup-runs; exit 4".into());
+    let runs = h.app.git.worktree_path("setup-runs");
+    let (done, record) = recorder();
+    let bead = h.bead("t-1");
+    h.app.launch_agent(&bead, false, None, record);
+    h.pump();
+    assert_eq!(*done.lock().unwrap(), Some(true));
+    assert!(h.app.agents.contains_key("t-1"));
+    assert!(
+        h.app.status.contains("t-1: setup failed"),
+        "{}",
+        h.app.status
+    );
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "t-1\n");
+    let log = std::fs::read_to_string(h.app.agent_log("t-1")).unwrap();
+    assert!(log.contains("setup failed"), "{log}");
+    assert!(!h.app.git.needs_setup("t-1"));
+
+    h.app.take_agent("t-1");
+    let (done, record) = recorder();
+    h.app.launch_agent(&bead, true, None, record);
+    h.pump();
+    assert_eq!(*done.lock().unwrap(), Some(true));
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "t-1\n");
+
+    h.app.command("setup t-1");
+    assert!(h.app.status.contains("running setup"), "{}", h.app.status);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while h.app.setups.contains("t-1") {
+        let ev =
+            h.rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("setup did not finish");
+        if matches!(ev, Event::Finished(_)) {
+            h.app.dispatch(ev);
+        }
+    }
+    assert!(
+        h.app.status.contains("t-1: setup failed"),
+        "{}",
+        h.app.status
+    );
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "t-1\nt-1\n");
+}

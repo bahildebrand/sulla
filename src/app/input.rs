@@ -329,6 +329,11 @@ impl App {
                 self.mutated();
             }
             "kill" if !rest.is_empty() => self.confirm_kill(rest.to_string()),
+            "setup" if !rest.is_empty() => self.rerun_setup(rest),
+            "setup" => match self.selected() {
+                Some(b) => self.rerun_setup(&b.id),
+                None => self.status = "no bead selected, use :setup <id>".into(),
+            },
             "chat" => self.open_chat(rest == "new"),
             "health" => self.open_health(),
             _ => self.status = format!("unknown command: {cmd}"),

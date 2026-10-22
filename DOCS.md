@@ -130,6 +130,29 @@ closing it without merging, unstacks its children so they keep its commits in th
   in the worktree on the host. A bead with no container left gets a host shell. Exit the shell to
   return, the review diff reloads like after `e`.
 
+### Worktree setup
+
+`[hooks] setup` is a command that prepares a bead's worktree, for dependencies that git does not
+check out (`node_modules`, `.venv`, generated code, git hooks):
+
+```toml
+[hooks]
+setup = "bin/setup.py --no-conda --no-direnv --no-interactive"
+```
+
+- It runs once per worktree, before the bead's first agent starts, via `sh -c` in the worktree
+  with `SULLA_BEAD` and `SULLA_SLOT` set. With `sandbox = "incus"` it runs in the bead's slot
+  container after `[incus] init`, like the agent.
+- Its stdout and stderr go to the session log (`.sulla/logs/<bead>.log`, `l` in the inspect popup).
+- A failure does not stop the launch. The status bar shows it, and the agent's prompt gets the
+  last 20 lines of output with a note that dependencies may be missing.
+- Done is recorded as `sulla-setup` in the worktree's git dir, so it is forgotten when the
+  worktree is removed (merge, discard, `w` release) and a recreated worktree runs setup again.
+  Worktrees that existed before the hook was configured run it on their next launch.
+- `:setup [id]` reruns it for the selected or named bead, in its slot when it has one, on the host
+  with `sandbox = "worktree"`. An incus bead without a slot reruns it when its agent next starts.
+  `sulla setup <bead>` reruns it from a terminal, for `sandbox = "worktree"` only.
+
 ### Budgets
 
 `[budget]` caps each run in minutes and/or tokens (input + output). Labels `budget:minutes=45` or

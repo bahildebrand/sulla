@@ -12,9 +12,10 @@ use crate::config::{AgentKind, Workflow};
 use crate::git::Git;
 use crate::pr;
 use crate::presets;
-use crate::sandbox::Outcome;
+use crate::sandbox::{self, Outcome};
 use crate::scheduler;
 use crate::sessions::{self, Resume};
+use crate::setup::{self, Setup};
 
 use super::{App, Callback, Event};
 
@@ -47,10 +48,11 @@ struct Prelaunch {
     presets: BTreeMap<String, String>,
     system_prompt: Option<String>,
     recover: Option<Recover>,
+    setup: Option<Setup>,
 }
 
 impl Prelaunch {
-    fn run(self) -> Result<Built> {
+    fn run(mut self) -> Result<Built> {
         let id = self.bead.id.as_str();
         let worktree = {
             let _git = WORKTREES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -65,14 +67,21 @@ impl Prelaunch {
                 None => self.git.ensure_worktree(id, &self.base)?,
             }
         };
+        let ran = self.setup.take().and_then(|s| self.run_setup(s));
         let parent = self.git.stack_parent(id);
         let prompt = self
             .prompt
             .clone()
             .or_else(|| (!self.resume).then(|| self.task(parent.as_deref())));
+        let prompt = setup::with_note(prompt, ran.as_ref());
         let (resume, prompt, rebuilt) = match &self.recover {
             Some(r) => self.recover(r, parent.as_deref(), prompt),
             None => (self.resume, prompt, None),
+        };
+        let failed = ran.filter(|r| !r.ok).map(|r| r.summary(id));
+        let note = match (rebuilt, failed) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (a, b) => a.or(b),
         };
         let launch = Launch {
             session: agent::session_id(&self.repo, id),
@@ -83,7 +92,21 @@ impl Prelaunch {
             prompt,
             model: self.model.clone(),
         };
-        Ok((launch, rebuilt))
+        Ok((launch, note))
+    }
+
+    fn run_setup(&self, s: Setup) -> Option<setup::Ran> {
+        let id = self.bead.id.as_str();
+        if !self.git.needs_setup(id) {
+            return None;
+        }
+        tracing::info!("{id}: running setup `{}`", s.script);
+        let ran = s.run(id, false);
+        tracing::info!("{}", ran.summary(id));
+        if let Err(e) = self.git.mark_setup(id) {
+            tracing::warn!("{id}: marking setup done: {e:#}");
+        }
+        Some(ran)
     }
 
     fn task(&self, parent: Option<&str>) -> String {
@@ -266,6 +289,7 @@ impl App {
             presets: self.cfg.presets.clone(),
             system_prompt: self.cfg.system_prompt.clone(),
             recover,
+            setup: self.setup_job(&id, Some(slot)),
         };
         self.launch(id, slot, kind, move || job.run(), done);
     }
@@ -365,6 +389,63 @@ impl App {
         }
         self.status = format!("{id} is still launching, will {what} once it stops");
         true
+    }
+
+    fn setup_job(&self, id: &str, slot: Option<usize>) -> Option<Setup> {
+        let script = self.cfg.hooks.setup_script()?;
+        let dir = self.git.worktree_path(id);
+        let argv = setup::argv(script);
+        let env = setup::env(id, slot, self.cfg.kache);
+        let cmd = match slot {
+            Some(slot) => self.sandbox.command(slot, &dir, &argv, &env),
+            None => sandbox::host_command(&dir, &argv, &env),
+        };
+        Some(Setup {
+            script: script.to_string(),
+            cmd,
+            log: self.agent_log(id),
+        })
+    }
+
+    pub(super) fn rerun_setup(&mut self, id: &str) {
+        if self.cfg.hooks.setup_script().is_none() {
+            self.status = "no setup hook, set `[hooks] setup` in .sulla/config.toml".into();
+            return;
+        }
+        if !self.git.worktree_path(id).join(".git").exists() {
+            self.status = format!("{id} has no worktree");
+            return;
+        }
+        if self.setups.contains(id) || self.launching.contains_key(id) {
+            self.status = format!("{id} is already setting up");
+            return;
+        }
+        let slot = self.slots.get(id);
+        if slot.is_none() && self.sandbox.isolated() {
+            self.status = match self.git.clear_setup(id) {
+                Ok(()) => {
+                    format!("{id} has no slot container, setup runs when its agent next starts")
+                }
+                Err(e) => format!("{id}: {e:#}"),
+            };
+            return;
+        }
+        let Some(job) = self.setup_job(id, slot) else {
+            return;
+        };
+        self.setups.insert(id.to_string());
+        self.status = format!("{id}: running setup `{}`", job.script);
+        let (git, tx, key) = (self.git.clone(), self.tx.clone(), id.to_string());
+        std::thread::spawn(move || {
+            let ran = job.run(&key, false);
+            if let Err(e) = git.mark_setup(&key) {
+                tracing::warn!("{key}: marking setup done: {e:#}");
+            }
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                app.setups.remove(&key);
+                app.status = ran.summary(&key);
+            })));
+        });
     }
 
     fn session_root(&self, kind: AgentKind) -> Option<PathBuf> {
