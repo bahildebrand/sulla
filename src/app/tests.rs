@@ -1324,3 +1324,27 @@ fn setup_runs_once_per_worktree_and_reports_failure() {
     );
     assert_eq!(std::fs::read_to_string(&runs).unwrap(), "t-1\nt-1\n");
 }
+
+#[test]
+fn new_bead_form_steps_through_acceptance_before_priority() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = Harness::new("new-bead-acceptance", &[]);
+    h.app.mode = Mode::NewBead(NewBeadForm::new(Vec::new()));
+    let key = |h: &mut Harness, code: KeyCode| {
+        h.app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    };
+    key(&mut h, KeyCode::Tab);
+    key(&mut h, KeyCode::Char('d'));
+    key(&mut h, KeyCode::Enter);
+    key(&mut h, KeyCode::Char('a'));
+    h.app.on_paste("b\r\nc");
+    key(&mut h, KeyCode::Enter);
+    key(&mut h, KeyCode::Char('0'));
+    let Mode::NewBead(form) = &h.app.mode else {
+        panic!("form closed");
+    };
+    assert_eq!(form.description, "d");
+    assert_eq!(form.acceptance, "ab\nc");
+    assert_eq!(form.priority, 0);
+    assert_eq!(form.field, 3);
+}
