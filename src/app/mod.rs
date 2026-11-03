@@ -104,6 +104,7 @@ pub enum InputKind {
 pub struct NewBeadForm {
     pub title: String,
     pub description: String,
+    pub acceptance: String,
     pub priority: u8,
     pub agent: Option<AgentKind>,
     pub presets: Vec<String>,
@@ -113,12 +114,13 @@ pub struct NewBeadForm {
 }
 
 impl NewBeadForm {
-    pub const FIELDS: usize = 6;
+    pub const FIELDS: usize = 7;
 
     pub fn new(presets: Vec<String>) -> Self {
         Self {
             title: String::new(),
             description: String::new(),
+            acceptance: String::new(),
             priority: 2,
             agent: None,
             presets,

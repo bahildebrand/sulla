@@ -225,7 +225,7 @@ const HELP: &[(&str, &str)] = &[
     ("E", "open a shell in the bead's container, or its worktree"),
     (
         "n",
-        "new bead popup (title, description, priority, agent, preset, start state)",
+        "new bead popup (title, description, acceptance criteria, priority, agent, preset, start state)",
     ),
     ("c / C", "open conversation agent / start a fresh one"),
     ("+ -", "raise / lower priority"),
@@ -425,8 +425,9 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
             .sum::<usize>();
     let rows = wrapped(&form.title)
         + wrapped(&form.description)
+        + wrapped(&form.acceptance)
         + preset_width.div_ceil(inner_width).max(1)
-        + 10;
+        + 12;
     let height = (rows as u16 + 2).min(f.area().height);
     let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -453,20 +454,20 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
             }
         })
         .collect::<Vec<_>>();
-    let mut prio_line = vec![label(2, "Priority")];
+    let mut prio_line = vec![label(3, "Priority")];
     prio_line.extend(prio);
     let choice = |name: String, on: bool| {
         let s = Span::raw(format!(" {name} "));
         if on { s.black().on_cyan() } else { s.dim() }
     };
-    let mut agent_line = vec![label(3, "Agent")];
+    let mut agent_line = vec![label(4, "Agent")];
     agent_line.push(choice("default".into(), form.agent.is_none()));
     agent_line.extend(
         AgentKind::ALL
             .into_iter()
             .map(|k| choice(k.name().into(), form.agent == Some(k))),
     );
-    let mut preset_line = vec![label(4, "Preset")];
+    let mut preset_line = vec![label(5, "Preset")];
     preset_line.push(choice("none".into(), form.preset.is_none()));
     preset_line.extend(
         form.presets
@@ -485,7 +486,7 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
             }
         })
         .collect::<Vec<_>>();
-    let mut start_line = vec![label(5, "Start in")];
+    let mut start_line = vec![label(6, "Start in")];
     start_line.extend(start);
     let lines = vec![
         Line::from(vec![
@@ -496,6 +497,11 @@ fn new_bead(f: &mut Frame, form: &NewBeadForm) {
         Line::from(vec![
             label(1, "Description"),
             Span::raw(format!("{}{}", form.description, cursor(1))),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            label(2, "Acceptance"),
+            Span::raw(format!("{}{}", form.acceptance, cursor(2))),
         ]),
         Line::raw(""),
         Line::from(prio_line),

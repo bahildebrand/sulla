@@ -403,6 +403,7 @@ impl Http {
         &self,
         title: &str,
         description: &str,
+        acceptance: &str,
         priority: u8,
         labels: &[&str],
     ) -> Result<String, Fail> {
@@ -414,6 +415,9 @@ impl Http {
         });
         if !description.is_empty() {
             body["description"] = description.into();
+        }
+        if !acceptance.is_empty() {
+            body["acceptance_criteria"] = acceptance.into();
         }
         if !labels.is_empty() {
             body["labels"] = labels.into();
@@ -957,7 +961,7 @@ mod tests {
     #[test]
     fn create_returns_the_new_id() {
         let h = answer_once("201 Created", r#"{"id":"x-1","title":"t","status":"open"}"#);
-        assert_eq!(h.create("t", "", 2, &["sulla:backlog"]).unwrap(), "x-1");
+        assert_eq!(h.create("t", "", "", 2, &["sulla:backlog"]).unwrap(), "x-1");
     }
 
     #[test]

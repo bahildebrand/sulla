@@ -668,6 +668,7 @@ impl Beads {
         &self,
         title: &str,
         description: &str,
+        acceptance: &str,
         priority: u8,
         backlog: bool,
         labels: &[String],
@@ -679,12 +680,15 @@ impl Beads {
         all.extend(labels.iter().map(String::as_str));
         self.via(
             self.http_write("issues.create"),
-            |h| h.create(title, description, priority, &all),
+            |h| h.create(title, description, acceptance, priority, &all),
             || {
                 let p = priority.to_string();
                 let mut args = vec!["create", title, "-p", &p, "--silent"];
                 if !description.is_empty() {
                     args.extend(["-d", description]);
+                }
+                if !acceptance.is_empty() {
+                    args.extend(["--acceptance", acceptance]);
                 }
                 for l in &all {
                     args.extend(["-l", l]);

@@ -23,6 +23,7 @@ impl App {
             Mode::NewBead(form) => match form.field {
                 0 => form.title.push_str(&text.replace(['\r', '\n'], " ")),
                 1 => form.description.push_str(&text.replace('\r', "")),
+                2 => form.acceptance.push_str(&text.replace('\r', "")),
                 _ => {}
             },
             _ => {}
@@ -217,7 +218,7 @@ impl App {
                 self.status = "cancelled".into();
                 return;
             }
-            KeyCode::Enter if ctrl || shift || form.field >= 2 || form.field == 0 => {
+            KeyCode::Enter if ctrl || shift || form.field >= 3 || form.field == 0 => {
                 let title = form.title.trim().to_string();
                 if title.is_empty() {
                     self.status = "title required".into();
@@ -227,6 +228,7 @@ impl App {
                     self.create_bead(
                         &title,
                         form.description.trim(),
+                        form.acceptance.trim(),
                         form.priority,
                         form.backlog,
                         &labels,
@@ -234,42 +236,45 @@ impl App {
                     return;
                 }
             }
-            KeyCode::Enter => form.field = 2,
+            KeyCode::Enter => form.field += 1,
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % NewBeadForm::FIELDS,
             KeyCode::BackTab | KeyCode::Up => {
                 form.field = (form.field + NewBeadForm::FIELDS - 1) % NewBeadForm::FIELDS
             }
-            KeyCode::Right | KeyCode::Char('-') if form.field == 2 => {
+            KeyCode::Right | KeyCode::Char('-') if form.field == 3 => {
                 form.priority = (form.priority + 1).min(4)
             }
-            KeyCode::Left | KeyCode::Char('+') | KeyCode::Char('=') if form.field == 2 => {
+            KeyCode::Left | KeyCode::Char('+') | KeyCode::Char('=') if form.field == 3 => {
                 form.priority = form.priority.saturating_sub(1)
             }
-            KeyCode::Char(c @ '0'..='4') if form.field == 2 => form.priority = c as u8 - b'0',
-            KeyCode::Left if form.field == 3 => form.cycle_agent(false),
-            KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => form.cycle_agent(true),
-            KeyCode::Left if form.field == 4 => form.cycle_preset(false),
-            KeyCode::Right | KeyCode::Char(' ') if form.field == 4 => form.cycle_preset(true),
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 5 => {
+            KeyCode::Char(c @ '0'..='4') if form.field == 3 => form.priority = c as u8 - b'0',
+            KeyCode::Left if form.field == 4 => form.cycle_agent(false),
+            KeyCode::Right | KeyCode::Char(' ') if form.field == 4 => form.cycle_agent(true),
+            KeyCode::Left if form.field == 5 => form.cycle_preset(false),
+            KeyCode::Right | KeyCode::Char(' ') if form.field == 5 => form.cycle_preset(true),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 6 => {
                 form.backlog = !form.backlog
             }
-            KeyCode::Char('b') if form.field == 5 => form.backlog = true,
-            KeyCode::Char('p') if form.field == 5 => form.backlog = false,
+            KeyCode::Char('b') if form.field == 6 => form.backlog = true,
+            KeyCode::Char('p') if form.field == 6 => form.backlog = false,
             KeyCode::Backspace => {
                 match form.field {
                     0 => form.title.pop(),
                     1 => form.description.pop(),
+                    2 => form.acceptance.pop(),
                     _ => None,
                 };
             }
             KeyCode::Char('u') if ctrl => match form.field {
                 0 => form.title.clear(),
                 1 => form.description.clear(),
+                2 => form.acceptance.clear(),
                 _ => {}
             },
             KeyCode::Char(c) if !ctrl => match form.field {
                 0 => form.title.push(c),
                 1 => form.description.push(c),
+                2 => form.acceptance.push(c),
                 _ => {}
             },
             _ => {}
@@ -313,7 +318,7 @@ impl App {
         match name {
             "q" | "quit" => self.request_quit(),
             "q!" | "quit!" => self.quit = true,
-            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", 2, false, &[]),
+            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", "", 2, false, &[]),
             "max" => match rest.parse() {
                 Ok(n) => {
                     self.cfg.max_agents = n;

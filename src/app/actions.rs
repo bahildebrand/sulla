@@ -12,13 +12,14 @@ impl App {
         &mut self,
         title: &str,
         description: &str,
+        acceptance: &str,
         priority: u8,
         backlog: bool,
         labels: &[String],
     ) {
         let r = self
             .beads
-            .create(title, description, priority, backlog, labels);
+            .create(title, description, acceptance, priority, backlog, labels);
         if let Some(id) = self.report(r) {
             self.status = format!("created {id}");
             self.mutated();
