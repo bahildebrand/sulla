@@ -418,7 +418,7 @@ impl App {
         let pending = self.pending.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = self.term.1 / 2;
-        let max = crate::ui::help_max_scroll(self.term.1);
+        let max = crate::ui::help_max_scroll(self.term);
         match k.code {
             KeyCode::Char('j') | KeyCode::Down => scroll = scroll.saturating_add(1),
             KeyCode::Char('k') | KeyCode::Up => scroll = scroll.saturating_sub(1),

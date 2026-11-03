@@ -1,13 +1,14 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::checks::{Check, Status};
 use crate::conflicts::Conflict;
+use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -229,8 +230,8 @@ pub struct AiReview {
 
 pub fn verdict_badge(r: &AiReview) -> Span<'static> {
     match r.verdict {
-        Verdict::Approve => Span::styled("✓ai ", Style::new().fg(Color::Green)),
-        Verdict::Changes => Span::styled("✎ai ", Style::new().fg(Color::Yellow)),
+        Verdict::Approve => Span::styled("✓ai ", Style::new().fg(theme::GREEN)),
+        Verdict::Changes => Span::styled("✎ai ", Style::new().fg(theme::YELLOW)),
     }
 }
 
@@ -633,18 +634,20 @@ impl Diff {
 
 fn line_style(k: Kind) -> Style {
     match k {
-        Kind::File => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        Kind::Meta => Style::new().fg(Color::DarkGray),
-        Kind::Hunk => Style::new().fg(Color::Cyan),
-        Kind::Add => Style::new().fg(Color::Green),
-        Kind::Del => Style::new().fg(Color::Red),
+        Kind::File => Style::new()
+            .fg(theme::LAVENDER)
+            .add_modifier(Modifier::BOLD),
+        Kind::Meta => Style::new().fg(theme::MUTED),
+        Kind::Hunk => Style::new().fg(theme::SKY).bg(theme::HUNK_BG),
+        Kind::Add => Style::new().fg(theme::GREEN).bg(theme::ADD_BG),
+        Kind::Del => Style::new().fg(theme::RED).bg(theme::DEL_BG),
         Kind::Ctx => Style::new(),
     }
 }
 
 fn wrap_into(
     rows: &mut Vec<Line<'static>>,
-    prefix: Span<'static>,
+    prefix: Vec<Span<'static>>,
     prefix_w: usize,
     text: &str,
     style: Style,
@@ -652,19 +655,35 @@ fn wrap_into(
 ) {
     let avail = width.saturating_sub(prefix_w).max(1);
     let chars: Vec<char> = text.chars().collect();
-    let mut chunks = chars.chunks(avail);
-    let first: String = chunks.next().unwrap_or(&[]).iter().collect();
-    rows.push(Line::from(vec![prefix, Span::styled(first, style)]));
-    for c in chunks {
-        rows.push(Line::from(vec![
-            Span::raw(" ".repeat(prefix_w)),
-            Span::styled(c.iter().collect::<String>(), style),
-        ]));
+    let mut chunks: Vec<String> = chars.chunks(avail).map(|c| c.iter().collect()).collect();
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    let fill = |c: String| {
+        if style.bg.is_some() {
+            let pad = avail.saturating_sub(c.chars().count());
+            format!("{c}{}", " ".repeat(pad))
+        } else {
+            c
+        }
+    };
+    let blank: Vec<Span<'static>> = prefix
+        .iter()
+        .map(|s| Span::styled(" ".repeat(s.width()), s.style))
+        .collect();
+    for (i, c) in chunks.into_iter().enumerate() {
+        let mut line = if i == 0 {
+            prefix.clone()
+        } else {
+            blank.clone()
+        };
+        line.push(Span::styled(fill(c), style));
+        rows.push(Line::from(line));
     }
 }
 
 pub fn released_badge() -> Span<'static> {
-    Span::styled("released ", Style::new().fg(Color::LightBlue).bold())
+    Span::styled("released ", Style::new().fg(theme::LAVENDER).bold())
 }
 
 pub struct Header<'a> {
@@ -677,85 +696,115 @@ pub struct Header<'a> {
     pub marked: Option<(usize, usize)>,
 }
 
-pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
-    let Header {
-        title,
-        loc,
-        ai,
-        conflict,
-        check,
-        released,
-        marked,
-    } = h;
+fn header_line(diff: &Diff, h: &Header) -> Line<'static> {
     let (adds, dels) = diff.adds_dels();
     let mut spans = vec![
-        Span::styled(format!(" review {} ", diff.id), Style::new().bold()),
-        Span::raw(format!("{title} ")),
+        Span::raw(" "),
+        theme::pill(format!("◕ {}", diff.id), theme::MAUVE),
+        Span::styled(
+            format!(" {} ", h.title),
+            Style::new().fg(theme::TEXT).bold(),
+        ),
     ];
-    if let Some(loc) = loc {
-        spans.push(Span::styled(
-            format!("[{loc}] "),
-            Style::new().fg(Color::Blue),
-        ));
+    if let Some(loc) = h.loc {
+        spans.push(theme::soft_pill(loc, theme::LAVENDER));
+        spans.push(Span::raw(" "));
     }
-    if released {
-        spans.push(released_badge());
+    if h.released {
+        spans.push(theme::pill("released", theme::LAVENDER));
+        spans.push(Span::raw(" "));
     }
     spans.extend([
-        Span::styled(format!("+{adds} "), Style::new().fg(Color::Green)),
-        Span::styled(format!("-{dels} "), Style::new().fg(Color::Red)),
+        Span::styled(format!("+{adds}"), Style::new().fg(theme::GREEN).bold()),
+        Span::raw(" "),
+        Span::styled(format!("-{dels}"), Style::new().fg(theme::RED).bold()),
+        theme::dot(),
         Span::styled(
-            format!("{} comments ", diff.comments.len()),
-            Style::new().fg(Color::Magenta),
+            format!("{} files", diff.files.len()),
+            Style::new().fg(theme::OVERLAY),
         ),
     ]);
+    if !diff.comments.is_empty() {
+        spans.push(theme::dot());
+        spans.push(Span::styled(
+            format!("✎ {} comments", diff.comments.len()),
+            Style::new().fg(theme::MAUVE),
+        ));
+    }
     let rejected = diff.rejected_hunks();
     if rejected > 0 {
+        spans.push(theme::dot());
         spans.push(Span::styled(
-            format!("✗{rejected} rejected "),
-            Style::new().fg(Color::Red),
+            format!("✗ {rejected} rejected"),
+            Style::new().fg(theme::RED),
         ));
     }
-    if let Some(r) = ai {
-        spans.push(verdict_badge(r));
+    spans.push(Span::raw("  "));
+    if let Some(r) = h.ai {
+        let (text, color) = match r.verdict {
+            Verdict::Approve => ("✓ ai approves", theme::GREEN),
+            Verdict::Changes => ("✎ ai wants changes", theme::YELLOW),
+        };
+        spans.push(theme::pill(text, color));
         if r.forwarded {
             spans.push(Span::styled(
-                format!("{} sent ", r.comments.len()),
-                Style::new().fg(Color::DarkGray),
+                format!(" {} sent", r.comments.len()),
+                Style::new().fg(theme::OVERLAY),
             ));
         }
+        spans.push(Span::raw(" "));
     }
-    if let Some(c) = check {
+    if let Some(c) = h.check {
         let color = match c.status {
-            Status::Queued => Color::DarkGray,
-            Status::Running => Color::Yellow,
-            Status::Pass => Color::Green,
-            Status::Fail => Color::Red,
+            Status::Queued => theme::OVERLAY,
+            Status::Running => theme::YELLOW,
+            Status::Pass => theme::GREEN,
+            Status::Fail => theme::RED,
         };
-        spans.push(Span::styled(
-            format!("{} ", c.summary()),
-            Style::new().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(theme::pill(c.summary(), color));
+        spans.push(Span::raw(" "));
     }
-    if let Some((c, base)) = conflict {
-        spans.push(Span::styled(
-            format!("⚠ {} ", c.summary(base)),
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
+    if let Some((c, base)) = h.conflict {
+        spans.push(theme::pill(format!("⚠ {}", c.summary(base)), theme::RED));
+        spans.push(Span::raw(" "));
     }
+    Line::from(spans)
+}
+
+pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
+    let [top, area] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+    f.render_widget(header_line(diff, &h), top);
+    let Header {
+        ai,
+        conflict,
+        marked,
+        ..
+    } = h;
     let conflicted = conflict.map(|(c, _)| c.files()).unwrap_or_default();
     let ai_label = if ai.is_some_and(|r| r.forwarded) {
         "ai (sent)"
     } else {
         "ai"
     };
-    let block = Block::bordered().title(Line::from(spans));
     if diff.files.is_empty() {
-        f.render_widget(Paragraph::new("No changes.").block(block), area);
+        let block = theme::panel(theme::MAUVE, true);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let [row] = Layout::vertical([Constraint::Length(2)])
+            .flex(Flex::Center)
+            .areas(inner);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::styled("◌", Style::new().fg(theme::LINE)),
+                Line::styled("No changes.", Style::new().fg(theme::OVERLAY).italic()),
+            ])
+            .centered(),
+            row,
+        );
         return;
     }
-    let widest = diff.files.iter().map(|x| x.name.len()).max().unwrap_or(0) + 6;
-    let side = (widest as u16).clamp(16, area.width / 3);
+    let widest = diff.files.iter().map(|x| x.name.len()).max().unwrap_or(0) + 8;
+    let side = (widest as u16).max(18).min(area.width / 3);
     let [left, right] =
         Layout::horizontal([Constraint::Length(side), Constraint::Fill(1)]).areas(area);
 
@@ -775,24 +824,27 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
                 .iter()
                 .filter(|p| p.is_some_and(|(f, _)| f == fi))
                 .count();
-            let mut spans = vec![if conflicted.contains(x.name.as_str()) {
-                Span::styled(format!("⚠ {base}"), Style::new().fg(Color::Red))
+            let name = |glyph: &str, style: Style| Span::styled(format!("{glyph} {base}"), style);
+            let mut spans = vec![if x.name == COMMIT_MSG {
+                name("◆", Style::new().fg(theme::PEACH))
+            } else if conflicted.contains(x.name.as_str()) {
+                name("⚠", Style::new().fg(theme::RED))
             } else if x.fully_rejected() {
-                Span::styled(
-                    format!("✗ {base}"),
+                name(
+                    "✗",
                     Style::new()
-                        .fg(Color::DarkGray)
+                        .fg(theme::MUTED)
                         .add_modifier(Modifier::CROSSED_OUT),
                 )
             } else if !x.rejected.is_empty() {
-                Span::styled(format!("± {base}"), Style::new().fg(Color::Yellow))
+                name("±", Style::new().fg(theme::YELLOW))
             } else {
-                Span::raw(base.to_string())
+                name("·", Style::new().fg(theme::TEXT))
             }];
             if n > 0 {
                 spans.push(Span::styled(
-                    format!(" 💬{n}"),
-                    Style::new().fg(Color::Magenta),
+                    format!(" ✎{n}"),
+                    Style::new().fg(theme::MAUVE).bold(),
                 ));
             }
             ListItem::new(Line::from(spans))
@@ -801,8 +853,14 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     let mut state = ListState::default().with_selected(Some(diff.sel));
     f.render_stateful_widget(
         List::new(items)
-            .block(Block::bordered().title(" files "))
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .block(theme::panel(theme::MAUVE, false).title(Line::from(vec![
+                Span::styled(" files ", Style::new().fg(theme::SUBTEXT).bold()),
+                theme::soft_pill(diff.files.len().to_string(), theme::OVERLAY),
+                Span::raw(" "),
+            ])))
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(Span::styled("▌", Style::new().fg(theme::MAUVE)))
+            .highlight_style(Style::new().bg(theme::SURFACE).add_modifier(Modifier::BOLD)),
         left,
         &mut state,
     );
@@ -811,6 +869,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     let mut rows: Vec<Line> = Vec::new();
     let mut cursor_row = 0;
     let inner_w = right.width.saturating_sub(2) as usize;
+    const GUTTER: usize = 12;
     for (i, l) in file.lines.iter().enumerate() {
         if i == file.cursor {
             cursor_row = rows.len();
@@ -818,39 +877,63 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
         let num = |n: Option<usize>| n.map_or("    ".to_string(), |n| format!("{n:>4}"));
         let rejected = file.line_rejected(i);
         let mut style = if rejected {
-            Style::new().fg(Color::DarkGray)
+            Style::new().fg(theme::MUTED)
         } else {
             line_style(l.kind)
         };
         if rejected && matches!(l.kind, Kind::Add | Kind::Del) {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
-        if i == file.cursor || marked.is_some_and(|(s, e)| (s..=e).contains(&i)) {
-            style = style.add_modifier(Modifier::REVERSED);
+        let at_cursor = i == file.cursor;
+        let in_mark = marked.is_some_and(|(s, e)| (s..=e).contains(&i));
+        if at_cursor {
+            style = style.bg(theme::CURSOR_BG);
+        } else if in_mark {
+            style = style.bg(theme::MARK_BG);
+        }
+        if (at_cursor || in_mark) && style.fg.is_none() {
+            style = style.fg(theme::TEXT);
         }
         let covered = ranges
             .iter()
             .any(|r| r.is_some_and(|(fi, s, e)| fi == diff.sel && s < e && (s..=e).contains(&i)));
-        let gutter = if matches!(l.kind, Kind::Add | Kind::Del | Kind::Ctx) {
-            format!("{} {} ", num(l.old), num(l.new))
+        let numbers = if matches!(l.kind, Kind::Add | Kind::Del | Kind::Ctx) {
+            format!("{} {}  ", num(l.old), num(l.new))
         } else if rejected && file.unit_at(i) == Some(i) {
-            " ✗ reject ".to_string()
+            " ✗ reject  ".to_string()
         } else {
-            "          ".to_string()
+            " ".repeat(GUTTER - 1)
+        };
+        let marker = if at_cursor {
+            Span::styled("▌", Style::new().fg(theme::MAUVE))
+        } else if in_mark || covered {
+            Span::styled("▎", Style::new().fg(theme::MAUVE))
+        } else {
+            Span::raw(" ")
+        };
+        let gutter_fg = if rejected {
+            theme::RED
+        } else if at_cursor {
+            theme::LAVENDER
+        } else if covered {
+            theme::MAUVE
+        } else {
+            theme::MUTED
+        };
+        let gutter = match (rejected, l.kind) {
+            (false, Kind::Add) => Style::new().fg(theme::GREEN).bg(theme::ADD_GUTTER),
+            (false, Kind::Del) => Style::new().fg(theme::RED).bg(theme::DEL_GUTTER),
+            _ => Style::new().fg(gutter_fg),
+        };
+        let gutter = if at_cursor {
+            gutter.fg(theme::LAVENDER).bold()
+        } else {
+            gutter
         };
         wrap_into(
             &mut rows,
-            Span::styled(
-                gutter,
-                Style::new().fg(if rejected {
-                    Color::Red
-                } else if covered {
-                    Color::Magenta
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            10,
+            vec![marker, Span::styled(numbers, gutter)],
+            GUTTER,
             &l.text.replace('\t', "    "),
             style,
             inner_w,
@@ -861,17 +944,25 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
             .zip(&pos)
             .filter(|(_, p)| **p == Some((diff.sel, i)))
         {
-            let (text, color) = if c.ai {
-                (format!("▍ {ai_label}: {}", c.text), Color::Cyan)
+            let (who, color) = if c.ai {
+                (ai_label, theme::SKY)
             } else {
-                (format!("▍ {}", c.text), Color::Magenta)
+                ("you", theme::MAUVE)
             };
+            let indent = Span::raw(" ".repeat(GUTTER));
             wrap_into(
                 &mut rows,
-                Span::raw("           "),
-                11,
-                &text,
-                Style::new().fg(color).add_modifier(Modifier::BOLD),
+                vec![
+                    indent,
+                    Span::styled("▍", Style::new().fg(color).bg(theme::RAISED)),
+                    Span::styled(
+                        format!(" {who} "),
+                        Style::new().fg(color).bg(theme::RAISED).bold(),
+                    ),
+                ],
+                GUTTER + 2 + who.chars().count() + 1,
+                &format!("{} ", c.text),
+                Style::new().fg(theme::TEXT).bg(theme::RAISED),
                 inner_w,
             );
         }
@@ -880,12 +971,67 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     let top = cursor_row
         .saturating_sub(height / 2)
         .min(rows.len().saturating_sub(height));
+    let total = rows.len();
     let text: Vec<Line> = rows.into_iter().skip(top).take(height).collect();
+    let mut title = vec![
+        Span::raw(" "),
+        Span::styled(file.name.clone(), Style::new().fg(theme::TEXT).bold()),
+        Span::raw(" "),
+    ];
+    if file.old_name != file.name && !file.old_name.is_empty() {
+        title.insert(
+            1,
+            Span::styled(
+                format!("{} → ", file.old_name),
+                Style::new().fg(theme::OVERLAY),
+            ),
+        );
+    }
+    let position = if total > height {
+        format!("{}%", (top + height).min(total) * 100 / total.max(1))
+    } else {
+        "all".into()
+    };
     f.render_widget(
-        Paragraph::new(text).block(Block::bordered().title(Span::styled(
-            format!(" [{}/{}] {} ", diff.sel + 1, diff.files.len(), file.name),
-            Style::new().fg(Color::Yellow),
-        ))),
+        Paragraph::new(text).block(
+            theme::panel(theme::MAUVE, true)
+                .title(Line::from(title))
+                .title(
+                    Line::from(vec![
+                        theme::pill(
+                            format!("{}/{}", diff.sel + 1, diff.files.len()),
+                            theme::MAUVE,
+                        ),
+                        Span::raw(" "),
+                    ])
+                    .right_aligned(),
+                )
+                .title_bottom(
+                    Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(position, Style::new().fg(theme::OVERLAY)),
+                        Span::raw(" "),
+                    ])
+                    .right_aligned(),
+                )
+                .title_bottom(
+                    Line::from(
+                        [
+                            vec![Span::raw(" ")],
+                            theme::hint(&[
+                                ("c", "comment"),
+                                ("y n", "hunk"),
+                                ("S", "send"),
+                                ("m", "merge"),
+                                ("?", "more"),
+                            ]),
+                            vec![Span::raw(" ")],
+                        ]
+                        .concat(),
+                    )
+                    .left_aligned(),
+                ),
+        ),
         right,
     );
 }

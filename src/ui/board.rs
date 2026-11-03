@@ -3,9 +3,10 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Flex, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState};
+use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
 
 use crate::agent::{self, Stall};
 use crate::app::App;
@@ -14,6 +15,7 @@ use crate::checks::Check;
 use crate::pr::Checks;
 use crate::scheduler;
 use crate::ui::review;
+use crate::ui::theme;
 
 fn badge(app: &App, b: &Bead) -> Span<'static> {
     app.ai_reviews
@@ -31,9 +33,9 @@ fn released_badge(b: &Bead) -> Span<'static> {
 
 fn stall_marker(s: Stall) -> Span<'static> {
     match s {
-        Stall::Waiting => Span::styled("? ", Style::new().fg(Color::Yellow).bold()),
-        Stall::Stalled => Span::styled("⧗ ", Style::new().fg(Color::Yellow)),
-        Stall::Dead => Span::styled("✗ ", Style::new().fg(Color::Red).bold()),
+        Stall::Waiting => Span::styled("? ", Style::new().fg(theme::YELLOW).bold()),
+        Stall::Stalled => Span::styled("⧗ ", Style::new().fg(theme::PEACH)),
+        Stall::Dead => Span::styled("✗ ", Style::new().fg(theme::RED).bold()),
     }
 }
 
@@ -48,7 +50,7 @@ fn stall_of(app: &App, b: &Bead) -> Option<(String, Stall)> {
 
 fn conflict(app: &App, b: &Bead) -> Span<'static> {
     if app.conflicts.contains_key(&b.id) {
-        Span::styled("⚠ ", Style::new().fg(Color::Red))
+        Span::styled("⚠ ", Style::new().fg(theme::RED))
     } else {
         Span::raw("")
     }
@@ -64,10 +66,10 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
     };
     let mut spans = Vec::new();
     let phase = match b.state() {
-        Some(State::Revise) => Some(("revise queued ", Color::Magenta)),
-        Some(State::Running) => Some(("revising ", Color::Yellow)),
-        Some(State::Reviewing) => Some(("ai reviewing ", Color::Cyan)),
-        Some(State::Review) => Some(("revised, Enter to review ", Color::Green)),
+        Some(State::Revise) => Some(("revise queued ", theme::PINK)),
+        Some(State::Running) => Some(("revising ", theme::YELLOW)),
+        Some(State::Reviewing) => Some(("ai reviewing ", theme::SKY)),
+        Some(State::Review) => Some(("revised, Enter to review ", theme::GREEN)),
         _ => None,
     };
     if let Some((text, color)) = phase {
@@ -76,7 +78,7 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
     if !seen.comments.is_empty() {
         spans.push(Span::styled(
             format!("✉{} ", seen.comments.len()),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(theme::SKY),
         ));
     }
     if !seen.pending.is_empty() {
@@ -84,20 +86,20 @@ fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
         spans.push(if b.state() == Some(State::Pr) {
             Span::styled(
                 format!("↻{n}, U to revise "),
-                Style::new().fg(Color::Magenta).bold(),
+                Style::new().fg(theme::PINK).bold(),
             )
         } else {
-            Span::styled(format!("↻{n} "), Style::new().fg(Color::Magenta))
+            Span::styled(format!("↻{n} "), Style::new().fg(theme::PINK))
         });
     }
     if seen.closed {
-        spans.push(Span::styled("closed ", Style::new().fg(Color::Red)));
+        spans.push(Span::styled("closed ", Style::new().fg(theme::RED)));
     }
     spans.push(match seen.checks {
         Checks::None => Span::raw(""),
-        Checks::Pending => Span::styled("⟳ci ", Style::new().fg(Color::Yellow)),
-        Checks::Passing => Span::styled("✓ci ", Style::new().fg(Color::Green)),
-        Checks::Failing(_) => Span::styled("✗ci ", Style::new().fg(Color::Red)),
+        Checks::Pending => Span::styled("⟳ci ", Style::new().fg(theme::YELLOW)),
+        Checks::Passing => Span::styled("✓ci ", Style::new().fg(theme::GREEN)),
+        Checks::Failing(_) => Span::styled("✗ci ", Style::new().fg(theme::RED)),
     });
     spans
 }
@@ -111,28 +113,28 @@ fn marker(app: &App, b: &Bead) -> Span<'static> {
         return stall_marker(s);
     }
     if starting(app, b) {
-        return Span::styled("◌ ", Style::new().fg(Color::Green));
+        return Span::styled("◌ ", Style::new().fg(theme::GREEN));
     }
     if b.state() == Some(State::Reviewing) {
         let color = match app.agents.get(&agent::review_id(&b.id)) {
-            Some(a) if a.alive => Color::Cyan,
-            _ => Color::Red,
+            Some(a) if a.alive => theme::SKY,
+            _ => theme::RED,
         };
         return Span::styled("◎ ", Style::new().fg(color));
     }
     match app.agents.get(&b.id) {
-        Some(a) if a.alive => Span::styled("● ", Style::new().fg(Color::Green)),
-        Some(_) => Span::styled("✗ ", Style::new().fg(Color::Red)),
+        Some(a) if a.alive => Span::styled("● ", Style::new().fg(theme::GREEN)),
+        Some(_) => Span::styled("✗ ", Style::new().fg(theme::RED)),
         None if b.state() == Some(State::Held) => {
             let color = if app.over_budget.contains_key(&b.id) {
-                Color::Red
+                theme::RED
             } else {
-                Color::Yellow
+                theme::YELLOW
             };
             Span::styled("⏸ ", Style::new().fg(color))
         }
         None if b.status == "blocked" || app.blocked.contains_key(&b.id) => {
-            Span::styled("⊘ ", Style::new().fg(Color::Red))
+            Span::styled("⊘ ", Style::new().fg(theme::RED))
         }
         None => Span::raw("  "),
     }
@@ -163,8 +165,8 @@ fn count(app: &App, shown: usize, total: usize) -> String {
 
 fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
     let (glyph, base) = match rel {
-        Relation::Ancestor => ("▲", base.fg(Color::LightYellow)),
-        Relation::Descendant => ("▼", base.fg(Color::LightMagenta)),
+        Relation::Ancestor => ("▲", base.fg(theme::YELLOW)),
+        Relation::Descendant => ("▼", base.fg(theme::PINK)),
         Relation::None => (" ", base),
     };
     let mut spans = vec![
@@ -174,10 +176,13 @@ fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
         released_badge(b),
         badge(app, b),
         check_badge(app, b),
-        Span::styled(format!("P{} ", b.priority), Style::new().fg(Color::Magenta)),
+        Span::styled(
+            format!("P{} ", b.priority),
+            Style::new().fg(theme::priority(b.priority)).bold(),
+        ),
     ];
     if let Some(n) = b.label("pr") {
-        spans.push(Span::styled(format!("#{n} "), Style::new().fg(Color::Blue)));
+        spans.push(Span::styled(format!("#{n} "), Style::new().fg(theme::SKY)));
         spans.extend(pr_badges(app, b));
     }
     spans.extend(highlighted(
@@ -185,12 +190,15 @@ fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
         &app.filter.highlights(&b.title),
         base,
     ));
-    spans.push(Span::raw(format!(" {}", b.id)).dim());
+    spans.push(Span::styled(
+        format!(" {}", b.id),
+        Style::new().fg(theme::MUTED),
+    ));
     Line::from(spans)
 }
 
 fn highlighted(text: &str, marks: &[bool], base: Style) -> Vec<Span<'static>> {
-    let hit = base.fg(Color::Black).bg(Color::Yellow);
+    let hit = base.fg(theme::CRUST).bg(theme::YELLOW);
     let mut spans = Vec::new();
     let mut run = String::new();
     let mut on = false;
@@ -225,14 +233,14 @@ fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
     if let Some(t) = b.state_since() {
         spans.push(Span::styled(
             elapsed((now - t).num_seconds()),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::SUBTEXT),
         ));
     }
     if let Some(d) = app.diffstats.get(&b.id) {
         spans.extend([
-            Span::styled(format!(" +{}", d.adds), Style::new().fg(Color::Green)),
-            Span::styled(format!(" -{}", d.dels), Style::new().fg(Color::Red)),
-            Span::raw(format!(" {}f", d.files)).dim(),
+            Span::styled(format!(" +{}", d.adds), Style::new().fg(theme::GREEN)),
+            Span::styled(format!(" -{}", d.dels), Style::new().fg(theme::RED)),
+            Span::styled(format!(" {}f", d.files), Style::new().fg(theme::OVERLAY)),
         ]);
     }
     let id = if b.state() == Some(State::Reviewing) {
@@ -240,12 +248,65 @@ fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
     } else {
         b.id.clone()
     };
+    let quiet = Style::new().fg(theme::MUTED).italic();
     if starting(app, b) {
-        spans.push(Span::raw(" · starting").dim());
+        spans.extend([theme::dot(), Span::styled("starting", quiet)]);
     } else if let Some(l) = app.agents.get(&id).and_then(|a| a.last_line()) {
-        spans.push(Span::raw(format!(" · {l}")).dim());
+        spans.extend([theme::dot(), Span::styled(l, quiet)]);
     }
     Line::from(spans)
+}
+
+fn column_title(app: &App, col: Column, shown: usize, total: usize, active: bool) -> Line<'static> {
+    let accent = theme::column_accent(col);
+    let name = Style::new().fg(if active { accent } else { theme::SUBTEXT });
+    let n = count(app, shown, total);
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(theme::column_icon(col), Style::new().fg(accent)),
+        Span::styled(format!(" {} ", col.title()), name.bold()),
+        if active {
+            theme::pill(n, accent)
+        } else {
+            theme::soft_pill(n, theme::OVERLAY)
+        },
+        Span::raw(" "),
+    ])
+}
+
+fn empty_hint(f: &mut Frame, area: Rect, app: &App, col: Column) {
+    let inner = area.inner(Margin::new(1, 1));
+    if inner.height < 2 {
+        return;
+    }
+    let text = if app.is_filtered() {
+        "no matches"
+    } else {
+        theme::column_empty(col)
+    };
+    let [row] = Layout::vertical([Constraint::Length(2)])
+        .flex(Flex::Center)
+        .areas(inner);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::styled(theme::column_icon(col), Style::new().fg(theme::LINE)),
+            Line::styled(text, Style::new().fg(theme::MUTED).italic()),
+        ])
+        .centered(),
+        row,
+    );
+}
+
+fn cards(items: Vec<ListItem<'_>>, accent: Color, active: bool) -> List<'_> {
+    let list = List::new(items)
+        .highlight_spacing(HighlightSpacing::Always)
+        .repeat_highlight_symbol(true);
+    if active {
+        list.highlight_symbol(Span::styled("▌", Style::new().fg(accent)))
+            .highlight_style(Style::new().bg(theme::SURFACE).add_modifier(Modifier::BOLD))
+    } else {
+        list.highlight_symbol(" ")
+    }
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
@@ -258,8 +319,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let now = Utc::now();
     let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
     for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
-        let count = count(app, beads.len(), totals[i]);
         let active = i == app.col;
+        let accent = theme::column_accent(col);
         let items: Vec<ListItem> = beads
             .iter()
             .map(|b| {
@@ -270,25 +331,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             })
             .collect();
         let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
-        let border = if active {
-            Style::new().fg(Color::Cyan)
-        } else {
-            Style::new().dim()
-        };
-        let block = Block::bordered()
-            .border_style(border)
-            .title(format!(" {} ({count}) ", col.title()));
-        let list = List::new(items).block(block).highlight_style(if active {
-            Style::new()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new()
-        });
+        let block = theme::panel(accent, active).title(column_title(
+            app,
+            col,
+            beads.len(),
+            totals[i],
+            active,
+        ));
         let mut state =
             ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
-        f.render_stateful_widget(list, areas[i], &mut state);
-        scroll_hints(f, areas[i], &heights, state.offset(), border, true);
+        f.render_stateful_widget(
+            cards(items, accent, active).block(block),
+            areas[i],
+            &mut state,
+        );
+        if beads.is_empty() {
+            empty_hint(f, areas[i], app, col);
+        }
+        let hint = Style::new().fg(if active { accent } else { theme::MUTED });
+        scroll_hints(f, areas[i], &heights, state.offset(), hint, true);
     }
 }
 
@@ -392,7 +453,7 @@ fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
         });
     }
     meta.retain(|m| !m.is_empty());
-    lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(Color::Cyan));
+    lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(theme::OVERLAY));
     if let Some(c) = app.conflicts.get(&b.id) {
         let files: Vec<&str> = c.files().into_iter().collect();
         lines.push(
@@ -401,7 +462,7 @@ fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
                 c.summary(&app.base),
                 files.join(", ")
             ))
-            .fg(Color::Red),
+            .fg(theme::RED),
         );
     }
     lines.push(activity(app, b, Utc::now()));
@@ -414,7 +475,7 @@ fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
         .take(3)
     {
         let text: String = l.chars().take(max).collect();
-        lines.push(Line::from(format!("    {text}")).dim());
+        lines.push(Line::from(format!("    {text}")).fg(theme::MUTED).italic());
     }
     lines.push(Line::raw(""));
     ListItem::new(lines)
@@ -433,43 +494,49 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .map(|b| card(app, b, width, relation(chain.as_ref(), b)))
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
-    let nav: Vec<Span> = Column::ALL
-        .iter()
-        .enumerate()
-        .flat_map(|(j, c)| {
-            let label = Span::raw(format!(
-                " {} ({}) ",
-                c.title(),
-                count(app, cols[j].len(), totals[j])
-            ));
-            let label = if j == i {
-                label.cyan().bold()
-            } else {
-                label.dim()
-            };
-            [label, Span::raw("│").dim()]
-        })
-        .collect();
-    let nav = Line::from(nav[..nav.len() - 1].to_vec()).right_aligned();
-    let block = Block::bordered()
-        .border_style(Style::new().fg(Color::Cyan))
-        .title(format!(
-            " {} ({}) · zoom, z/Esc to exit ",
-            col.title(),
-            count(app, beads.len(), totals[i])
-        ))
-        .title(nav);
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::new().bg(Color::DarkGray));
+    let mut nav: Vec<Span> = Vec::new();
+    for (j, c) in Column::ALL.iter().enumerate() {
+        let n = count(app, cols[j].len(), totals[j]);
+        let accent = theme::column_accent(*c);
+        nav.push(if j == i {
+            theme::pill(
+                format!("{} {} {n}", theme::column_icon(*c), c.title()),
+                accent,
+            )
+        } else {
+            Span::styled(
+                format!(" {} {n} ", theme::column_icon(*c)),
+                Style::new().fg(theme::OVERLAY),
+            )
+        });
+    }
+    nav.push(Span::raw(" "));
+    let accent = theme::column_accent(col);
+    let block = theme::panel(accent, true)
+        .title(column_title(app, col, beads.len(), totals[i], true))
+        .title(Line::from(nav).right_aligned())
+        .title_bottom(
+            Line::from(
+                [
+                    vec![Span::raw(" ")],
+                    theme::hint(&[("z / Esc", "unzoom")]),
+                    vec![Span::raw(" ")],
+                ]
+                .concat(),
+            )
+            .left_aligned(),
+        );
     let mut state = ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(cards(items, accent, true).block(block), area, &mut state);
+    if beads.is_empty() {
+        empty_hint(f, area, app, col);
+    }
     scroll_hints(
         f,
         area,
         &heights,
         state.offset(),
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(accent),
         false,
     );
 }

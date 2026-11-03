@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Span;
+
+use crate::ui::theme;
 use serde::{Deserialize, Serialize};
 
 use crate::app::Event;
@@ -169,10 +171,10 @@ impl Check {
 
     pub fn badge(&self) -> Span<'static> {
         match self.status {
-            Status::Queued => Span::styled("…chk ", Style::new().fg(Color::DarkGray)),
-            Status::Running => Span::styled("⟳chk ", Style::new().fg(Color::Yellow)),
-            Status::Pass => Span::styled("✓chk ", Style::new().fg(Color::Green)),
-            Status::Fail => Span::styled("✗chk ", Style::new().fg(Color::Red)),
+            Status::Queued => Span::styled("…chk ", Style::new().fg(theme::OVERLAY)),
+            Status::Running => Span::styled("⟳chk ", Style::new().fg(theme::YELLOW)),
+            Status::Pass => Span::styled("✓chk ", Style::new().fg(theme::GREEN)),
+            Status::Fail => Span::styled("✗chk ", Style::new().fg(theme::RED)),
         }
     }
 
