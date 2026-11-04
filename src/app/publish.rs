@@ -717,10 +717,11 @@ impl App {
         );
     }
 
-    pub(super) fn republish_resolved(&mut self, entered: &[String]) {
+    pub(super) fn republish_resolved(&mut self, entered: &[String]) -> Vec<String> {
         let all = &self.all;
         self.republishing
             .retain(|id, _| all.iter().any(|b| b.id == *id && b.status != "closed"));
+        let mut resolved = Vec::new();
         for id in entered {
             let Some(top) = self.republishing.remove(id) else {
                 continue;
@@ -731,7 +732,9 @@ impl App {
             tracing::info!("{id} resolved its publish conflicts, publishing again");
             let chain = self.publish_chain(&top);
             self.start_publish(chain, None);
+            resolved.push(id.clone());
         }
+        resolved
     }
 
     pub(super) fn published(&mut self, id: &str, bead: Bead, r: Result<pr::Pr>) {

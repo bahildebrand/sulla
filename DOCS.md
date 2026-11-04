@@ -212,6 +212,19 @@ the file header, or `COMMIT_MSG` if the file is not in the diff.
 - `approve` or no comments: the bead stays in Review.
 - Missing or unparseable output: stays in Review with a status message.
 
+#### Auto review
+
+With `[ai_review] auto = true`, every time an implementer moves its bead from running to Review,
+sulla starts a reviewer as if you had pressed `V`, so the bead stays in In Progress (`◎`) instead
+of landing in Ready for Review. A `changes` verdict goes straight to the implementer, and when it
+moves the bead back to Review the next round starts. The loop ends, and the bead is left in Review
+with a `review` notification, when the reviewer approves, its output cannot be used, its comments
+cannot be delivered, the reviewer cannot start, or `max_rounds` (default 3) reviews have run. The
+status line shows `auto ai review of <bead> (round <n>/<max>)` while it runs. Sending your own
+feedback or pressing `V` restarts the count. Beads that return to Review for any other reason
+(a stopped reviewer, a restart, a publish conflict that sulla republishes itself, a released
+bead) are not auto reviewed.
+
 Cards and the Review header show `✓ai` or `✎ai`. AI comments appear inline in cyan as `ai:` (or
 `ai (sent):`) and can be edited (`C`), deleted (`x`) or sent (`S`) with yours. They are cleared on
 a new AI review, when you send feedback, or when the bead goes back to running.

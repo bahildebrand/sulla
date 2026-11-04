@@ -240,6 +240,7 @@ pub struct App {
     pub view: View,
     pub parked_review: Option<Diff>,
     pub ai_reviews: HashMap<String, AiReview>,
+    auto_rounds: HashMap<String, u32>,
     pub checks: HashMap<String, Check>,
     check_runs: u64,
     pub usage: HashMap<String, Usage>,
@@ -356,6 +357,7 @@ impl App {
             view: View::Board,
             parked_review: None,
             ai_reviews: HashMap::new(),
+            auto_rounds: HashMap::new(),
             checks: HashMap::new(),
             check_runs: 0,
             usage: HashMap::new(),
@@ -714,21 +716,23 @@ impl App {
                         b.id == *id && b.status != "closed" && b.state() == Some(State::Held)
                     })
                 });
+                self.auto_rounds
+                    .retain(|id, _| all.iter().any(|b| b.id == *id && b.status != "closed"));
                 let entered = self.entered_review();
-                self.republish_resolved(&entered);
+                let ids: Vec<String> = entered.iter().map(|(id, _)| id.clone()).collect();
+                let republished = self.republish_resolved(&ids);
                 self.clamp();
                 self.watch_usage();
                 self.reconcile();
                 for id in &finished {
-                    self.collect_ai_review(id, entered.contains(id));
+                    self.collect_ai_review(id, ids.contains(id));
                 }
-                for id in entered {
+                for (id, from) in entered {
                     if finished.contains(&id) {
                         continue;
                     }
-                    if let Some(title) = self.bead(&id).map(|b| b.title.clone()) {
-                        self.notify(Trigger::Review, &id, &title);
-                    }
+                    let auto = from == Some(State::Running) && !republished.contains(&id);
+                    self.ready_for_review(&id, auto);
                 }
                 self.sync_checks();
                 self.schedule();

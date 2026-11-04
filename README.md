@@ -120,6 +120,10 @@ poll_secs = 120           # how often to poll open pull requests
 backup_sessions = true    # back up agent sessions so agents can resume on review comments
 reply = false             # comment on the PR with what a revision addressed when republishing
 
+[ai_review]
+auto = false              # start an AI review whenever an agent finishes, before Ready for Review
+max_rounds = 3            # AI reviews per bead before it is left in Review for you
+
 [hooks]
 setup = "npm ci"          # run once in each new worktree before its agent starts, unset by default
 

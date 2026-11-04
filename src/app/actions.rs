@@ -328,6 +328,7 @@ impl App {
             return;
         }
         self.ai_reviews.remove(id);
+        self.auto_rounds.remove(id);
         self.status = format!("feedback sent to {id}");
         self.parked_review = None;
         self.view = View::Progress(id.to_string());

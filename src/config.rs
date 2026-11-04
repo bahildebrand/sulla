@@ -26,7 +26,24 @@ pub struct Config {
     pub workflow: Workflow,
     pub pr: PrConfig,
     pub hooks: HooksConfig,
+    pub ai_review: AiReviewConfig,
     pub presets: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiReviewConfig {
+    pub auto: bool,
+    pub max_rounds: u32,
+}
+
+impl Default for AiReviewConfig {
+    fn default() -> Self {
+        Self {
+            auto: false,
+            max_rounds: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +286,7 @@ impl Default for Config {
             workflow: Workflow::default(),
             pr: PrConfig::default(),
             hooks: HooksConfig::default(),
+            ai_review: AiReviewConfig::default(),
             presets: BTreeMap::new(),
         }
     }
@@ -447,6 +465,22 @@ mod tests {
         assert_eq!(cfg.hooks.setup_script(), None);
         let cfg: Config = toml::from_str("[hooks]\nsetup = \"bin/setup\"").unwrap();
         assert_eq!(cfg.hooks.setup_script(), Some("bin/setup"));
+    }
+
+    #[test]
+    fn ai_review_is_manual_by_default_and_parses_auto() {
+        assert_eq!(
+            Config::default().ai_review,
+            AiReviewConfig {
+                auto: false,
+                max_rounds: 3,
+            }
+        );
+        let cfg: Config = toml::from_str("[ai_review]\nauto = true").unwrap();
+        assert!(cfg.ai_review.auto);
+        assert_eq!(cfg.ai_review.max_rounds, 3);
+        let cfg: Config = toml::from_str("[ai_review]\nauto = true\nmax_rounds = 1").unwrap();
+        assert_eq!(cfg.ai_review.max_rounds, 1);
     }
 
     #[test]

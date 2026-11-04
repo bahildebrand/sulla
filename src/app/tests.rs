@@ -1411,3 +1411,63 @@ fn every_view_renders_at_any_terminal_size() {
         }
     }
 }
+
+#[test]
+fn auto_review_starts_a_reviewer_when_the_implementer_finishes() {
+    let mut h = Harness::new("auto-review", &[("t-1", Some(State::Review))]);
+    h.app.git.ensure_worktree("t-1", "main").unwrap();
+    let rid = agent::review_id("t-1");
+    h.app.ready_for_review("t-1", true);
+    assert!(!h.app.is_starting(&rid));
+    h.app.cfg.ai_review.auto = true;
+    h.app.ready_for_review("t-1", false);
+    assert!(!h.app.is_starting(&rid));
+    h.app.ready_for_review("t-1", true);
+    assert!(h.app.is_starting(&rid));
+    assert_eq!(
+        h.app.status,
+        "starting auto ai review of t-1 (round 1/3)..."
+    );
+    h.pump();
+    assert!(h.app.agents.contains_key(&rid));
+    assert_eq!(h.state("t-1"), Some(State::Reviewing));
+    assert_eq!(h.app.auto_rounds.get("t-1"), Some(&1));
+}
+
+#[test]
+fn auto_review_stops_after_max_rounds_and_resets() {
+    let mut h = Harness::new("auto-review-max", &[("t-1", Some(State::Review))]);
+    h.app.git.ensure_worktree("t-1", "main").unwrap();
+    h.app.cfg.ai_review.auto = true;
+    h.app.cfg.ai_review.max_rounds = 2;
+    h.app.auto_rounds.insert("t-1".into(), 2);
+    let rid = agent::review_id("t-1");
+    h.app.ready_for_review("t-1", true);
+    assert!(!h.app.is_starting(&rid));
+    assert!(!h.app.auto_rounds.contains_key("t-1"));
+    assert_eq!(
+        h.app.status,
+        "auto ai review of t-1: stopped after 2 round(s), left in review"
+    );
+    h.app.ready_for_review("t-1", true);
+    assert!(h.app.is_starting(&rid));
+    h.pump();
+    assert_eq!(h.app.auto_rounds.get("t-1"), Some(&1));
+}
+
+#[test]
+fn auto_review_skips_released_beads_and_counts_nothing_when_it_cannot_start() {
+    let mut h = Harness::new(
+        "auto-review-skip",
+        &[("a", Some(State::Released)), ("b", Some(State::Review))],
+    );
+    h.app.cfg.ai_review.auto = true;
+    h.app.ready_for_review("a", true);
+    assert!(!h.app.is_starting(&agent::review_id("a")));
+    assert!(!h.app.auto_rounds.contains_key("a"));
+    h.app.ready_for_review("b", true);
+    h.pump();
+    assert!(!h.app.agents.contains_key(&agent::review_id("b")));
+    assert!(!h.app.auto_rounds.contains_key("b"));
+    assert_eq!(h.state("b"), Some(State::Review));
+}

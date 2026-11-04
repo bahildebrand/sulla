@@ -151,7 +151,7 @@ impl App {
         }
     }
 
-    pub(super) fn entered_review(&mut self) -> Vec<String> {
+    pub(super) fn entered_review(&mut self) -> Vec<(String, Option<State>)> {
         let now: HashMap<String, Option<State>> =
             self.all.iter().map(|b| (b.id.clone(), b.state())).collect();
         let Some(prev) = self.states.replace(now) else {
@@ -160,8 +160,10 @@ impl App {
         self.all
             .iter()
             .filter(|b| b.status != "closed" && b.state() == Some(State::Review))
-            .filter(|b| prev.get(&b.id).is_some_and(|s| *s != Some(State::Review)))
-            .map(|b| b.id.clone())
+            .filter_map(|b| match prev.get(&b.id) {
+                Some(&from) if from != Some(State::Review) => Some((b.id.clone(), from)),
+                _ => None,
+            })
             .collect()
     }
 

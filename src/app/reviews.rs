@@ -11,28 +11,77 @@ use super::{App, View};
 
 impl App {
     pub(super) fn start_review(&mut self, id: &str) {
+        self.auto_rounds.remove(id);
+        self.begin_review(id, None);
+    }
+
+    pub(super) fn ready_for_review(&mut self, id: &str, auto: bool) {
+        if !(auto && self.cfg.ai_review.auto && self.auto_review(id)) {
+            self.notify_review(id);
+        }
+    }
+
+    fn notify_review(&mut self, id: &str) {
+        if let Some(title) = self.bead(id).map(|b| b.title.clone()) {
+            self.notify(Trigger::Review, id, &title);
+        }
+    }
+
+    fn auto_review(&mut self, id: &str) -> bool {
+        if self.released(id) {
+            return false;
+        }
+        let max = self.cfg.ai_review.max_rounds;
+        let round = self.auto_rounds.get(id).copied().unwrap_or(0) + 1;
+        if round > max {
+            self.auto_rounds.remove(id);
+            self.status =
+                format!("auto ai review of {id}: stopped after {max} round(s), left in review");
+            return false;
+        }
+        if !self.begin_review(id, Some((round, max))) {
+            self.auto_rounds.remove(id);
+            return false;
+        }
+        self.auto_rounds.insert(id.to_string(), round);
+        true
+    }
+
+    fn begin_review(&mut self, id: &str, auto: Option<(u32, u32)>) -> bool {
         if self.refuse_released(id) {
-            return;
+            return false;
         }
         let Some(b) = self.bead(id).cloned() else {
-            return;
+            return false;
         };
         let rid = agent::review_id(id);
         if self.agents.get(&rid).is_some_and(|a| a.alive) || self.is_starting(&rid) {
             self.status = format!("reviewer for {id} is already running");
-            return;
+            return false;
         }
         if b.status == "closed" || b.state() != Some(State::Review) {
             self.status = format!("{id} is not in review");
-            return;
+            return false;
         }
         if self.slots.get(id).is_none() && self.running_count() >= self.cfg.max_agents {
             self.status = format!("all {} agent slots are busy", self.cfg.max_agents);
-            return;
+            return false;
         }
-        self.status = format!("starting ai review of {id}...");
+        let what = match auto {
+            Some((round, max)) => format!("auto ai review of {id} (round {round}/{max})"),
+            None => format!("ai review of {id}"),
+        };
+        self.status = format!("starting {what}...");
         self.starting.insert(rid.clone());
         let id = id.to_string();
+        let failed = move |app: &mut App, id: &str| {
+            if auto.is_some() {
+                app.auto_rounds.remove(id);
+                if app.bead(id).and_then(Bead::state) == Some(State::Review) {
+                    app.notify_review(id);
+                }
+            }
+        };
         self.bd(
             move |beads| Ok(beads.show(&b.id).unwrap_or(b)),
             move |app, r| {
@@ -42,20 +91,24 @@ impl App {
                     .is_some_and(|b| b.state() == Some(State::Review))
                 {
                     app.status = format!("{id} left review, ai review not started");
-                    return;
+                    return failed(app, &id);
                 }
                 match r {
                     Ok(b) => app.launch_review(&b, move |app, r| {
                         if app.report(r).is_some() {
-                            app.status = format!("ai review of {id} started (p to watch)");
+                            app.status = format!("{what} started (p to watch)");
+                        } else {
+                            failed(app, &id);
                         }
                     }),
                     Err(e) => {
                         app.report(Err::<(), _>(e));
+                        failed(app, &id);
                     }
                 }
             },
         );
+        true
     }
 
     pub(super) fn launch_review(
@@ -112,11 +165,12 @@ impl App {
             move |beads| beads.latest_comment(&bead),
             move |app, r| {
                 app.apply_ai_review(&id, r);
-                if notify
-                    && !app.ai_reviews.get(&id).is_some_and(|r| r.forwarded)
-                    && let Some(title) = app.bead(&id).map(|b| b.title.clone())
-                {
-                    app.notify(Trigger::Review, &id, &title);
+                if app.ai_reviews.get(&id).is_some_and(|r| r.forwarded) {
+                    return;
+                }
+                app.auto_rounds.remove(&id);
+                if notify {
+                    app.notify_review(&id);
                 }
             },
         );
