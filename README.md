@@ -113,6 +113,7 @@ reset_every = 10          # hard reset a slot after this many beads, 0 = never
 reset_volumes = true      # light reset also prunes Docker volumes
 mounts = ["~/.claude", "~/.copilot"] # host paths shared at the same path
 env = {}                  # extra env passed to agents in containers
+agent = "host"            # where Claude runs: "host" (Bash goes to the container) or "container"
 
 # Host browser access to slot apps, see "Browsing a slot's app"
 [incus.browse]
@@ -204,6 +205,7 @@ nofile = 262144             # limits.kernel.nofile, ClickHouse needs a high limi
 reset_every = 10            # hard reset a slot after this many beads, 0 = never
 reset_volumes = true        # light reset also prunes Docker volumes
 mounts = ["~/.claude", "~/.copilot"]
+agent = "host"              # or "container"
 ```
 
 Use `kache = false` in incus repos. kache is usually not installed in the container, and agents
@@ -230,17 +232,49 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
 
    It launches `images:ubuntu/24.04` as `sulla-golden` with nesting enabled, installs Docker and
    the compose plugin, git, build tools, Node, `bd` (same version as on the host), the copilot
-   and claude CLIs and rustup, creates a user matching your host user, uid, gid and home path,
+   and claude CLIs and rustup (`[incus] agent = "host"`, the default, does not use the claude
+   CLI in the container), creates a user matching your host user, uid, gid and home path,
    checks `docker run hello-world`, and stops it. It is safe to re-run to refresh the image.
    Overrides: `NAME=...`, `IMAGE=...`, `INSTALL_RUST=0`. The script exits with the exact
    subuid/subgid lines to add if step 2 is missing.
+
+### Where Claude runs
+
+`[incus] agent` picks where a Claude agent's own process runs:
+
+- `"host"` (default): `claude` runs on the host in the bead's worktree, and only the commands of
+  its Bash tool run in the slot container. The repo is mounted in the container at the same path,
+  so Claude's file tools (Read, Edit, Write, Grep, Glob) on the host see the same files the
+  container's commands do. Claude's hooks and MCP servers, its login, settings and session files
+  stay on the host, so nothing needs seeding in the container, and token usage and session
+  backups read the host's `~/.claude`.
+- `"container"`: the whole `claude` process runs in the container through `incus exec`, as before.
+  sulla seeds the container's `.claude.json` to skip onboarding and trust the repo, and session
+  files are reached through `mounts`.
+
+Copilot agents always run in the container. Checks, `[hooks] setup` and the `E` shell run in the
+container in both modes.
+
+In host mode sulla points `CLAUDE_CODE_SHELL` at `.sulla/incus/bash`, a script it writes that
+runs each Bash command as `incus exec <slot> --cwd <dir> -T ... setpriv ... bash -c <command>`
+with your uid and gid, after `[incus] init`, with `[incus] env` plus `SULLA_BEAD`, `SULLA_SLOT`,
+`TERM` and the variables Claude Code sets for its shell (`CLAUDE*`, `GIT_EDITOR`, ...). Claude
+keeps its working directory and the command output of background tasks in
+`CLAUDE_CODE_TMPDIR=.sulla/incus/tmp`, which is inside the mounted repo, so `cd` carries over
+between Bash calls as it does on the host. Its shell snapshot is taken by bash in the container,
+with the container's `PATH`. Interrupting a command, a Bash timeout or stopping a background
+task signals the whole command in the container, not just the local `incus exec` client.
+Host Claude asks once per repo whether to trust it, as with `sandbox = "worktree"`.
 
 ### How slots work
 
 - Slot containers are named `<prefix>-<repo-slug>-<slot>`, copied from the golden container on
   first use and reused across beads. The repo is bind-mounted at the same absolute path, along
   with each `mounts` entry, so worktrees, `.beads` and agent logins work unchanged. Agents run
-  the real `bd` inside the container against the shared `.beads`.
+  the real `bd` inside the container against the shared `.beads`. With `agent = "host"`, the
+  `~/.claude` mount only carries Claude's shell snapshot (taken in the container, written to
+  `~/.claude/shell-snapshots`); without it Claude falls back to a login shell for every Bash
+  command. `~/.copilot` is still needed for Copilot agents.
 - Before every bead sulla makes sure the container has a user with your uid whose primary group
   has your gid, creating or fixing the user and group if needed. Sessions run as that user
   through `setpriv --init-groups`, so they get its supplementary groups, such as `docker` from
@@ -270,7 +304,7 @@ would otherwise get `RUSTC_WRAPPER=kache` and fail to build.
 ### Shell init
 
 `[incus] init` is a bash snippet run in the worktree before every command sulla execs in a slot
-(agents, AI reviewers and checks), for setup a static `env` cannot express, like activating a
+(agents, AI reviewers, checks, and each Bash command of a host Claude agent), for setup a static `env` cannot express, like activating a
 conda environment or putting a worktree-relative directory on `PATH`. The command is then started
 with `exec` from that shell, so exported variables carry over. If the snippet fails, the command
 still starts. Before every bead sulla also runs the snippet once in the repo and, if a command

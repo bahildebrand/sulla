@@ -195,7 +195,16 @@ pub struct IncusConfig {
     pub mounts: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub init: Option<String>,
+    pub agent: IncusAgent,
     pub browse: BrowseConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IncusAgent {
+    #[default]
+    Host,
+    Container,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +231,7 @@ impl Default for IncusConfig {
             mounts: vec!["~/.claude".into(), "~/.copilot".into()],
             env: BTreeMap::new(),
             init: None,
+            agent: IncusAgent::default(),
             browse: BrowseConfig::default(),
         }
     }
@@ -454,6 +464,18 @@ mod tests {
         assert_eq!(Config::default().sandbox, SandboxKind::Worktree);
         let cfg: Config = toml::from_str("sandbox = \"incus\"").unwrap();
         assert_eq!(cfg.sandbox, SandboxKind::Incus);
+    }
+
+    #[test]
+    fn incus_agent_defaults_to_host_and_parses_both() {
+        assert_eq!(Config::default().incus.agent, IncusAgent::Host);
+        let cfg: Config = toml::from_str("[incus]\nmemory = \"4GiB\"").unwrap();
+        assert_eq!(cfg.incus.agent, IncusAgent::Host);
+        let cfg: Config = toml::from_str("[incus]\nagent = \"host\"").unwrap();
+        assert_eq!(cfg.incus.agent, IncusAgent::Host);
+        let cfg: Config = toml::from_str("[incus]\nagent = \"container\"").unwrap();
+        assert_eq!(cfg.incus.agent, IncusAgent::Container);
+        assert!(toml::from_str::<Config>("[incus]\nagent = \"vm\"").is_err());
     }
 
     #[test]

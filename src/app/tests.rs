@@ -35,7 +35,13 @@ impl Sandbox for Gated {
         })
     }
 
-    fn wrap(&self, _slot: usize, _launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {
+    fn wrap(
+        &self,
+        _slot: usize,
+        _kind: AgentKind,
+        _launch: &Launch,
+        cmd: CommandBuilder,
+    ) -> Result<CommandBuilder> {
         Ok(cmd)
     }
 

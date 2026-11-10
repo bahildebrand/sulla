@@ -28,7 +28,7 @@ impl App {
         kind: AgentKind,
     ) -> Result<()> {
         let cmd = agent::command(self.backend(kind), &launch, self.cfg.kache, Some(slot));
-        let cmd = self.sandbox.wrap(slot, &launch, cmd)?;
+        let cmd = self.sandbox.wrap(slot, kind, &launch, cmd)?;
         self.insert_agent(cmd, launch.id, launch.prompt)
     }
 

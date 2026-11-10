@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,7 +16,7 @@ use super::{Outcome, Prepare, Sandbox};
 use crate::agent::Launch;
 use crate::beads;
 use crate::browse;
-use crate::config::{AgentKind, IncusConfig};
+use crate::config::{AgentKind, IncusAgent, IncusConfig};
 use crate::sessions;
 
 const MAX_NAME: usize = 63;
@@ -41,6 +42,45 @@ elif [ "$(id -g "$name")" != "$gid" ]; then
 fi
 "#;
 const BROWSE_DEVICE: &str = "browse-";
+const CONTAINER_VAR: &str = "SULLA_INCUS_CONTAINER";
+const FORWARD_VAR: &str = "SULLA_INCUS_ENV";
+const SHELL_NAME: &str = "bash";
+const NAME_MARK: &str = "{sulla:name}";
+const CWD_MARK: &str = "{sulla:cwd}";
+const ARGS_MARK: &str = "{sulla:args}";
+const SUPERVISE: &str = r#"(trap - INT QUIT; exec setsid "$@") <&0 &
+p=$!
+(tail --pid=$$ -f /dev/null; pkill -KILL -s "$p") >/dev/null 2>&1 &
+w=$!
+for s in TERM INT HUP; do trap "pkill -$s -s $p" "$s"; done
+while :; do
+    wait "$p"
+    r=$?
+    kill -0 "$p" 2>/dev/null || break
+done
+kill "$w" 2>/dev/null
+exit "$r""#;
+const SHELL_HEAD: &str = r#"#!/bin/bash
+name=${SULLA_INCUS_CONTAINER:?SULLA_INCUS_CONTAINER is not set}
+env=()
+fwd() {
+    [[ -n ${seen[$1]-} || ! -v $1 ]] && return
+    seen[$1]=1
+    env+=(--env "$1=${!1}")
+}
+"#;
+const SHELL_LOOP: &str = r#"for k in ${SULLA_INCUS_ENV-}; do fwd "$k"; done
+for k in $(compgen -e); do
+    case $k in
+    CLAUDE_CODE_SHELL) ;;
+    CLAUDE*|__CLAUDE*|AI_AGENT|GIT_EDITOR|COREPACK_ENABLE_AUTO_PIN|BUN_OPTIONS) fwd "$k" ;;
+    esac
+done
+if [[ $# -gt 0 && ${!#} == SNAPSHOT_FILE=* ]]; then
+    set -- "${@:1:$#-1}" "${!#}
+builtin printf 'export PATH=%q\n' \"\$PATH\" >> \"\$SNAPSHOT_FILE\""
+fi
+"#;
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -609,7 +649,9 @@ impl Driver {
         }
         self.wait_ready(&name)?;
         self.ensure_user(&name)?;
-        if let Err(e) = self.seed_claude(&name) {
+        if self.cfg.agent == IncusAgent::Container
+            && let Err(e) = self.seed_claude(&name)
+        {
             tracing::warn!("incus: seeding Claude config in {name} failed: {e:#}");
         }
         self.beads_proxy(&name)?;
@@ -647,7 +689,16 @@ impl Sandbox for Incus {
         })
     }
 
-    fn wrap(&self, slot: usize, launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {
+    fn wrap(
+        &self,
+        slot: usize,
+        kind: AgentKind,
+        launch: &Launch,
+        cmd: CommandBuilder,
+    ) -> Result<CommandBuilder> {
+        if self.driver.hosted(kind) {
+            return self.driver.host_agent(slot, cmd);
+        }
         let cwd = cmd
             .get_cwd()
             .map(|c| c.to_string_lossy().into_owned())
@@ -721,7 +772,10 @@ impl Sandbox for Incus {
         true
     }
 
-    fn session_root(&self, kind: AgentKind, _host: &Path) -> Option<PathBuf> {
+    fn session_root(&self, kind: AgentKind, host: &Path) -> Option<PathBuf> {
+        if self.driver.hosted(kind) {
+            return Some(host.to_path_buf());
+        }
         session_root(&self.driver.cfg, &self.driver.host.home, kind)
     }
 
@@ -741,6 +795,28 @@ impl Sandbox for Incus {
 }
 
 impl Driver {
+    fn hosted(&self, kind: AgentKind) -> bool {
+        kind == AgentKind::Claude && self.cfg.agent == IncusAgent::Host
+    }
+
+    fn host_agent(&self, slot: usize, mut cmd: CommandBuilder) -> Result<CommandBuilder> {
+        let dir = host_dir(&self.repo);
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))?;
+        let shell = dir.join(SHELL_NAME);
+        write_script(&shell, &shell_script(&self.cfg, &self.host))?;
+        let names: Vec<String> = cmd
+            .iter_extra_env_as_str()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        cmd.env("CLAUDE_CODE_SHELL", &shell);
+        cmd.env("CLAUDE_CODE_TMPDIR", &tmp);
+        cmd.env(CONTAINER_VAR, self.name(slot));
+        cmd.env(FORWARD_VAR, names.join(" "));
+        Ok(cmd)
+    }
+
     fn exec(
         &self,
         slot: usize,
@@ -996,6 +1072,57 @@ fn init_argv(init: Option<&str>, argv: &[OsString]) -> Vec<OsString> {
         .collect();
     out.extend(argv.iter().cloned());
     out
+}
+
+fn host_dir(repo: &Path) -> PathBuf {
+    repo.join(".sulla").join("incus")
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn shell_script(cfg: &IncusConfig, host: &Host) -> String {
+    let fixed = exec_env(std::iter::empty(), host, &cfg.env);
+    let mut inner: Vec<OsString> = ["bash", "-c", SUPERVISE, "sulla"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    inner.extend(init_argv(
+        cfg.init.as_deref(),
+        &["bash".into(), ARGS_MARK.into()],
+    ));
+    let argv = exec_argv(&cfg.bin, NAME_MARK, host, CWD_MARK, &fixed, &inner, false);
+    let mut words: Vec<String> = argv
+        .iter()
+        .map(|a| match a.to_string_lossy().as_ref() {
+            NAME_MARK => "\"$name\"".into(),
+            CWD_MARK => "\"$PWD\"".into(),
+            ARGS_MARK => "\"$@\"".into(),
+            a => sh_quote(a),
+        })
+        .collect();
+    words.insert(6, "\"${env[@]}\"".into());
+    let seen: Vec<String> = fixed
+        .iter()
+        .map(|(k, _)| format!("[{}]=1", sh_quote(k)))
+        .collect();
+    format!(
+        "{SHELL_HEAD}declare -A seen=({})\n{SHELL_LOOP}exec {}\n",
+        seen.join(" "),
+        words.join(" ")
+    )
+}
+
+fn write_script(path: &Path, script: &str) -> Result<()> {
+    if std::fs::read_to_string(path).is_ok_and(|s| s == script) {
+        return Ok(());
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, script)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn exec_argv(
@@ -1294,6 +1421,425 @@ mod tests {
         );
         let argv = exec_argv("incus", "n", &host(), "/w", &[], &["sh".into()], false);
         assert!(argv.contains(&"-T".into()) && !argv.contains(&"-t".into()));
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sulla-incus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn incus(cfg: IncusConfig, repo: &Path) -> Incus {
+        let cli = Cli {
+            bin: cfg.bin.clone(),
+        };
+        Incus {
+            driver: Driver {
+                cfg,
+                repo: repo.to_path_buf(),
+                host: host(),
+                cli,
+                addrs: Arc::default(),
+            },
+            counts: Counts::default(),
+            resets: HashMap::new(),
+            busy: HashMap::new(),
+        }
+    }
+
+    fn launch(worktree: &Path) -> Launch {
+        Launch {
+            id: "x-1".into(),
+            session: "s".into(),
+            bead: true,
+            worktree: worktree.to_path_buf(),
+            resume: false,
+            prompt: None,
+            model: None,
+        }
+    }
+
+    fn agent_cmd(bin: &str, worktree: &Path) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.args(["--resume", "s", "do it"]);
+        cmd.cwd(worktree);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("SULLA_BEAD", "x-1");
+        cmd.env("SULLA_SLOT", "1");
+        cmd
+    }
+
+    fn strs(argv: &[OsString]) -> Vec<String> {
+        argv.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn extra_env(cmd: &CommandBuilder) -> BTreeMap<String, String> {
+        cmd.iter_extra_env_as_str()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn container_argv(i: &Incus, bin: &str, worktree: &Path) -> Vec<String> {
+        let cmd = agent_cmd(bin, worktree);
+        let env = exec_env(
+            cmd.iter_extra_env_as_str(),
+            &i.driver.host,
+            &i.driver.cfg.env,
+        );
+        strs(&exec_argv(
+            &i.driver.cfg.bin,
+            &i.driver.name(1),
+            &i.driver.host,
+            &worktree.to_string_lossy(),
+            &env,
+            &init_argv(i.driver.cfg.init.as_deref(), cmd.get_argv()),
+            true,
+        ))
+    }
+
+    #[test]
+    fn host_mode_runs_claude_on_the_host_with_container_shell() {
+        let repo = scratch("host-claude");
+        let wt = repo.join(".sulla/worktrees/x-1");
+        let i = incus(IncusConfig::default(), &repo);
+        let out = i
+            .wrap(1, AgentKind::Claude, &launch(&wt), agent_cmd("claude", &wt))
+            .unwrap();
+        assert_eq!(strs(out.get_argv()), ["claude", "--resume", "s", "do it"]);
+        assert_eq!(out.get_cwd().map(PathBuf::from), Some(wt.clone()));
+        let env = extra_env(&out);
+        let dir = repo.join(".sulla/incus");
+        let shell = dir.join("bash").to_string_lossy().into_owned();
+        let tmp = dir.join("tmp").to_string_lossy().into_owned();
+        assert_eq!(env.get("CLAUDE_CODE_SHELL"), Some(&shell));
+        assert_eq!(env.get("CLAUDE_CODE_TMPDIR"), Some(&tmp));
+        assert_eq!(env.get("SULLA_INCUS_CONTAINER"), Some(&i.driver.name(1)));
+        let mut names: Vec<&str> = env["SULLA_INCUS_ENV"].split(' ').collect();
+        names.sort();
+        assert_eq!(names, ["SULLA_BEAD", "SULLA_SLOT", "TERM"]);
+        let meta = std::fs::metadata(&shell).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read_to_string(&shell).unwrap(),
+            shell_script(&i.driver.cfg, &i.driver.host)
+        );
+        let meta = std::fs::metadata(&tmp).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            i.session_root(AgentKind::Claude, Path::new("/h/.claude")),
+            Some(PathBuf::from("/h/.claude"))
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn copilot_and_container_mode_keep_running_inside_the_container() {
+        let repo = scratch("container");
+        let wt = repo.join(".sulla/worktrees/x-1");
+        let mut cfg = IncusConfig {
+            init: Some("source /x".into()),
+            ..IncusConfig::default()
+        };
+        cfg.env.insert("FOO".into(), "bar".into());
+        let host_mode = incus(cfg.clone(), &repo);
+        cfg.agent = IncusAgent::Container;
+        let container_mode = incus(cfg, &repo);
+        for (i, kind, bin) in [
+            (&host_mode, AgentKind::Copilot, "copilot"),
+            (&container_mode, AgentKind::Copilot, "copilot"),
+            (&container_mode, AgentKind::Claude, "claude"),
+        ] {
+            let out = i.wrap(1, kind, &launch(&wt), agent_cmd(bin, &wt)).unwrap();
+            assert_eq!(strs(out.get_argv()), container_argv(i, bin, &wt));
+            assert_eq!(out.get_cwd().map(PathBuf::from), Some(wt.clone()));
+            assert!(extra_env(&out).is_empty());
+        }
+        assert_eq!(
+            container_argv(&host_mode, "copilot", &wt)[..6],
+            [
+                "incus",
+                "exec",
+                &host_mode.driver.name(1),
+                "--cwd",
+                &wt.to_string_lossy(),
+                "-t"
+            ]
+        );
+        assert!(!repo.join(".sulla/incus").exists());
+        assert_eq!(
+            container_mode.session_root(AgentKind::Claude, Path::new("/elsewhere")),
+            Some(PathBuf::from("/home/blake/.claude"))
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    fn run(cmd: &mut Command) -> std::process::Output {
+        for _ in 0..100 {
+            match cmd.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                r => return r.unwrap(),
+            }
+        }
+        panic!("{cmd:?} stayed busy");
+    }
+
+    #[test]
+    fn host_shell_script_execs_bash_in_the_container() {
+        let d = scratch("shell");
+        let fake = d.join("incus");
+        let out = d.join("argv");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cfg = IncusConfig {
+            bin: fake.to_string_lossy().into_owned(),
+            init: Some("export A='it''s'\ncd /tmp".into()),
+            ..IncusConfig::default()
+        };
+        cfg.env.insert("FOO".into(), "a b 'c'".into());
+        cfg.env.insert("TERM".into(), "dumb".into());
+        let script = d.join("bash");
+        write_script(&script, &shell_script(&cfg, &host())).unwrap();
+        let cwd = d.join("work dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let status = run(Command::new(&script)
+            .args(["-c", "-l", "echo 'hi' && cd sub"])
+            .current_dir(&cwd)
+            .env_clear()
+            .env("SULLA_INCUS_CONTAINER", "sulla-r-abcdef-1")
+            .env("SULLA_INCUS_ENV", "SULLA_BEAD TERM MISSING")
+            .env("SULLA_BEAD", "x 1")
+            .env("TERM", "xterm-256color")
+            .env("CLAUDECODE", "1")
+            .env("CLAUDE_CODE_SHELL", "/host/bash")
+            .env("__CLAUDE_CC_BUN_OPTIONS", "--no-install")
+            .env("GIT_EDITOR", "true")
+            .env("HOME", "/elsewhere")
+            .env("UNRELATED", "x"))
+        .status;
+        assert!(status.success());
+        let raw = std::fs::read(&out).unwrap();
+        let argv: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect();
+        let cwd = cwd.to_string_lossy().into_owned();
+        assert_eq!(
+            argv[..6],
+            [
+                "exec",
+                "sulla-r-abcdef-1",
+                "--cwd",
+                cwd.as_str(),
+                "-T",
+                "--env"
+            ]
+        );
+        let split = argv.iter().position(|a| a == "--").unwrap();
+        let envs: Vec<&str> = argv[5..split]
+            .chunks(2)
+            .map(|c| {
+                assert_eq!(c[0], "--env");
+                c[1].as_str()
+            })
+            .collect();
+        assert_eq!(envs[0], "SULLA_BEAD=x 1");
+        let mut sorted = envs.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [
+                "CLAUDECODE=1",
+                "FOO=a b 'c'",
+                "GIT_EDITOR=true",
+                "HOME=/home/blake",
+                "SULLA_BEAD=x 1",
+                "TERM=dumb",
+                "USER=blake",
+                "__CLAUDE_CC_BUN_OPTIONS=--no-install",
+            ]
+        );
+        assert_eq!(
+            argv[split..],
+            [
+                "--",
+                "setpriv",
+                "--reuid=1000",
+                "--regid=1001",
+                "--init-groups",
+                "--",
+                "bash",
+                "-c",
+                SUPERVISE,
+                "sulla",
+                "bash",
+                "-c",
+                "export A='it''s'\ncd /tmp\nexec \"$@\"",
+                "sulla",
+                "bash",
+                "-c",
+                "-l",
+                "echo 'hi' && cd sub",
+            ]
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    fn supervised(dir: &Path, tag: &str, payload: &str) -> (std::process::Child, u32) {
+        let pidfile = dir.join(tag);
+        let mut child = Command::new("bash")
+            .args(["-c", SUPERVISE, "sulla", "bash", "-c"])
+            .arg(format!("echo $$ > '{}'; {payload}", pidfile.display()))
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if let Some(sid) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return (child, sid);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{tag} never started");
+    }
+
+    fn session_alive(sid: u32) -> bool {
+        Command::new("pgrep")
+            .args(["-s", &sid.to_string()])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    fn gone(sid: u32) -> bool {
+        (0..300).any(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            !session_alive(sid)
+        })
+    }
+
+    #[test]
+    fn supervise_signals_reach_the_whole_command() {
+        let d = scratch("supervise");
+        for (sig, payload) in [
+            ("TERM", "sleep 600; true"),
+            ("INT", "sleep 600; true"),
+            ("HUP", "sleep 600; true"),
+            ("KILL", "sleep 600; true"),
+            ("TERM", "set -m; sleep 600 & wait"),
+            ("KILL", "set -m; sleep 600 & wait"),
+        ] {
+            let tag = format!("{sig}-{}", payload.len());
+            let (mut child, sid) = supervised(&d, &tag, payload);
+            assert!(session_alive(sid));
+            Command::new("kill")
+                .args([&format!("-{sig}"), &child.id().to_string()])
+                .status()
+                .unwrap();
+            child.wait().unwrap();
+            assert!(gone(sid), "{sig} left {payload:?} running in session {sid}");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn supervise_keeps_status_stdin_and_background_children() {
+        let d = scratch("supervise-exit");
+        let out = Command::new("bash")
+            .args(["-c", SUPERVISE, "sulla", "bash", "-c", "cat; exit 7"])
+            .stdin(std::fs::File::open("/etc/hostname").unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(7));
+        assert_eq!(out.stdout, std::fs::read("/etc/hostname").unwrap());
+        let (mut child, sid) = supervised(&d, "bg", "sleep 600 >/dev/null 2>&1 &");
+        assert!(child.wait().unwrap().success());
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(session_alive(sid));
+        Command::new("pkill")
+            .args(["-s", &sid.to_string()])
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn host_shell_script_keeps_container_path_in_snapshots() {
+        let d = scratch("snapshot");
+        let fake = d.join("incus");
+        let out = d.join("argv");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = IncusConfig {
+            bin: fake.to_string_lossy().into_owned(),
+            ..IncusConfig::default()
+        };
+        let script = d.join("bash");
+        write_script(&script, &shell_script(&cfg, &host())).unwrap();
+        let snap = d.join("snap.sh");
+        let create = format!(
+            "SNAPSHOT_FILE='{}'\necho '# Snapshot file' >| \"$SNAPSHOT_FILE\"\necho \"export PATH='/host/bin'\" >> \"$SNAPSHOT_FILE\"",
+            snap.display()
+        );
+        let status = run(Command::new(&script)
+            .args(["-c", "-l", &create])
+            .env_clear()
+            .env("SULLA_INCUS_CONTAINER", "c"))
+        .status;
+        assert!(status.success());
+        let raw = std::fs::read(&out).unwrap();
+        let argv: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect();
+        let sent = argv.last().unwrap();
+        assert!(sent.starts_with(&create), "{sent}");
+        let container_path = "/opt/a b:/usr/bin:/bin";
+        let made = run(Command::new("bash")
+            .args(["-c", sent])
+            .env_clear()
+            .env("PATH", container_path));
+        assert!(made.status.success(), "{made:?}");
+        let sourced = run(Command::new("bash")
+            .args(["-c", "source \"$1\" && printf %s \"$PATH\"", "sh"])
+            .arg(&snap)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin"));
+        assert_eq!(String::from_utf8_lossy(&sourced.stdout), container_path);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn host_shell_script_needs_a_container_name() {
+        let d = scratch("noname");
+        let script = d.join("bash");
+        write_script(&script, &shell_script(&IncusConfig::default(), &host())).unwrap();
+        let out = run(Command::new(&script).args(["-c", "true"]).env_clear());
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("SULLA_INCUS_CONTAINER is not set"),
+            "{out:?}"
+        );
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

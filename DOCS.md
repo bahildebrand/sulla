@@ -128,7 +128,8 @@ closing it without merging, unstacks its children so they keep its commits in th
   running, so edits may conflict.
 - `E` suspends sulla and drops into a shell for the bead. With `sandbox = "incus"` it runs
   `bash` in the bead's container (as your user, in the worktree, after `[incus] init`), otherwise `$SHELL`
-  in the worktree on the host. A bead with no container left gets a host shell. Exit the shell to
+  in the worktree on the host. This is the same container a host-run Claude agent sends its Bash
+  commands to (`[incus] agent = "host"`, see the README). A bead with no container left gets a host shell. Exit the shell to
   return, the review diff reloads like after `e`.
 - `:browse [bead|slot]` opens the app the bead's container serves through the slot's loopback IP,
   in the default browser, or in a Chromium profile of its own when `hosts` need mapping (`[incus.browse]`, see the README). Without an argument it uses
@@ -403,11 +404,14 @@ restart):
   `git log base..HEAD` summary of the branch and the feedback being sent, and the status bar says
   the session was rebuilt.
 
-With `sandbox = "incus"`, agents run with the host `HOME` and the default `[incus] mounts` share
-`~/.copilot` and `~/.claude` with the host, so sessions are backed up and restored on the host. If
-`[incus] env` points `COPILOT_HOME` or `CLAUDE_CONFIG_DIR` elsewhere, that path is used instead.
-When the session directory is not under any mount, sulla cannot see it from the host and skips
-backup, restore and rebuild for that agent. With `workflow = "local"` none of this runs.
+With `sandbox = "incus"` and the default `[incus] agent = "host"`, Claude runs on the host (only
+its Bash commands go to the container), so its sessions are the host's `~/.claude` (or the host's
+`CLAUDE_CONFIG_DIR`). Copilot agents, and Claude with `agent = "container"`, run in the container
+with the host `HOME`, and the default `[incus] mounts` share `~/.copilot` and `~/.claude` with the
+host, so sessions are backed up and restored on the host. If `[incus] env` points `COPILOT_HOME`
+or `CLAUDE_CONFIG_DIR` elsewhere, that path is used instead. When the session directory is not
+under any mount, sulla cannot see it from the host and skips backup, restore and rebuild for that
+agent. With `workflow = "local"` none of this runs.
 
 ### Rejecting hunks
 

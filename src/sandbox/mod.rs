@@ -45,7 +45,13 @@ pub type Prepare = Box<dyn FnOnce() -> Result<Vec<String>> + Send>;
 pub trait Sandbox: Send {
     fn name(&self) -> &str;
     fn prepare(&mut self, slot: usize, id: &str) -> Prepare;
-    fn wrap(&self, slot: usize, launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder>;
+    fn wrap(
+        &self,
+        slot: usize,
+        kind: AgentKind,
+        launch: &Launch,
+        cmd: CommandBuilder,
+    ) -> Result<CommandBuilder>;
     fn finished(&mut self, slot: usize, id: &str, outcome: Outcome) -> Result<()>;
     fn shutdown(&mut self);
     fn instance(&self, _slot: usize) -> Option<String> {
@@ -103,7 +109,13 @@ impl Sandbox for Worktree {
         Box::new(|| Ok(Vec::new()))
     }
 
-    fn wrap(&self, _slot: usize, _launch: &Launch, cmd: CommandBuilder) -> Result<CommandBuilder> {
+    fn wrap(
+        &self,
+        _slot: usize,
+        _kind: AgentKind,
+        _launch: &Launch,
+        cmd: CommandBuilder,
+    ) -> Result<CommandBuilder> {
         Ok(cmd)
     }
 
@@ -267,7 +279,7 @@ mod tests {
             .iter_extra_env_as_str()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let out = Worktree.wrap(2, &launch, cmd).unwrap();
+        let out = Worktree.wrap(2, AgentKind::Copilot, &launch, cmd).unwrap();
         assert_eq!(out.get_argv(), &argv);
         assert_eq!(
             out.get_cwd().map(|c| c.to_os_string()),
