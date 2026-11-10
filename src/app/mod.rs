@@ -24,6 +24,7 @@ use crate::beads::{Bead, Beads, Column, State};
 use crate::browse;
 use crate::budget;
 use crate::checks::{self, Check};
+use crate::config::effective::Layers;
 use crate::config::{AgentKind, Config, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
@@ -34,6 +35,7 @@ use crate::pr::{self, PrStatus};
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
 use crate::scheduler::{self, Backoff, Snapshot};
+use crate::ui::config::ConfigView;
 use crate::ui::review::{AiReview, Diff};
 use crate::usage::{self, Usage, Watch};
 
@@ -193,6 +195,7 @@ pub enum Mode {
         scroll: u16,
     },
     Health,
+    Config(Box<ConfigView>),
     Inspect {
         id: String,
         text: String,
@@ -204,6 +207,7 @@ const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 
 pub struct App {
     pub cfg: Config,
+    pub layers: Layers,
     pub base: String,
     repo: PathBuf,
     chat_session: Option<String>,
@@ -277,7 +281,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cfg: Config, repo: PathBuf, tx: Sender<Event>) -> Result<Self> {
+    pub fn new(cfg: Config, layers: Layers, repo: PathBuf, tx: Sender<Event>) -> Result<Self> {
         let sandbox = sandbox::build(&cfg, &repo)?;
         let git = Git::new(repo.clone()).with_prefix(&cfg.branch_prefix);
         git.ensure_ignored()?;
@@ -330,6 +334,7 @@ impl App {
             over_budget: HashMap::new(),
             states: None,
             cfg,
+            layers,
             base,
             repo,
             chat_session: None,

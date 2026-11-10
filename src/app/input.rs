@@ -6,6 +6,7 @@ use crate::agent::{self, CHAT_ID};
 use crate::beads::{Column, State};
 use crate::filter::Filter;
 use crate::presets;
+use crate::ui::config::ConfigView;
 use crate::ui::keys;
 
 use super::{App, InputKind, Mode, NewBeadForm, View};
@@ -36,6 +37,10 @@ impl App {
             MouseEventKind::ScrollDown => false,
             _ => return,
         };
+        if let Mode::Config(v) = &mut self.mode {
+            v.move_by(if up { -3 } else { 3 });
+            return;
+        }
         if let View::Progress(id) = &self.view
             && matches!(self.mode, Mode::Normal | Mode::Insert)
         {
@@ -75,6 +80,7 @@ impl App {
                     self.open_health();
                 }
             }
+            Mode::Config(v) => self.config_key(k, v),
             Mode::Inspect { id, text, scroll } => self.inspect_key(k, id, text, scroll),
             Mode::Normal => self.normal_key(k),
         }
@@ -341,6 +347,7 @@ impl App {
             },
             "chat" => self.open_chat(rest == "new"),
             "health" => self.open_health(),
+            "config" => self.open_config(),
             "browse" => self.browse(rest),
             _ => self.status = format!("unknown command: {cmd}"),
         }
@@ -432,6 +439,70 @@ impl App {
         self.mode = Mode::Help {
             scroll: scroll.min(max),
         };
+    }
+
+    fn config_key(&mut self, k: KeyEvent, mut v: Box<ConfigView>) {
+        let pending = self.pending.take();
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        v.flash = None;
+        if v.typing {
+            match k.code {
+                KeyCode::Esc => {
+                    v.typing = false;
+                    v.set_filter(String::new());
+                }
+                KeyCode::Enter => v.typing = false,
+                KeyCode::Backspace => {
+                    let mut q = v.filter.clone();
+                    if q.pop().is_some() {
+                        v.set_filter(q);
+                    } else {
+                        v.typing = false;
+                    }
+                }
+                KeyCode::Char('u') if ctrl => v.set_filter(String::new()),
+                KeyCode::Char(c) if !ctrl => {
+                    let q = format!("{}{c}", v.filter);
+                    v.set_filter(q);
+                }
+                _ => {}
+            }
+            self.mode = Mode::Config(v);
+            return;
+        }
+        let half = (self.term.1 / 2).max(1) as isize;
+        match k.code {
+            KeyCode::Char('q') => return,
+            KeyCode::Esc if !v.filter.is_empty() => v.set_filter(String::new()),
+            KeyCode::Esc => return,
+            KeyCode::Char('j') | KeyCode::Down => v.move_by(1),
+            KeyCode::Char('k') | KeyCode::Up => v.move_by(-1),
+            KeyCode::Char('d') if ctrl => v.move_by(half),
+            KeyCode::Char('u') if ctrl => v.move_by(-half),
+            KeyCode::Char('g') if pending == Some('g') => v.top(),
+            KeyCode::Char('G') => v.bottom(),
+            KeyCode::Char(']') if pending == Some(']') => v.next_section(true),
+            KeyCode::Char('[') if pending == Some('[') => v.next_section(false),
+            KeyCode::Char('a') if pending == Some('z') => v.toggle_fold(),
+            KeyCode::Char('M') if pending == Some('z') => v.fold_all(true),
+            KeyCode::Char('R') if pending == Some('z') => v.fold_all(false),
+            KeyCode::Char(c @ ('g' | ']' | '[' | 'z')) => self.pending = Some(c),
+            KeyCode::Enter => {
+                if !v.toggle() {
+                    v.flash = Some("nothing to expand on this row".into());
+                }
+            }
+            KeyCode::Char('d') => v.toggle_defaults(),
+            KeyCode::Char('/') => v.typing = true,
+            KeyCode::Char('y') => {
+                if let Some(s) = v.yank() {
+                    self.status = s.clone();
+                    v.flash = Some(s);
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Config(v);
     }
 
     fn inspect_key(&mut self, k: KeyEvent, id: String, text: String, mut scroll: u16) {

@@ -1,4 +1,5 @@
 pub mod board;
+pub mod config;
 pub mod keys;
 pub mod progress;
 pub mod review;
@@ -56,6 +57,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Health) {
         health(f, app);
     }
+    if let Mode::Config(v) = &app.mode {
+        let outer = screen(f);
+        config::render(f, outer, v);
+    }
     if let Mode::NewBead(form) = &app.mode {
         new_bead(f, form);
     }
@@ -100,6 +105,36 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
         Mode::Health => [
             vec![tag("HEALTH", theme::TEAL)],
             hints(&[("r", "recheck"), ("any", "close")]),
+        ]
+        .concat(),
+        Mode::Config(v) if v.typing => [
+            vec![tag("CONFIG", theme::BLUE)],
+            hints(&[
+                ("Enter", "keep filter"),
+                ("Ctrl-u", "clear"),
+                ("Esc", "drop filter"),
+            ]),
+        ]
+        .concat(),
+        Mode::Config(v) if v.flash.is_some() => vec![
+            tag("CONFIG", theme::BLUE),
+            Span::styled(
+                format!(" {}", v.flash.as_deref().unwrap_or_default()),
+                Style::new().fg(theme::TEXT),
+            ),
+        ],
+        Mode::Config(_) => [
+            vec![tag("CONFIG", theme::BLUE)],
+            hints(&[
+                ("j k", "move"),
+                ("Enter", "fold/expand"),
+                ("zM zR", "fold all/none"),
+                ("]] [[", "table"),
+                ("d", "defaults"),
+                ("/", "filter"),
+                ("y", "yank"),
+                ("q", "close"),
+            ]),
         ]
         .concat(),
         Mode::Help { .. } => [
@@ -322,7 +357,11 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :browse [bead|slot])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :browse [bead|slot])",
+    ),
+    (
+        ":config",
+        "effective config, grouped by table, with the layer that set each key",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
@@ -386,6 +425,15 @@ const HELP: &[(&str, &str)] = &[
     ("e", "open $EDITOR in bead worktree"),
     ("E", "open a shell in the bead's container, or its worktree"),
     ("q / Esc", "back to review if opened from it, else board"),
+    ("Config", ""),
+    ("j k / Ctrl-d Ctrl-u / gg G", "move (mouse wheel too)"),
+    ("]] / [[", "next / prev table"),
+    ("Enter / za", "fold the table, or expand a multi-line value"),
+    ("zM / zR", "fold / unfold every table"),
+    ("d", "hide / show keys that have their default value"),
+    ("/", "filter by key path, Enter keeps it, Esc clears it"),
+    ("y", "show the dotted key and value in the status line"),
+    ("q / Esc", "close (Esc clears the filter first)"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
     ("<n>j / <n>k", "move n lines"),

@@ -535,3 +535,30 @@ everything is there.
   beads, including revised PR beads, or beads with checks or a publish in flight), it names the
   first three of them, for example
   `all 3 slots in use (1 working, parked: a-1, a-2; :max <n> to raise)`. `r` rechecks.
+
+## Config viewer
+
+`:config` opens the config the running sulla uses, the same values and sources as `sulla config`,
+in a scrollable popup.
+
+- The header shows the global and repo file paths, `●` when the file exists and `○` when it is
+  missing, then a pill per CLI flag in effect. It adds `hiding defaults` and the active filter
+  when those are on.
+- Keys are grouped by table, top-level keys under `General`, each table with its own accent.
+  Values are coloured by type: strings green, numbers peach, booleans mauve with `✓` or `✗`,
+  arrays sky as `[a, b]`, and unset optional keys as a muted `none`. Values too long for the
+  row end in `…`, rows never wrap.
+- Every row ends with a pill naming the layer that set it: `default`, `global`, `repo`, `flag`,
+  or `runtime` for a value changed in this session that no file or flag set, like `:max 5`. The
+  files are the ones read at startup; edits to them apply after restarting sulla.
+- Multi-line strings (`system_prompt`, `[incus] init`, `[hooks] setup`) show their first line and
+  `… (+N lines)`. `Enter` on the row expands the full text below it.
+- `Enter` or `za` on a table header folds it to `▸ incus (14)`, `zM` folds every table and `zR`
+  opens them all. `]]` and `[[` jump to the next and previous table.
+- `d` hides keys that still have their default value. `/` filters by dotted key path (case
+  insensitive, matches highlighted); `Enter` keeps the filter, `Esc` drops it.
+- Keys in either file that sulla does not know are listed in a red `Unknown keys` table at the
+  bottom, with the file they are in.
+- `y` shows the row as `incus.memory = "8GiB"` in the status line, to copy from the terminal.
+- `j`/`k`, `Ctrl-d`/`Ctrl-u`, `gg`/`G` and the mouse wheel move. `q` closes, and so does `Esc`
+  once no filter is active.

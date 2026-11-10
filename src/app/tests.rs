@@ -90,7 +90,13 @@ impl Harness {
             ..Config::default()
         };
         let (tx, rx) = channel();
-        let mut app = App::new(cfg, dir.clone(), tx).unwrap();
+        let layers = crate::config::effective::Layers::load_from(
+            None,
+            &Config::repo_path(&dir),
+            toml::Table::new(),
+        )
+        .unwrap();
+        let mut app = App::new(cfg, layers, dir.clone(), tx).unwrap();
         let gate = Arc::new(Mutex::new(()));
         let prepared = Arc::new(Mutex::new(Vec::new()));
         let finished = Finished::default();
@@ -1350,6 +1356,68 @@ fn new_bead_form_steps_through_acceptance_before_priority() {
 }
 
 #[test]
+fn config_command_opens_the_viewer_with_runtime_changes() {
+    use crate::config::effective::Source;
+    use crate::ui::config::Row;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = Harness::new("config-view", &[]);
+    let key = |h: &mut Harness, c: char| {
+        h.app
+            .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    };
+    let source = |h: &Harness, path: &str| {
+        let Mode::Config(v) = &h.app.mode else {
+            panic!("config viewer not open");
+        };
+        v.sections
+            .iter()
+            .flat_map(|s| &s.items)
+            .find(|i| i.path.join(".") == path)
+            .map(|i| (i.source, i.value.clone()))
+            .unwrap()
+    };
+    h.app.command("max 5");
+    h.app.command("config");
+    assert_eq!(
+        source(&h, "max_agents"),
+        (Source::Runtime, Some(toml::Value::Integer(5)))
+    );
+    assert_eq!(
+        source(&h, "poll_secs"),
+        (Source::Runtime, Some(toml::Value::Integer(3600)))
+    );
+    assert_eq!(source(&h, "branch_prefix").0, Source::Default);
+    key(&mut h, '/');
+    for c in "max_ag".chars() {
+        key(&mut h, c);
+    }
+    h.app
+        .on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    key(&mut h, 'y');
+    assert_eq!(h.app.status, "max_agents = 5");
+    let Mode::Config(v) = &h.app.mode else {
+        panic!("closed");
+    };
+    assert!(!v.typing);
+    assert_eq!(v.filter, "max_ag");
+    assert!(matches!(v.current(), Some(Row::Item(..))));
+    h.app
+        .on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let Mode::Config(v) = &h.app.mode else {
+        panic!("Esc closed before clearing the filter");
+    };
+    assert!(v.filter.is_empty());
+    key(&mut h, 'z');
+    key(&mut h, 'M');
+    let Mode::Config(v) = &h.app.mode else {
+        panic!("closed");
+    };
+    assert!(v.rows().iter().all(|r| matches!(r, Row::Header(_))));
+    key(&mut h, 'q');
+    assert!(matches!(h.app.mode, Mode::Normal));
+}
+
+#[test]
 fn every_view_renders_at_any_terminal_size() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1377,6 +1445,9 @@ fn every_view_renders_at_any_terminal_size() {
             Mode::Insert,
             Mode::Help { scroll: 3 },
             Mode::Health,
+            Mode::Config(Box::new(
+                crate::ui::config::ConfigView::new(&h.app.layers, &h.app.cfg).unwrap(),
+            )),
             Mode::NewBead(NewBeadForm::new(vec!["rust".into()])),
             Mode::Inspect {
                 id: "r-1".into(),

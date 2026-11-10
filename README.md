@@ -42,7 +42,8 @@ Press `?` in the app for the full list.
 | Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log, `h` the timeline), `H` bead timeline (time per state, review rounds, ai verdicts), `e` open `$EDITOR` in worktree, `E` shell in the container or worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `dd` delete bead, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `U` revise from PR feedback (also in the review), `w` release the worktree of a Review or Awaiting PR bead so you can work on its branch (`sulla:released`, also in the review), `w` again reclaims it once the branch is not checked out elsewhere, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree, `E` shell |
 | Review | `jk` `Ctrl-d/u` scroll (counts like `5j` work), `]f` `[f` files, `c` comment (`10c` covers ten lines from the cursor), `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR, with its unpublished stack parents in Review (`workflow = "pr"`), `w` release the worktree to work on the branch yourself (`w` again reclaims it), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree, `E` shell (diff reloads on return from either) |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:browse [bead\|slot]` |
+| Config (`:config`) | `jk` `Ctrl-d/u` `gg` `G` or mouse wheel move, `Enter`/`za` fold a table or expand a multi-line value, `zM`/`zR` fold/unfold all, `]]` `[[` next/prev table, `d` hide defaults, `/` filter by key path, `y` show `key = value` in the status line, `q`/`Esc` close |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:browse [bead\|slot]` |
 
 ## Config
 
@@ -59,6 +60,10 @@ set it: `default`, `global`, `repo` or `flag`. Keys that sulla does not know (a 
 parse prints its path with the line and column and exits non-zero. `--no-defaults` hides keys that
 still have their default value, `--raw` prints plain TOML without tags or colour, for piping or
 saving as a config file. Colour is used on a terminal unless `NO_COLOR` is set.
+
+`:config` shows the same inside the TUI as a scrollable popup, with foldable tables, a filter, and
+a `runtime` source for values changed in the session (like `:max 5`). See
+[DOCS.md](DOCS.md#config-viewer).
 
 ```toml
 max_agents = 3

@@ -132,6 +132,14 @@ impl Layers {
         Ok(toml::Value::Table(self.merged()).try_into()?)
     }
 
+    pub fn with_runtime(&self, cfg: &Config) -> Result<Self> {
+        let base = toml::Table::try_from(self.config()?)?;
+        let running = toml::Table::try_from(cfg)?;
+        let mut layers = self.clone();
+        merge(&mut layers.runtime, changed(&running, &base));
+        Ok(layers)
+    }
+
     pub fn source(&self, path: &[String]) -> Source {
         self.tables()
             .rev()
@@ -182,6 +190,25 @@ fn lookup<'a>(table: &'a toml::Table, path: &[String]) -> Option<&'a toml::Value
         t = t.get(p)?.as_table()?;
     }
     t.get(last)
+}
+
+fn changed(running: &toml::Table, base: &toml::Table) -> toml::Table {
+    let mut out = toml::Table::new();
+    for (k, v) in running {
+        match (base.get(k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(r)) if !r.is_empty() => {
+                let inner = changed(r, b);
+                if !inner.is_empty() {
+                    out.insert(k.clone(), toml::Value::Table(inner));
+                }
+            }
+            (Some(b), v) if b == v => {}
+            _ => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    out
 }
 
 fn unknown_keys(
@@ -354,6 +381,32 @@ mod tests {
         let e = layers.effective().unwrap();
         assert_eq!(layers.config().unwrap().max_agents, 8);
         assert_eq!(source(&e, "max_agents"), Source::Runtime);
+    }
+
+    #[test]
+    fn with_runtime_tags_only_changed_values() {
+        let d = Dir::new("with-runtime");
+        let layers = d.layers(
+            Some("max_agents = 7\n[incus]\nmemory = \"4GiB\""),
+            None,
+            "base_branch = \"main\"",
+        );
+        let mut cfg = layers.config().unwrap();
+        cfg.max_agents = 2;
+        cfg.incus.cpus = Some(4);
+        let runtime = layers.with_runtime(&cfg).unwrap();
+        let e = runtime.effective().unwrap();
+        assert_eq!(source(&e, "max_agents"), Source::Runtime);
+        assert_eq!(source(&e, "incus.cpus"), Source::Runtime);
+        assert_eq!(source(&e, "incus.memory"), Source::Global);
+        assert_eq!(source(&e, "incus.golden"), Source::Default);
+        assert_eq!(source(&e, "base_branch"), Source::Flag);
+        assert_eq!(
+            e.get(&["max_agents"]).unwrap().value,
+            toml::Value::Integer(2)
+        );
+        let same = layers.with_runtime(&layers.config().unwrap()).unwrap();
+        assert!(same.runtime.is_empty());
     }
 
     #[test]

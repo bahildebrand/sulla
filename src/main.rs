@@ -122,9 +122,8 @@ fn main() -> Result<()> {
     if let Some(Cmd::Config { no_defaults, raw }) = args.cmd {
         return config::show::run(&repo, args.flags(), raw, no_defaults);
     }
-    let cfg = config::effective::Layers::load(&repo, args.flags())
-        .and_then(|l| l.config())
-        .wrap_err("loading config")?;
+    let layers = config::effective::Layers::load(&repo, args.flags()).wrap_err("loading config")?;
+    let cfg = layers.config().wrap_err("loading config")?;
     match &args.cmd {
         Some(Cmd::Setup { bead }) => return setup::cli(&repo, &cfg, bead),
         Some(Cmd::Browse { target }) => return browse::run(&cfg, &repo, target),
@@ -137,7 +136,7 @@ fn main() -> Result<()> {
     let _guard = init_logging()?;
 
     let (tx, rx) = channel();
-    let mut app = App::new(cfg, repo, tx.clone())?;
+    let mut app = App::new(cfg, layers, repo, tx.clone())?;
 
     let gate = Arc::new(Gate::default());
     let input_tx = tx.clone();

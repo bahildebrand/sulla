@@ -307,11 +307,11 @@ fn value_rows(
     }
 }
 
-fn dotted(path: &[String]) -> String {
+pub fn dotted(path: &[String]) -> String {
     path.iter().map(|k| key(k)).collect::<Vec<_>>().join(".")
 }
 
-fn key(k: &str) -> String {
+pub fn key(k: &str) -> String {
     let bare = !k.is_empty()
         && k.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
@@ -331,7 +331,7 @@ fn key(k: &str) -> String {
     out
 }
 
-fn display_path(p: &Path) -> String {
+pub fn display_path(p: &Path) -> String {
     directories::BaseDirs::new()
         .and_then(|b| {
             p.strip_prefix(b.home_dir())

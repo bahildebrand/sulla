@@ -11,10 +11,18 @@ use crate::graphite;
 use crate::health::{self, Probe};
 use crate::pr;
 use crate::timeline;
+use crate::ui::config::ConfigView;
 
 use super::{App, Event, Mode, View};
 
 impl App {
+    pub(super) fn open_config(&mut self) {
+        match ConfigView::new(&self.layers, &self.cfg) {
+            Ok(v) => self.mode = Mode::Config(Box::new(v)),
+            Err(e) => self.status = format!("config: {e:#}"),
+        }
+    }
+
     pub(super) fn open_health(&mut self) {
         let used: HashSet<AgentKind> = std::iter::once(self.cfg.agent)
             .chain(
