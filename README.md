@@ -11,6 +11,7 @@ cargo run
 cargo run -- -C /path/to/repo        # -C points sulla at another repo, like git -C
 cargo run -- --max-agents 5 --base main
 cargo run -- setup <bead>            # rerun [hooks] setup in a bead's worktree
+cargo run -- config                  # show the effective config and where each key comes from
 ```
 
 The repo must be a git repo. If it has no beads database yet, `sulla init` creates one, a Dolt
@@ -50,6 +51,14 @@ Press `?` in the app for the full list.
 The two files are merged key by key: nested tables like `[claude]` merge
 recursively, arrays and scalars in the repo file replace the global ones.
 CLI flags (`--max-agents`, `--base`) win over both.
+
+`sulla config` prints the config sulla runs with, as TOML grouped by table, after a header with
+both file paths (`exists` or `missing`) and any flags in effect. Each key ends with the layer that
+set it: `default`, `global`, `repo` or `flag`. Keys that sulla does not know (a typo like
+`max_agent = 4`, or a removed key) are listed at the end with their file, and a file that fails to
+parse prints its path with the line and column and exits non-zero. `--no-defaults` hides keys that
+still have their default value, `--raw` prints plain TOML without tags or colour, for piping or
+saving as a config file. Colour is used on a terminal unless `NO_COLOR` is set.
 
 ```toml
 max_agents = 3

@@ -1,3 +1,6 @@
+pub mod effective;
+pub mod show;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -322,18 +325,12 @@ impl Config {
     }
 
     pub fn load(repo: &Path) -> Result<Self> {
-        Self::load_from(Self::path().as_deref(), &Self::repo_path(repo))
+        effective::Layers::load(repo, toml::Table::new())?.config()
     }
 
+    #[cfg(test)]
     fn load_from(global: Option<&Path>, repo: &Path) -> Result<Self> {
-        let mut merged = toml::Table::new();
-        for path in global.into_iter().chain(std::iter::once(repo)) {
-            if path.exists() {
-                let table: toml::Table = toml::from_str(&std::fs::read_to_string(path)?)?;
-                merge(&mut merged, table);
-            }
-        }
-        Ok(toml::Value::Table(merged).try_into()?)
+        effective::Layers::load_from(global, repo, toml::Table::new())?.config()
     }
 }
 

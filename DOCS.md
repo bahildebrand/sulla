@@ -120,6 +120,7 @@ closing it without merging, unstacks its children so they keep its commits in th
   an agent with: bead tasks, AI reviews, rebuilt PR sessions and `c` conversations. Set it in
   `.sulla/config.toml` for repo-specific rules, or globally for rules that apply everywhere.
   Edits apply after restarting sulla, and agents keep the prompt they were started with.
+  `sulla config` shows the merged prompt and which file it came from.
 - `c` opens a conversation agent in the main checkout, not tied to a bead and not counted toward
   `max_agents`. It is primed to plan work and create beads (staged in Backlog, wired with
   `bd dep add`, released on your go). `X` ends it, `C` starts fresh.

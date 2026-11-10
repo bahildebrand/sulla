@@ -40,7 +40,6 @@ use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::DefaultTerminal;
 
 use app::{App, Event, Suspend};
-use config::Config;
 
 #[derive(Parser)]
 #[command(
@@ -51,9 +50,9 @@ struct Args {
     /// Path to the repo, defaults to the current directory
     #[arg(short = 'C', long, default_value = ".", global = true)]
     repo: PathBuf,
-    #[arg(long)]
+    #[arg(long, global = true)]
     max_agents: Option<usize>,
-    #[arg(long)]
+    #[arg(long, global = true)]
     base: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -72,6 +71,27 @@ enum Cmd {
     },
     #[command(about = "List each slot with its container, host address and beads")]
     Status,
+    #[command(about = "Show the effective config and where each key comes from")]
+    Config {
+        #[arg(long, help = "Hide keys that still have their default value")]
+        no_defaults: bool,
+        #[arg(long, help = "Print plain TOML without source tags or colour")]
+        raw: bool,
+    },
+}
+
+impl Args {
+    fn flags(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        if let Some(n) = self.max_agents {
+            let n = i64::try_from(n).unwrap_or(i64::MAX);
+            t.insert("max_agents".into(), toml::Value::Integer(n));
+        }
+        if let Some(b) = &self.base {
+            t.insert("base_branch".into(), toml::Value::String(b.clone()));
+        }
+        t
+    }
 }
 
 fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
@@ -99,20 +119,17 @@ fn main() -> Result<()> {
         return init::run(&args.repo);
     }
     let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
-    let mut cfg = Config::load(&repo).wrap_err("loading config")?;
-    if let Some(Cmd::Setup { bead }) = &args.cmd {
-        return setup::cli(&repo, &cfg, bead);
+    if let Some(Cmd::Config { no_defaults, raw }) = args.cmd {
+        return config::show::run(&repo, args.flags(), raw, no_defaults);
     }
-    if let Some(n) = args.max_agents {
-        cfg.max_agents = n;
-    }
+    let cfg = config::effective::Layers::load(&repo, args.flags())
+        .and_then(|l| l.config())
+        .wrap_err("loading config")?;
     match &args.cmd {
+        Some(Cmd::Setup { bead }) => return setup::cli(&repo, &cfg, bead),
         Some(Cmd::Browse { target }) => return browse::run(&cfg, &repo, target),
         Some(Cmd::Status) => return browse::status(&cfg, &repo),
         _ => {}
-    }
-    if args.base.is_some() {
-        cfg.base_branch = args.base;
     }
     beads::Beads::new(&repo)
         .list_all()
