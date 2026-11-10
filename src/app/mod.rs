@@ -6,6 +6,7 @@ mod launch;
 mod merge;
 mod monitor;
 mod publish;
+mod reload;
 mod reviews;
 mod schedule;
 mod views;
@@ -25,6 +26,7 @@ use crate::browse;
 use crate::budget;
 use crate::checks::{self, Check};
 use crate::config::effective::Layers;
+use crate::config::reload::{self as config_reload, Watch as ConfigWatch};
 use crate::config::{AgentKind, Config, Trigger, Workflow};
 use crate::conflicts::Conflict;
 use crate::filter::Filter;
@@ -34,7 +36,7 @@ use crate::notify::Notifier;
 use crate::pr::{self, PrStatus};
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
-use crate::scheduler::{self, Backoff, Snapshot};
+use crate::scheduler::{self, Backoff, Interval, Snapshot};
 use crate::ui::config::ConfigView;
 use crate::ui::review::{AiReview, Diff};
 use crate::usage::{self, Usage, Watch};
@@ -58,6 +60,23 @@ pub enum Event {
 
 pub type Callback = Box<dyn FnOnce(&mut App) + Send>;
 type BdJob = Box<dyn FnOnce(&Beads) -> Callback + Send>;
+
+fn backends(cfg: &Config) -> HashMap<AgentKind, Box<dyn Backend>> {
+    let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
+    backends.insert(
+        AgentKind::Copilot,
+        Box::new(Copilot {
+            cfg: cfg.copilot.clone(),
+        }),
+    );
+    backends.insert(
+        AgentKind::Claude,
+        Box::new(Claude {
+            cfg: cfg.claude.clone(),
+        }),
+    );
+    backends
+}
 
 fn spawn_bd_worker(beads: Beads, tx: Sender<Event>) -> Sender<BdJob> {
     let (jobs, rx) = channel::<BdJob>();
@@ -208,6 +227,10 @@ const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 pub struct App {
     pub cfg: Config,
     pub layers: Layers,
+    pub reload: config_reload::State,
+    config_watch: ConfigWatch,
+    poll_every: Interval,
+    pr_every: Interval,
     pub base: String,
     repo: PathBuf,
     chat_session: Option<String>,
@@ -292,37 +315,23 @@ impl App {
         let beads = Beads::new(&repo);
         beads.connect();
         let started = Instant::now();
+        let poll_every = Interval::new(cfg.poll_secs);
+        let pr_every = Interval::new(cfg.pr.poll_secs);
         let refresh = scheduler::spawn_poller(
             beads.clone(),
             git.clone(),
             base.clone(),
-            Duration::from_secs(cfg.poll_secs.max(1)),
+            poll_every.clone(),
             tx.clone(),
         );
         let pr_refresh = (cfg.workflow == Workflow::Pr).then(|| {
-            scheduler::spawn_pr_watcher(
-                beads.clone(),
-                git.clone(),
-                Duration::from_secs(cfg.pr.poll_secs.max(1)),
-                tx.clone(),
-            )
+            scheduler::spawn_pr_watcher(beads.clone(), git.clone(), pr_every.clone(), tx.clone())
         });
         let pr_watch = pr::Watch::load(repo.join(".sulla").join("pr-watch.json"));
         let bd_jobs = spawn_bd_worker(beads.clone(), tx.clone());
-        let usage_watch = usage::spawn(Duration::from_secs(cfg.poll_secs.max(1)), tx.clone());
-        let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
-        backends.insert(
-            AgentKind::Copilot,
-            Box::new(Copilot {
-                cfg: cfg.copilot.clone(),
-            }),
-        );
-        backends.insert(
-            AgentKind::Claude,
-            Box::new(Claude {
-                cfg: cfg.claude.clone(),
-            }),
-        );
+        let usage_watch = usage::spawn(poll_every.clone(), tx.clone());
+        let backends = backends(&cfg);
+        let config_watch = ConfigWatch::new(layers.paths());
         Ok(Self {
             notifier: Notifier::new(cfg.notify.clone()),
             pr_watch,
@@ -335,6 +344,10 @@ impl App {
             states: None,
             cfg,
             layers,
+            reload: config_reload::State::default(),
+            config_watch,
+            poll_every,
+            pr_every,
             base,
             repo,
             chat_session: None,
@@ -599,6 +612,7 @@ impl App {
 
     pub fn handle(&mut self, ev: Event) {
         self.dispatch(ev);
+        self.watch_config();
         self.check_stalls();
         self.check_budgets();
         self.publish_slots();

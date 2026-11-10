@@ -13,7 +13,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, InputKind, Mode, NewBeadForm, View};
 use crate::beads::State;
-use crate::config::AgentKind;
+use crate::config::{AgentKind, reload};
 use crate::health::Status;
 use review::{DLine, Diff};
 
@@ -92,6 +92,23 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+fn status_spans(status: &str) -> Vec<Span<'static>> {
+    let text = Style::new().fg(theme::TEXT);
+    if status.starts_with(reload::FAILED) {
+        return vec![Span::styled(format!(" {status}"), text.fg(theme::RED))];
+    }
+    match status.split_once(reload::RESTART_SEP) {
+        Some((head, keys)) => vec![
+            Span::styled(format!(" {head}"), text),
+            Span::styled(
+                format!("{}{keys}", reload::RESTART_SEP),
+                text.fg(theme::PEACH),
+            ),
+        ],
+        None => vec![Span::styled(format!(" {status}"), text)],
+    }
+}
+
 fn status_line(f: &mut Frame, area: Rect, app: &App) {
     let bar = Style::new().fg(theme::SUBTEXT).bg(theme::PANEL);
     f.buffer_mut().set_style(area, bar);
@@ -116,13 +133,11 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             ]),
         ]
         .concat(),
-        Mode::Config(v) if v.flash.is_some() => vec![
-            tag("CONFIG", theme::BLUE),
-            Span::styled(
-                format!(" {}", v.flash.as_deref().unwrap_or_default()),
-                Style::new().fg(theme::TEXT),
-            ),
-        ],
+        Mode::Config(v) if v.flash.is_some() => [
+            vec![tag("CONFIG", theme::BLUE)],
+            status_spans(v.flash.as_deref().unwrap_or_default()),
+        ]
+        .concat(),
         Mode::Config(_) => [
             vec![tag("CONFIG", theme::BLUE)],
             hints(&[
@@ -133,6 +148,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 ("d", "defaults"),
                 ("/", "filter"),
                 ("y", "yank"),
+                ("r", "reload"),
                 ("q", "close"),
             ]),
         ]
@@ -150,10 +166,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                     Style::new().fg(theme::YELLOW).bold(),
                 ));
             }
-            spans.push(Span::styled(
-                format!(" {}", app.status),
-                Style::new().fg(theme::TEXT),
-            ));
+            spans.extend(status_spans(&app.status));
             spans
         }
         Mode::Insert => [
@@ -357,11 +370,15 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :browse [bead|slot])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :reload :browse [bead|slot])",
     ),
     (
         ":config",
         "effective config, grouped by table, with the layer that set each key",
+    ),
+    (
+        ":reload",
+        "reread both config files now (also automatic when either changes on disk)",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),

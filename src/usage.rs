@@ -3,13 +3,14 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::AddAssign;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::app::Event;
 use crate::config::AgentKind;
+use crate::scheduler::Interval;
 use crate::sessions::Roots;
 
 const RESOLVE_EVERY: Duration = Duration::from_secs(15);
@@ -285,7 +286,7 @@ impl Tracker {
     }
 }
 
-pub fn spawn(every: Duration, tx: Sender<Event>) -> Sender<Watch> {
+pub fn spawn(every: Interval, tx: Sender<Event>) -> Sender<Watch> {
     let (watch_tx, watch_rx): (Sender<Watch>, Receiver<Watch>) = channel();
     std::thread::spawn(move || {
         let mut tracker = Tracker {
@@ -296,15 +297,15 @@ pub fn spawn(every: Duration, tx: Sender<Event>) -> Sender<Watch> {
         let mut watch = Watch::new();
         let mut last: Option<(HashMap<String, Usage>, Usage)> = None;
         loop {
-            match watch_rx.recv_timeout(every) {
-                Ok(w) => {
+            match every.wait(&watch_rx) {
+                Ok(Some(w)) => {
                     watch = w;
                     while let Ok(w) = watch_rx.try_recv() {
                         watch = w;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
+                Ok(None) => {}
+                Err(_) => return,
             }
             let r = tracker.scan(&watch);
             if last

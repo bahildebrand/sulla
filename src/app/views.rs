@@ -17,7 +17,7 @@ use super::{App, Event, Mode, View};
 
 impl App {
     pub(super) fn open_config(&mut self) {
-        match ConfigView::new(&self.layers, &self.cfg) {
+        match ConfigView::new(&self.layers, &self.cfg, &self.reload) {
             Ok(v) => self.mode = Mode::Config(Box::new(v)),
             Err(e) => self.status = format!("config: {e:#}"),
         }

@@ -14,15 +14,23 @@ pub struct Notifier {
 
 impl Notifier {
     pub fn new(cfg: NotifyConfig) -> Self {
-        let tmux = cfg.methods.contains(&NotifyMethod::Tmux) && std::env::var_os("TMUX").is_some();
         let n = Self {
+            tmux: uses_tmux(&cfg),
             cfg,
-            tmux,
             flagged: BTreeMap::new(),
             last: HashMap::new(),
         };
         n.sync_tmux();
         n
+    }
+
+    pub fn reconfigure(&mut self, cfg: NotifyConfig) {
+        let flagged = std::mem::take(&mut self.flagged);
+        self.sync_tmux();
+        self.tmux = uses_tmux(&cfg);
+        self.cfg = cfg;
+        self.flagged = flagged;
+        self.sync_tmux();
     }
 
     pub fn fire(&mut self, trigger: Trigger, id: &str, title: &str) -> bool {
@@ -101,6 +109,10 @@ impl Notifier {
     }
 }
 
+fn uses_tmux(cfg: &NotifyConfig) -> bool {
+    cfg.methods.contains(&NotifyMethod::Tmux) && std::env::var_os("TMUX").is_some()
+}
+
 fn message(trigger: Trigger, id: &str, title: &str) -> (String, String) {
     let what = match trigger {
         Trigger::Review => "ready for review",
@@ -169,5 +181,20 @@ mod tests {
         assert_eq!(n.flagged.keys().collect::<Vec<_>>(), ["c"]);
         n.clear("c");
         assert_eq!(n.tmux_value(), None);
+    }
+
+    #[test]
+    fn reconfigure_keeps_flags_and_applies_new_triggers() {
+        let mut n = notifier(vec![Trigger::Review]);
+        let t0 = Instant::now();
+        assert!(n.should_fire(Trigger::Review, "a", t0));
+        n.reconfigure(NotifyConfig {
+            methods: Vec::new(),
+            on: vec![Trigger::Waiting],
+            ..NotifyConfig::default()
+        });
+        assert_eq!(n.tmux_value().as_deref(), Some("sulla:1"));
+        assert!(!n.should_fire(Trigger::Review, "b", t0));
+        assert!(n.should_fire(Trigger::Waiting, "b", t0));
     }
 }

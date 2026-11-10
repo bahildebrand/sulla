@@ -348,6 +348,7 @@ impl App {
             "chat" => self.open_chat(rest == "new"),
             "health" => self.open_health(),
             "config" => self.open_config(),
+            "reload" => self.reload_config(),
             "browse" => self.browse(rest),
             _ => self.status = format!("unknown command: {cmd}"),
         }
@@ -493,6 +494,10 @@ impl App {
                 }
             }
             KeyCode::Char('d') => v.toggle_defaults(),
+            KeyCode::Char('r') => {
+                self.reload_config();
+                self.refresh_config_view(&mut v);
+            }
             KeyCode::Char('/') => v.typing = true,
             KeyCode::Char('y') => {
                 if let Some(s) = v.yank() {

@@ -100,6 +100,18 @@ impl Layers {
         })
     }
 
+    pub fn reload(&self) -> Result<Self> {
+        Self::load_from(
+            self.global.as_ref().map(|l| l.path.as_path()),
+            &self.repo.path,
+            self.flags.clone(),
+        )
+    }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.files().map(|(_, l)| l.path.clone()).collect()
+    }
+
     pub fn files(&self) -> impl Iterator<Item = (Source, &Layer)> {
         self.global
             .iter()
@@ -282,6 +294,26 @@ mod tests {
         e.get(&path)
             .unwrap_or_else(|| panic!("no entry {path:?}"))
             .source
+    }
+
+    #[test]
+    fn reload_rereads_both_files_and_keeps_flags() {
+        let d = Dir::new("reload");
+        let layers = d.layers(Some("max_agents = 7"), None, "base_branch = \"main\"");
+        d.file("repo.toml", Some("max_agents = 2\n[claude]\nmodel = \"m\""));
+        d.file("global.toml", Some("poll_secs = 9"));
+        let again = layers.reload().unwrap();
+        let cfg = again.config().unwrap();
+        assert_eq!(cfg.max_agents, 2);
+        assert_eq!(cfg.poll_secs, 9);
+        assert_eq!(cfg.claude.model.as_deref(), Some("m"));
+        assert_eq!(cfg.base_branch.as_deref(), Some("main"));
+        assert_eq!(
+            again.paths(),
+            vec![d.0.join("global.toml"), d.0.join("repo.toml")]
+        );
+        d.file("repo.toml", Some("max_agents = ["));
+        assert!(layers.reload().is_err());
     }
 
     #[test]

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -8,6 +10,48 @@ use crate::beads::{Bead, Beads, State};
 use crate::conflicts::{Conflict, Scanner};
 use crate::git::{DiffStat, Git};
 use crate::pr;
+
+#[derive(Debug, Clone)]
+pub struct Interval(Arc<AtomicU64>);
+
+impl Interval {
+    const RECHECK: Duration = Duration::from_millis(500);
+
+    pub fn new(secs: u64) -> Self {
+        Self(Arc::new(AtomicU64::new(secs.max(1))))
+    }
+
+    pub fn set(&self, secs: u64) {
+        self.0.store(secs.max(1), Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> Duration {
+        Duration::from_secs(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn wait<T>(&self, rx: &Receiver<T>) -> Result<Option<T>, RecvTimeoutError> {
+        self.wait_in_steps(rx, Self::RECHECK)
+    }
+
+    fn wait_in_steps<T>(
+        &self,
+        rx: &Receiver<T>,
+        step: Duration,
+    ) -> Result<Option<T>, RecvTimeoutError> {
+        let start = Instant::now();
+        loop {
+            let left = self.get().saturating_sub(start.elapsed());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            match rx.recv_timeout(left.min(step)) {
+                Ok(v) => return Ok(Some(v)),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
 
 pub struct Snapshot {
     pub taken: Instant,
@@ -177,7 +221,7 @@ pub fn spawn_poller(
     beads: Beads,
     git: Git,
     base: String,
-    every: Duration,
+    every: Interval,
     tx: Sender<Event>,
 ) -> Sender<()> {
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
@@ -234,13 +278,13 @@ pub fn spawn_poller(
                     return;
                 }
             }
-            forced = match refresh_rx.recv_timeout(every) {
-                Ok(()) => {
+            forced = match every.wait(&refresh_rx) {
+                Ok(Some(())) => {
                     while refresh_rx.try_recv().is_ok() {}
                     true
                 }
-                Err(RecvTimeoutError::Timeout) => false,
-                Err(RecvTimeoutError::Disconnected) => return,
+                Ok(None) => false,
+                Err(_) => return,
             };
         }
     });
@@ -267,7 +311,7 @@ pub fn revisable(all: &[Bead]) -> impl Iterator<Item = &Bead> {
         .filter(|b| b.status != "closed" && b.state() == Some(State::Revise))
 }
 
-pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Duration, tx: Sender<Event>) -> Sender<()> {
+pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Interval, tx: Sender<Event>) -> Sender<()> {
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
     let repo = git.repo.clone();
     std::thread::spawn(move || {
@@ -297,10 +341,10 @@ pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Duration, tx: Sender<Even
                 }
                 Err(e) => tracing::warn!("pr watcher: {e:#}"),
             }
-            match refresh_rx.recv_timeout(every) {
-                Ok(()) => while refresh_rx.try_recv().is_ok() {},
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
+            match every.wait(&refresh_rx) {
+                Ok(Some(())) => while refresh_rx.try_recv().is_ok() {},
+                Ok(None) => {}
+                Err(_) => return,
             }
         }
     });
@@ -547,6 +591,38 @@ fn capped(ids: &[String], cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interval_changes_apply_to_a_wait_in_progress() {
+        let every = Interval::new(3600);
+        let (tx, rx) = channel::<()>();
+        let (done_tx, done_rx) = channel();
+        let waiting = every.clone();
+        std::thread::spawn(move || {
+            let r = waiting.wait_in_steps(&rx, Duration::from_millis(10));
+            let _ = done_tx.send(r.map(|v| v.is_some()));
+            drop(tx);
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        every.set(0);
+        assert_eq!(every.get(), Duration::from_secs(1));
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn interval_wait_returns_messages_and_disconnects() {
+        let every = Interval::new(3600);
+        let (tx, rx) = channel();
+        tx.send(7).unwrap();
+        assert_eq!(every.wait(&rx), Ok(Some(7)));
+        drop(tx);
+        assert_eq!(every.wait(&rx), Err(RecvTimeoutError::Disconnected));
+        every.set(5);
+        assert_eq!(every.get(), Duration::from_secs(5));
+    }
 
     fn bead(id: &str, pri: u8, created: &str, labels: &[&str]) -> Bead {
         Bead {

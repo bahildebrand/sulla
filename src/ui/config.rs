@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
+use std::time::Instant;
 
 use color_eyre::Result;
 use ratatui::Frame;
@@ -11,6 +12,7 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 use super::theme;
 use crate::config::Config;
 use crate::config::effective::{Layers, Source};
+use crate::config::reload;
 use crate::config::show::{display_path, dotted, key, source_color, value_color};
 
 const ACCENTS: [Color; 8] = [
@@ -33,6 +35,7 @@ pub struct Item {
     pub value: Option<toml::Value>,
     pub source: Source,
     pub file: Option<String>,
+    pub restart: Option<Option<toml::Value>>,
 }
 
 impl Item {
@@ -75,7 +78,7 @@ pub struct ConfigView {
     files: Vec<File>,
     flags: Vec<(String, toml::Value)>,
     pub sections: Vec<Section>,
-    folded: HashSet<usize>,
+    folded: HashSet<String>,
     expanded: HashSet<String>,
     pub hide_defaults: bool,
     pub filter: String,
@@ -83,11 +86,12 @@ pub struct ConfigView {
     cursor: usize,
     pub flash: Option<String>,
     offset: Cell<usize>,
+    reload: reload::State,
 }
 
 impl ConfigView {
-    pub fn new(layers: &Layers, cfg: &Config) -> Result<Self> {
-        let layers = layers.with_runtime(cfg)?;
+    pub fn new(base: &Layers, cfg: &Config, state: &reload::State) -> Result<Self> {
+        let layers = base.with_runtime(cfg)?;
         let eff = layers.effective()?;
         let mut tables: BTreeMap<Vec<String>, Vec<Item>> = BTreeMap::new();
         let mut add = |path: Vec<String>, value: Option<toml::Value>, source: Source| {
@@ -100,12 +104,14 @@ impl ConfigView {
                 value,
                 source,
                 file: None,
+                restart: None,
             });
         };
         let mut unset = Vec::new();
         nulls(&serde_json::to_value(cfg)?, &mut Vec::new(), &mut unset);
         let parents: HashSet<&[String]> = unset
             .iter()
+            .chain(state.restart.keys())
             .flat_map(|p| (1..p.len()).map(move |n| &p[..n]))
             .collect();
         for e in eff.entries {
@@ -120,6 +126,26 @@ impl ConfigView {
                 _ => Source::Runtime,
             };
             add(path, None, source);
+        }
+        let mut pending = state.restart.clone();
+        for item in tables.values_mut().flatten() {
+            if let Some(new) = pending.remove(&item.path) {
+                item.source = base.source(&item.path);
+                item.restart = Some(new);
+            }
+        }
+        for (path, new) in pending {
+            let Some((leaf, table)) = path.split_last() else {
+                continue;
+            };
+            tables.entry(table.to_vec()).or_default().push(Item {
+                key: key(leaf),
+                source: base.source(&path),
+                path,
+                value: None,
+                file: None,
+                restart: Some(new),
+            });
         }
         let mut sections = Vec::new();
         let mut tops: Vec<String> = Vec::new();
@@ -155,6 +181,7 @@ impl ConfigView {
                         value: Some(u.value),
                         source: u.source,
                         file: Some(display_path(&u.file)),
+                        restart: None,
                     })
                     .collect(),
                 unknown: true,
@@ -189,7 +216,23 @@ impl ConfigView {
             cursor: 0,
             flash: None,
             offset: Cell::new(0),
+            reload: state.clone(),
         })
+    }
+
+    pub fn keep_ui(&mut self, old: &ConfigView) {
+        self.folded = old.folded.clone();
+        self.expanded = old.expanded.clone();
+        self.hide_defaults = old.hide_defaults;
+        self.filter = old.filter.clone();
+        self.typing = old.typing;
+        self.cursor = old.cursor;
+        self.offset.set(old.offset.get());
+        self.retarget(None);
+    }
+
+    pub fn flashing(&self, item: &Item) -> bool {
+        self.reload.flashing(&item.path, Instant::now())
     }
 
     fn visible(&self, item: &Item) -> bool {
@@ -213,7 +256,7 @@ impl ConfigView {
     }
 
     fn is_open(&self, si: usize) -> bool {
-        !self.filter.is_empty() || !self.folded.contains(&si)
+        !self.filter.is_empty() || !self.folded.contains(&self.sections[si].name)
     }
 
     pub fn rows(&self) -> Vec<Row> {
@@ -329,9 +372,10 @@ impl ConfigView {
     }
 
     fn toggle_section(&mut self, s: usize) {
+        let name = self.sections[s].name.clone();
         self.change(|v| {
-            if !v.folded.remove(&s) {
-                v.folded.insert(s);
+            if !v.folded.remove(&name) {
+                v.folded.insert(name);
             }
         });
         if let Some(i) = self.rows().iter().position(|r| *r == Row::Header(s)) {
@@ -348,7 +392,7 @@ impl ConfigView {
     pub fn fold_all(&mut self, fold: bool) {
         self.change(|v| {
             v.folded = if fold {
-                (0..v.sections.len()).collect()
+                v.sections.iter().map(|s| s.name.clone()).collect()
             } else {
                 HashSet::new()
             };
@@ -583,6 +627,8 @@ impl ConfigView {
     fn item_line(&self, item: &Item, key_w: usize, width: usize, cursor: bool) -> Line<'static> {
         let style = if item.file.is_some() {
             Style::new().fg(theme::RED)
+        } else if self.flashing(item) {
+            Style::new().fg(theme::YELLOW).bold()
         } else if cursor {
             Style::new().fg(theme::TEXT).bold()
         } else {
@@ -594,13 +640,36 @@ impl ConfigView {
         spans.push(Span::raw(
             " ".repeat(key_w.saturating_sub(text_width(&k)) + 2),
         ));
-        let budget = width.saturating_sub(2 + key_w + 2 + PILL_W + 1);
-        spans.extend(value_spans(item, budget));
-        let pill = theme::pill(item.source.name(), source_color(item.source));
+        let restart = item
+            .restart
+            .is_some()
+            .then(|| theme::pill("restart", theme::PEACH));
+        let pills_w = PILL_W + restart.as_ref().map_or(0, |p| p.width() + 1);
+        let budget = width.saturating_sub(2 + key_w + 2 + pills_w + 1);
+        let values = value_spans(item, budget);
+        let shown: usize = values.iter().map(Span::width).sum();
+        spans.extend(values);
+        if let Some(new) = &item.restart {
+            let text = match new {
+                Some(v) => format!(" → {}", inline(v)),
+                None => " → none".to_string(),
+            };
+            spans.push(Span::styled(
+                clip(&text, budget.saturating_sub(shown)),
+                Style::new().fg(theme::MUTED),
+            ));
+        }
+        let mut pills = Vec::new();
+        if let Some(r) = restart {
+            pills.push(r);
+            pills.push(Span::raw(" "));
+        }
+        pills.push(theme::pill(item.source.name(), source_color(item.source)));
+        let pills_w: usize = pills.iter().map(Span::width).sum();
         let used: usize = spans.iter().map(Span::width).sum();
-        if used + pill.width() <= width {
-            spans.push(Span::raw(" ".repeat(width - used - pill.width())));
-            spans.push(pill);
+        if used + pills_w <= width {
+            spans.push(Span::raw(" ".repeat(width - used - pills_w)));
+            spans.extend(pills);
         }
         Line::from(spans)
     }
@@ -723,7 +792,23 @@ impl ConfigView {
                 ),
             ]);
         }
-        let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+        let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+        if let Some(e) = &self.reload.error {
+            for (i, l) in theme::wrap(
+                &format!("reload failed: {e}"),
+                width.saturating_sub(2).max(1),
+            )
+            .into_iter()
+            .enumerate()
+            {
+                let glyph = if i == 0 { "✗ " } else { "  " };
+                lines.push(vec![Span::styled(
+                    format!("{glyph}{l}"),
+                    Style::new().fg(theme::RED).bold(),
+                )]);
+            }
+        }
+        lines.push(Vec::new());
         for chip in chips {
             let w: usize = chip.iter().map(Span::width).sum();
             let line = lines.last_mut().expect("one line");
@@ -887,7 +972,10 @@ mounts = ["~/.claude", "~/.a-really-long-mount-path-that-will-not-fit-in-eighty-
         let layers = d.layers(GLOBAL, None, "base_branch = \"main\"");
         let mut cfg = layers.config().unwrap();
         edit(&mut cfg);
-        (ConfigView::new(&layers, &cfg).unwrap(), d)
+        (
+            ConfigView::new(&layers, &cfg, &reload::State::default()).unwrap(),
+            d,
+        )
     }
 
     fn draw(v: &ConfigView, w: u16, h: u16) -> Buffer {
@@ -964,6 +1052,102 @@ mounts = ["~/.claude", "~/.a-really-long-mount-path-that-will-not-fit-in-eighty-
         }
         let end = |l: &str, tag: &str| l[..l.rfind(tag).unwrap() + tag.len()].chars().count();
         assert_eq!(end(poll, "default"), end(max, "global"));
+    }
+
+    #[test]
+    fn reload_state_marks_restart_keys_flashes_changes_and_shows_errors() {
+        let d = Dir::new("reload");
+        let layers = d.layers("max_agents = 5\n[incus]\nmemory = \"4GiB\"", None, "");
+        let mut cfg = layers.config().unwrap();
+        cfg.incus.memory = "8GiB".into();
+        let path = |s: &str| s.split('.').map(String::from).collect::<Vec<_>>();
+        let state = reload::State {
+            error: Some("repo.toml line 2, column 14: invalid type".into()),
+            restart: [
+                (
+                    path("incus.memory"),
+                    Some(toml::Value::String("4GiB".into())),
+                ),
+                (path("incus.env.A"), Some(toml::Value::String("1".into()))),
+            ]
+            .into_iter()
+            .collect(),
+            changed: [path("max_agents")].into_iter().collect(),
+            at: Some(Instant::now()),
+        };
+        let mut v = ConfigView::new(&layers, &cfg, &state).unwrap();
+        let memory = v.item(find(&v, "incus.memory")).unwrap().clone();
+        assert_eq!(memory.source, Source::Global);
+        assert_eq!(memory.value, Some(toml::Value::String("8GiB".into())));
+        assert_eq!(
+            memory.restart,
+            Some(Some(toml::Value::String("4GiB".into())))
+        );
+        let env = v.item(find(&v, "incus.env.A")).unwrap().clone();
+        assert_eq!(env.value, None);
+        assert!(
+            !v.sections
+                .iter()
+                .flat_map(|s| &s.items)
+                .any(|i| i.dotted() == "incus.env")
+        );
+        assert!(env.restart.is_some());
+        let max = v.item(find(&v, "max_agents")).unwrap().clone();
+        assert!(v.flashing(&max));
+        assert!(!v.flashing(&memory));
+
+        let b = draw(&v, 100, 40);
+        let screen = text(&b);
+        assert!(
+            line(&screen, "✗ reload failed: repo.toml line 2, column 14").contains("invalid type")
+        );
+        let y = screen
+            .iter()
+            .position(|l| l.contains("  max_agents "))
+            .unwrap();
+        let x = screen[y][..screen[y].find("max_agents").unwrap()]
+            .chars()
+            .count();
+        assert_eq!(b[(x as u16, y as u16)].fg, theme::YELLOW);
+        let y = screen.iter().position(|l| l.contains("  kache ")).unwrap();
+        let x = screen[y][..screen[y].find("kache").unwrap()]
+            .chars()
+            .count();
+        assert_eq!(b[(x as u16, y as u16)].fg, theme::TEXT);
+
+        v.set_filter("memory".into());
+        let b = draw(&v, 100, 40);
+        let screen = text(&b);
+        let row = line(&screen, "  memory ");
+        assert!(row.contains("\"8GiB\" → \"4GiB\""), "{row}");
+        assert!(row.contains(" restart   global "), "{row}");
+        let y = screen.iter().position(|l| l.contains(" restart ")).unwrap();
+        let x = screen[y][..screen[y].find(" restart ").unwrap()]
+            .chars()
+            .count()
+            + 1;
+        assert_eq!(b[(x as u16, y as u16)].bg, theme::PEACH);
+        v.fold_all(true);
+        let mut fresh = ConfigView::new(&layers, &cfg, &reload::State::default()).unwrap();
+        fresh.keep_ui(&v);
+        assert_eq!(fresh.filter, "memory");
+        let names = |v: &ConfigView| {
+            v.rows()
+                .into_iter()
+                .map(|r| match r {
+                    Row::Header(s) => v.sections[s].name.clone(),
+                    r => v.item(r).unwrap().dotted(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&fresh), names(&v));
+        fresh.set_filter(String::new());
+        assert!(fresh.rows().iter().all(|r| matches!(r, Row::Header(_))));
+        assert!(
+            !text(&draw(&fresh, 100, 40))
+                .iter()
+                .any(|l| l.contains("reload failed"))
+        );
     }
 
     fn source_cell_color(b: &Buffer, needle: &str, tag: &str) -> Option<Color> {

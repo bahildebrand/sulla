@@ -549,8 +549,8 @@ in a scrollable popup.
   arrays sky as `[a, b]`, and unset optional keys as a muted `none`. Values too long for the
   row end in `…`, rows never wrap.
 - Every row ends with a pill naming the layer that set it: `default`, `global`, `repo`, `flag`,
-  or `runtime` for a value changed in this session that no file or flag set, like `:max 5`. The
-  files are the ones read at startup; edits to them apply after restarting sulla.
+  or `runtime` for a value changed in this session that no file or flag set, like `:max 5`.
+  Edits to the files are picked up live, see [Reloading the config](#reloading-the-config).
 - Multi-line strings (`system_prompt`, `[incus] init`, `[hooks] setup`) show their first line and
   `… (+N lines)`. `Enter` on the row expands the full text below it.
 - `Enter` or `za` on a table header folds it to `▸ incus (14)`, `zM` folds every table and `zR`
@@ -560,5 +560,47 @@ in a scrollable popup.
 - Keys in either file that sulla does not know are listed in a red `Unknown keys` table at the
   bottom, with the file they are in.
 - `y` shows the row as `incus.memory = "8GiB"` in the status line, to copy from the terminal.
+- `r` reloads both config files and refreshes the popup, keeping folds, filter and cursor.
 - `j`/`k`, `Ctrl-d`/`Ctrl-u`, `gg`/`G` and the mouse wheel move. `q` closes, and so does `Esc`
   once no filter is active.
+
+### Reloading the config
+
+sulla rereads `~/.config/sulla/config.toml` and `.sulla/config.toml` while it runs, with the
+original CLI flags applied on top again:
+
+- Automatically: every 250ms it compares the size and modification time of both files. Creating,
+  editing or deleting either one counts. Once the change has been stable for about 300ms (so an
+  editor's write lands in one piece) it reloads.
+- On demand: `:reload`, or `r` inside the `:config` popup.
+
+The new config is compared with the running one key by key and the status line sums up what
+happened, for example
+`config reloaded: 3 changed (max_agents 3→4, claude.model, notify.methods)`, or
+`config reloaded: no changes`. Numbers and booleans show `old→new`.
+
+Applied live:
+
+- `max_agents` (scheduling picks up new slots right away), `done_retention_days`, `check`,
+  `system_prompt`, `agent`, `kache`, `[stall]`, `[budget]`, `[ai_review]`, `[hooks]`,
+  `[presets]` and the other `[pr]` keys.
+- `[claude]` and `[copilot]`: the next launch uses the new command; agents already running keep
+  the one they started with.
+- `[notify]`: methods, triggers and cooldown change in place, beads already flagged stay flagged.
+- `poll_secs` and `[pr] poll_secs`: the bd poller, usage watcher and PR watcher check their
+  interval at least every 500ms, so a shorter interval takes effect without waiting out the old
+  one.
+
+Restart required: `sandbox`, everything under `[incus]`, `branch_prefix`, `base_branch` and
+`workflow`. sulla keeps running with the old value and adds
+`· restart needed for incus.memory, sandbox` to the summary. In the `:config` popup those keys
+carry a peach `restart` pill and show the value still in effect, followed by the file's new value
+dimmed after `→`. Putting the file back to the running value clears the pending restart.
+
+Values changed at runtime, like `:max 5`, survive a reload unless the file's value for that key
+changed, in which case the file wins.
+
+If either file fails to parse or has a value of the wrong type, nothing changes: the status line
+shows `config reload failed: ~/src/app/.sulla/config.toml line 2, column 14: invalid type: ...` in red, and
+the `:config` popup shows the same error at the top until a reload succeeds. Keys changed by the
+last reload are highlighted yellow in the popup for a few seconds.
