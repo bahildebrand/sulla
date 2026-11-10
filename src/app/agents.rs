@@ -214,6 +214,10 @@ impl App {
     }
 
     pub(super) fn relaunch(&mut self, id: &str) {
+        self.relaunch_then(id, |_| {});
+    }
+
+    pub(super) fn relaunch_then(&mut self, id: &str, then: impl FnOnce(&mut App) + Send + 'static) {
         if self.agents.get(id).is_some_and(|a| a.alive) {
             return;
         }
@@ -270,6 +274,7 @@ impl App {
             }
             app.status = format!("launched {id}");
             app.show_note();
+            then(app);
         });
     }
 

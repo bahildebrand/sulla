@@ -1722,7 +1722,7 @@ fn browse_runs_the_app_lifecycle_off_the_ui_thread() {
     h.app.browse("t-1");
     assert_eq!(
         h.app.status,
-        "browse: t-1 has no slot, press A to resume it"
+        "browse: t-1 has no slot or worktree, press A to start it"
     );
     assert_eq!(h.app.slots.acquire("t-1", 2), Some(0));
     std::fs::create_dir_all(h.app.git.worktree_path("t-1")).unwrap();
@@ -1959,4 +1959,85 @@ fn app_status_shows_on_cards_titles_and_review_header() {
     let diff = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
     h.app.view = View::Review(crate::ui::review::Diff::parse("t-1", diff));
     assert_eq!(find(&screen(&h.app, 200, 40), "▲ app"), Some(theme::GREEN));
+}
+
+#[test]
+fn browse_resumes_an_evicted_bead_and_protects_it_from_eviction() {
+    let review = Some(State::Review);
+    let mut h = Harness::new(
+        "browse-resume",
+        &[
+            ("r-1", review),
+            ("r-2", review),
+            ("r-3", review),
+            ("p-1", None),
+        ],
+    );
+    browse_cfg(
+        &mut h,
+        crate::config::BrowseConfig {
+            ports: vec![8000],
+            up: Some("true".into()),
+            ready: Some("false".into()),
+            ready_timeout_secs: 1,
+            ..Default::default()
+        },
+    );
+    park(&mut h, &["r-1", "r-2"]);
+    h.app.git.ensure_worktree("r-3", "main").unwrap();
+    h.app.browse("r-3");
+    assert_eq!(h.finished(), [(0, "r-1".to_string(), Outcome::Evicted)]);
+    assert!(h.app.is_starting("r-3"));
+    h.pump();
+    assert_eq!(h.app.slots.get("r-3"), Some(0));
+    assert!(h.app.browsing.contains("r-3"));
+    let seen = drain_browse(&mut h, "r-3");
+    assert!(
+        seen.contains(&"browse r-3: starting app…".to_string()),
+        "{seen:?}"
+    );
+    assert_eq!(h.app.apps.owner(0), Some("r-3"));
+    assert_eq!(h.state("r-3"), review);
+
+    h.app.ready = vec![h.bead("p-1")];
+    h.app.schedule();
+    assert_eq!(
+        h.finished().last(),
+        Some(&(1, "r-2".to_string(), Outcome::Evicted))
+    );
+    assert!(h.app.agents.contains_key("r-3"));
+}
+
+#[test]
+fn browse_without_a_free_slot_says_why() {
+    let review = Some(State::Review);
+    let mut h = Harness::new(
+        "browse-full",
+        &[("r-1", review), ("r-2", review), ("r-3", review)],
+    );
+    browse_cfg(
+        &mut h,
+        crate::config::BrowseConfig {
+            ports: vec![8000],
+            ..Default::default()
+        },
+    );
+    park(&mut h, &["r-1", "r-2"]);
+    for id in ["r-1", "r-2"] {
+        h.app
+            .edit_local(id, |b| b.set_state_label(Some(State::Running)));
+    }
+    h.app.git.ensure_worktree("r-3", "main").unwrap();
+    h.app.browse("r-3");
+    assert!(
+        h.app.status.starts_with("no free agent slot for r-3"),
+        "{}",
+        h.app.status
+    );
+    assert!(!h.app.is_starting("r-3"));
+    assert!(h.finished().is_empty());
+    h.app.browse("stop r-3");
+    assert_eq!(h.app.status, "browse: r-3 has no slot, so no app to stop");
+    h.app.browse("x-9");
+    assert_eq!(h.app.status, "browse: no bead x-9");
 }

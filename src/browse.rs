@@ -388,7 +388,9 @@ pub fn resolve(target: &str, slots: &BTreeMap<String, usize>) -> Result<(Option<
         .get(target)
         .or_else(|| slots.get(&agent::review_id(target)))
         .map(|s| (Some(target.to_string()), *s))
-        .ok_or_else(|| eyre!("{target} has no slot, press A to resume it"))
+        .ok_or_else(|| {
+            eyre!("{target} has no slot, run :browse {target} in the sulla TUI to resume it")
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,7 +792,10 @@ mod tests {
         assert_eq!(resolve("a-1", &slots).unwrap(), some("a-1", 0));
         assert_eq!(resolve("b-2", &slots).unwrap(), some("b-2", 2));
         let err = resolve("c-3", &slots).unwrap_err().to_string();
-        assert_eq!(err, "c-3 has no slot, press A to resume it");
+        assert_eq!(
+            err,
+            "c-3 has no slot, run :browse c-3 in the sulla TUI to resume it"
+        );
     }
 
     fn incus(browse: BrowseConfig) -> Config {
@@ -818,7 +823,10 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert_eq!(err, "b-2 has no slot, press A to resume it");
+        assert_eq!(
+            err,
+            "b-2 has no slot, run :browse b-2 in the sulla TUI to resume it"
+        );
         let err = job(&cfg, repo, "a-1", &slots, Kind::Stop, None)
             .err()
             .unwrap()

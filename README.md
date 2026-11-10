@@ -124,6 +124,7 @@ hosts = []                # host patterns the slot's browser resolves to that IP
 # down = "docker compose down"  # stops it, for `:browse stop`
 # ready = "curl -fsS http://127.0.0.1:8000/health" # exits 0 once the app serves, default: first port answers
 ready_timeout_secs = 300  # how long to wait for `ready` after `up`
+keep_minutes = 30         # a bead you browsed is evicted last for this long, 0 disables
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
@@ -356,6 +357,7 @@ up = "docker compose up -d"
 down = "docker compose down"
 ready = "curl -fsS http://127.0.0.1:8000/health"
 ready_timeout_secs = 300
+keep_minutes = 30
 ```
 
 - Slot `N` gets `127.0.100.<N+1>` (slot 0 is `127.0.100.1`). Before every bead sulla adds an
@@ -401,8 +403,18 @@ ready_timeout_secs = 300
   `▲ app` in green when all ports answer, `◐ app` in yellow when some do and `▼ app` when none do,
   next to `host <ip>`. When the app was started for another bead the badge reads
   `▲ app (<other bead>)` in peach. Without `ports` nothing is probed.
-- Starting or stopping the app needs the bead to hold a slot. A bead without one (it finished or
-  was killed) has to be resumed with `A` first.
+- Starting or stopping the app needs the bead to hold a slot. `:browse <bead>` on a bead without
+  one (a Review bead whose agent was evicted, say) resumes its agent into a slot the way `A`
+  does, evicting the longest parked agent if no slot is free, and then starts and opens the app.
+  When every slot holds a working agent the status line says so. A bead with no worktree left
+  has to be started with `A`. `sulla browse` cannot resume agents, so it fails and points at
+  `:browse` in the TUI.
+- A bead you open with `:browse` is protected from eviction for `keep_minutes` (default 30): when
+  ready work needs a slot, sulla evicts other parked agents first, and only when none is left the
+  one you browsed longest ago. `keep_minutes = 0` turns this off.
+- With `up` set, the prompts of agents in incus slots say that sulla manages the app with the
+  configured `up` and `down` commands, that the agent may run `up` to test, and that it should
+  leave the app running when done instead of tearing it down.
 - With `hosts`, the browser has to resolve those names to the slot's IP, which needs Chrome's
   `--host-resolver-rules` (Firefox has no per-host equivalent). sulla uses your default browser
   when it is Chromium-based, else the first of `google-chrome`, `chromium`, `chromium-browser` on

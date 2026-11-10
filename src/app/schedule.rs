@@ -160,7 +160,12 @@ impl App {
             .filter_map(|id| self.bead(id))
             .collect();
         parked.sort_by_key(|b| (b.state_since(), b.id.clone()));
-        parked.into_iter().map(|b| b.id.clone()).collect()
+        scheduler::evict_order(
+            parked.into_iter().map(|b| b.id.clone()).collect(),
+            &self.browsed,
+            Instant::now(),
+            self.cfg.incus.browse.keep(),
+        )
     }
 
     fn idle_holders(&self) -> Vec<String> {

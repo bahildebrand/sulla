@@ -4,6 +4,7 @@ pub mod show;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -217,6 +218,7 @@ pub struct BrowseConfig {
     pub down: Option<String>,
     pub ready: Option<String>,
     pub ready_timeout_secs: u64,
+    pub keep_minutes: u64,
 }
 
 impl Default for BrowseConfig {
@@ -229,6 +231,7 @@ impl Default for BrowseConfig {
             down: None,
             ready: None,
             ready_timeout_secs: 300,
+            keep_minutes: 30,
         }
     }
 }
@@ -248,6 +251,10 @@ impl BrowseConfig {
 
     pub fn ready_script(&self) -> Option<&str> {
         script(&self.ready)
+    }
+
+    pub fn keep(&self) -> Duration {
+        Duration::from_secs(self.keep_minutes.saturating_mul(60))
     }
 }
 
@@ -579,6 +586,9 @@ mod tests {
         let cfg: Config = toml::from_str("[incus.browse]\nup = \"  \"").unwrap();
         assert_eq!(cfg.incus.browse.up_script(), None);
         assert_eq!(cfg.incus.browse.ready_timeout_secs, 300);
+        assert_eq!(cfg.incus.browse.keep(), Duration::from_secs(30 * 60));
+        let cfg: Config = toml::from_str("[incus.browse]\nkeep_minutes = 0").unwrap();
+        assert_eq!(cfg.incus.browse.keep(), Duration::ZERO);
     }
 
     #[test]

@@ -300,6 +300,7 @@ pub struct App {
     launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
     browsing: HashSet<String>,
+    browsed: HashMap<String, Instant>,
     republishing: HashMap<String, String>,
     term: (u16, u16),
     pub suspend: Option<Suspend>,
@@ -413,6 +414,7 @@ impl App {
             launching: HashMap::new(),
             publishing: HashSet::new(),
             browsing: HashSet::new(),
+            browsed: HashMap::new(),
             republishing: HashMap::new(),
             term: (80, 24),
             suspend: None,
@@ -528,6 +530,31 @@ impl App {
     }
 
     pub(super) fn start_browse(&mut self, target: &str, kind: browse::Kind) {
+        if target.parse::<usize>().is_ok() || self.holds_slot(target) {
+            return self.open_browse(target, kind);
+        }
+        if self.bead(target).is_none() {
+            return self.status = format!("browse: no bead {target}");
+        }
+        if kind == browse::Kind::Stop {
+            return self.status = format!("browse: {target} has no slot, so no app to stop");
+        }
+        if let Err(e) = browse::supported(&self.cfg) {
+            return self.status = format!("browse: {e:#}");
+        }
+        if !self.git.worktree_path(target).join(".git").exists() {
+            return self.status =
+                format!("browse: {target} has no slot or worktree, press A to start it");
+        }
+        let then = target.to_string();
+        self.relaunch_then(target, move |app| app.open_browse(&then, kind));
+    }
+
+    fn holds_slot(&self, id: &str) -> bool {
+        self.slots.get(id).is_some() || self.slots.get(&agent::review_id(id)).is_some()
+    }
+
+    fn open_browse(&mut self, target: &str, kind: browse::Kind) {
         let job = match browse::job(
             &self.cfg,
             &self.repo,
@@ -551,6 +578,11 @@ impl App {
             return;
         }
         self.browsing.insert(label.clone());
+        if kind != browse::Kind::Stop
+            && let Some(bead) = &job.bead
+        {
+            self.browsed.insert(bead.clone(), Instant::now());
+        }
         self.status = format!("browse {label}: checking the app…");
         let (slot, bead) = (job.slot, job.bead.clone().unwrap_or_default());
         let tx = self.tx.clone();

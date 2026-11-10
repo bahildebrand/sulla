@@ -580,6 +580,21 @@ pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
         .collect()
 }
 
+pub fn evict_order(
+    mut parked: Vec<String>,
+    browsed: &HashMap<String, Instant>,
+    now: Instant,
+    keep: Duration,
+) -> Vec<String> {
+    parked.sort_by_key(|id| {
+        browsed
+            .get(id)
+            .filter(|at| now.saturating_duration_since(**at) < keep)
+            .copied()
+    });
+    parked
+}
+
 fn capped(ids: &[String], cap: usize) -> String {
     let shown = ids[..ids.len().min(cap)].join(", ");
     match ids.len().saturating_sub(cap) {
@@ -1005,5 +1020,31 @@ mod tests {
         assert!(!c.fresh(Some(b"root-b"), fetched + Duration::from_secs(2)));
         assert!(!c.fresh(None, fetched + Duration::from_secs(2)));
         assert!(!c.fresh(Some(b"root-a"), fetched + FULL_REFRESH));
+    }
+
+    #[test]
+    fn eviction_skips_recently_browsed_beads_until_nothing_else_is_left() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let keep = Duration::from_secs(30 * 60);
+        let now = Instant::now() + Duration::from_secs(3600);
+        let browsed = HashMap::from([
+            ("a".to_string(), now - Duration::from_secs(60)),
+            ("b".to_string(), now - Duration::from_secs(40 * 60)),
+            ("c".to_string(), now - Duration::from_secs(5 * 60)),
+        ]);
+        let parked = ids(&["a", "b", "c", "d"]);
+        assert_eq!(
+            evict_order(parked.clone(), &browsed, now, keep),
+            ids(&["b", "d", "c", "a"])
+        );
+        assert_eq!(evict_order(ids(&["a"]), &browsed, now, keep), ids(&["a"]));
+        assert_eq!(
+            evict_order(ids(&["a", "c"]), &browsed, now, keep),
+            ids(&["c", "a"])
+        );
+        assert_eq!(
+            evict_order(parked.clone(), &browsed, now, Duration::ZERO),
+            parked
+        );
     }
 }

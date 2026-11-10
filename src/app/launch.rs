@@ -47,6 +47,7 @@ struct Prelaunch {
     git: Git,
     presets: BTreeMap<String, String>,
     system_prompt: Option<String>,
+    app_note: Option<String>,
     recover: Option<Recover>,
     setup: Option<Setup>,
 }
@@ -115,7 +116,10 @@ impl Prelaunch {
         let parent = parent.map(|p| (p, self.git.branch(p)));
         let parent = parent.as_ref().map(|(p, b)| (*p, b.as_str()));
         agent::with_system(
-            agent::task_prompt(&self.bead, &branch, parent, preset),
+            agent::with_app(
+                agent::task_prompt(&self.bead, &branch, parent, preset),
+                self.app_note.as_deref(),
+            ),
             self.system_prompt.as_deref(),
         )
     }
@@ -288,6 +292,7 @@ impl App {
             git: self.git.clone(),
             presets: self.cfg.presets.clone(),
             system_prompt: self.cfg.system_prompt.clone(),
+            app_note: agent::app_note(&self.cfg),
             recover,
             setup: self.setup_job(&id, Some(slot)),
         };

@@ -17,7 +17,7 @@ pub use copilot::Copilot;
 
 use crate::app::Event;
 use crate::beads::Bead;
-use crate::config::{AgentKind, StallConfig};
+use crate::config::{AgentKind, Config, SandboxKind, StallConfig};
 
 pub const CHAT_ID: &str = "@chat";
 const REVIEW_SUFFIX: &str = "~review";
@@ -112,6 +112,33 @@ pub fn with_system(prompt: String, system: Option<&str>) -> String {
             "{prompt}\n\nRepository instructions from the user. Follow them throughout this \
              session:\n{s}"
         ),
+        None => prompt,
+    }
+}
+
+pub fn app_note(cfg: &Config) -> Option<String> {
+    if cfg.sandbox != SandboxKind::Incus {
+        return None;
+    }
+    let browse = &cfg.incus.browse;
+    let block = |s: &str| format!("\n```\n{}\n```", s.trim());
+    let mut note = format!(
+        "sulla manages this repository's app in your slot. It starts the app with:{}",
+        block(browse.up_script()?)
+    );
+    if let Some(down) = browse.down_script() {
+        note.push_str(&format!("\nand stops it with:{}", block(down)));
+    }
+    note.push_str(
+        "\nYou may run the start command to test the app. Leave the app running when you are \
+         done; do not stop it or tear it down.",
+    );
+    Some(note)
+}
+
+pub fn with_app(prompt: String, note: Option<&str>) -> String {
+    match note {
+        Some(n) => format!("{prompt}\n\n{n}"),
         None => prompt,
     }
 }
@@ -1073,6 +1100,30 @@ mod tests {
         let p = with_system("task".into(), Some("  use pnpm, not npm\n"));
         assert!(p.starts_with("task\n\n"));
         assert!(p.ends_with(":\nuse pnpm, not npm"));
+    }
+
+    #[test]
+    fn app_note_only_for_incus_with_up() {
+        let mut cfg = Config::default();
+        cfg.incus.browse.up = Some("docker compose up -d".into());
+        assert_eq!(app_note(&cfg), None);
+        cfg.sandbox = SandboxKind::Incus;
+        let note = app_note(&cfg).unwrap();
+        assert!(note.contains("```\ndocker compose up -d\n```"), "{note}");
+        assert!(note.contains("Leave the app running"), "{note}");
+        assert!(!note.contains("stops it"), "{note}");
+        cfg.incus.browse.down = Some("docker compose down".into());
+        let note = app_note(&cfg).unwrap();
+        assert!(
+            note.contains("stops it with:\n```\ndocker compose down\n```"),
+            "{note}"
+        );
+        cfg.incus.browse.up = Some("  ".into());
+        assert_eq!(app_note(&cfg), None);
+        cfg.incus.browse.up = None;
+        assert_eq!(app_note(&cfg), None);
+        assert_eq!(with_app("task".into(), None), "task");
+        assert_eq!(with_app("task".into(), Some("app")), "task\n\napp");
     }
 
     #[test]

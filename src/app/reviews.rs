@@ -133,9 +133,13 @@ impl App {
         let base = self.base.clone();
         let repo = self.repo.clone();
         let system_prompt = self.cfg.system_prompt.clone();
+        let app_note = agent::app_note(&self.cfg);
         let session = rid.clone();
         let build = move || {
-            let prompt = agent::review_prompt(&b, &git.branch(&b.id), &git.upstream(&b.id, &base));
+            let prompt = agent::with_app(
+                agent::review_prompt(&b, &git.branch(&b.id), &git.upstream(&b.id, &base)),
+                app_note.as_deref(),
+            );
             let launch = Launch {
                 session: agent::session_id(&repo, &session),
                 id: session,

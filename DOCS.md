@@ -198,11 +198,14 @@ needed and the status line shows `freed slot from parked <bead> for <bead>`. The
 same light reset as after a kill. The bead stays in Review with its worktree, branch and agent
 session, and its agent is resumed into a free slot once no ready work wants one. A bead is never
 evicted while its checks are queued or running, an AI review is launching or running, a publish
-is in flight, or you are typing into its agent.
+is in flight, or you are typing into its agent. A bead you opened with `:browse` in the last
+`[incus.browse] keep_minutes` (default 30, `0` disables) is passed over while another parked
+agent can go; when only browsed beads are left, the one browsed longest ago goes first.
 
-Feedback (`S`, forwarded AI comments) and `A` on an evicted bead resume its session, evicting
-another parked agent if no slot is free. When every slot holds a working agent, the status line
-says so and the bead stays in Review.
+Feedback (`S`, forwarded AI comments), `A` and `:browse` on an evicted bead resume its session,
+evicting another parked agent if no slot is free (`:browse` then starts and opens the bead's
+app). When every slot holds a working agent, the status line says so and the bead stays in
+Review.
 
 ### AI review
 
