@@ -195,6 +195,7 @@ pub enum Action {
     Discard(String),
     Delete(String),
     Release(String),
+    RestartApp(String),
     Quit,
 }
 
@@ -240,7 +241,11 @@ pub struct App {
     backends: HashMap<AgentKind, Box<dyn Backend>>,
     sandbox: Box<dyn Sandbox>,
     slots: Slots,
-    published_slots: Option<BTreeMap<String, usize>>,
+    published_slots: Option<(BTreeMap<String, usize>, browse::Apps)>,
+    apps: browse::Apps,
+    app_live: HashMap<usize, browse::Live>,
+    probing: bool,
+    probed: Option<Instant>,
     deferred: HashMap<usize, Outcome>,
     pub all: Vec<Bead>,
     ready: Vec<Bead>,
@@ -359,6 +364,10 @@ impl App {
             sandbox,
             slots: Slots::default(),
             published_slots: None,
+            apps: browse::Apps::default(),
+            app_live: HashMap::new(),
+            probing: false,
+            probed: None,
             deferred: HashMap::new(),
             all: Vec::new(),
             ready: Vec::new(),
@@ -438,22 +447,75 @@ impl App {
         Some(loc)
     }
 
+    pub fn app_status(&self, id: &str) -> Option<(browse::Live, Option<&str>)> {
+        let slot = self.slots.get(id)?;
+        let live = *self.app_live.get(&slot)?;
+        let shown = agent::reviewed_bead(id).unwrap_or(id);
+        Some((live, self.apps.stale(slot, shown)))
+    }
+
+    fn sync_apps(&mut self) {
+        let base = self
+            .published_slots
+            .as_ref()
+            .map(|(_, a)| a.clone())
+            .unwrap_or_default();
+        let theirs = browse::read_own_apps(&self.repo);
+        self.apps = self.apps.merge(&base, &theirs);
+    }
+
     fn publish_slots(&mut self) {
         let slots = self.slots.snapshot();
-        if self.published_slots.as_ref() == Some(&slots) {
+        if self
+            .published_slots
+            .as_ref()
+            .is_some_and(|(s, a)| *s == slots && *a == self.apps)
+        {
             return;
         }
-        if let Err(e) = browse::write_slots(&self.repo, &slots) {
+        self.sync_apps();
+        if let Err(e) = browse::write_slots(&self.repo, &slots, &self.apps) {
             tracing::warn!("writing slot map failed: {e:#}");
         }
-        self.published_slots = Some(slots);
+        self.published_slots = Some((slots, self.apps.clone()));
+    }
+
+    fn probe_apps(&mut self) {
+        let every = Duration::from_secs(self.cfg.poll_secs.max(1));
+        if self.probing || self.probed.is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        self.probed = Some(Instant::now());
+        let ports = self.cfg.incus.browse.ports.clone();
+        let mut held: Vec<usize> = self.slots.snapshot().into_values().collect();
+        held.sort_unstable();
+        held.dedup();
+        let targets: Vec<(usize, String)> = held
+            .into_iter()
+            .filter_map(|s| self.sandbox.loopback(s).map(|ip| (s, ip)))
+            .collect();
+        if ports.is_empty() || targets.is_empty() {
+            self.app_live.clear();
+            return;
+        }
+        self.probing = true;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let live = browse::probe(&targets, &ports);
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                app.probing = false;
+                app.app_live = live.into_iter().collect();
+                app.sync_apps();
+            })));
+        });
     }
 
     pub(super) fn browse(&mut self, args: &str) {
         let mut words = args.split_whitespace();
-        let (stop, target) = match words.next() {
-            Some("stop") => (true, words.next()),
-            w => (false, w),
+        let (kind, target) = match words.next() {
+            Some("stop") => (browse::Kind::Stop, words.next()),
+            Some("restart") => (browse::Kind::Restart, words.next()),
+            w => (browse::Kind::Open, w),
         };
         let target = match target {
             Some(t) => t.to_string(),
@@ -462,30 +524,46 @@ impl App {
                 None => return self.status = "browse: no bead selected".into(),
             },
         };
+        self.start_browse(&target, kind);
+    }
+
+    pub(super) fn start_browse(&mut self, target: &str, kind: browse::Kind) {
         let job = match browse::job(
             &self.cfg,
             &self.repo,
-            &target,
+            target,
             &self.slots.snapshot(),
-            stop,
+            kind,
             Some(self.sandbox.as_ref()),
         ) {
             Ok(j) => j,
             Err(e) => return self.status = format!("browse: {e:#}"),
         };
         let label = job.label.clone();
-        if !self.browsing.insert(label.clone()) {
+        if self.browsing.contains(&label) {
             return self.status = format!("browse {label}: already in progress");
         }
+        if let Some(other) = job.stale(&self.apps) {
+            self.mode = Mode::Confirm {
+                msg: format!("{} y/n", job.restart_question(other)),
+                action: Action::RestartApp(target.to_string()),
+            };
+            return;
+        }
+        self.browsing.insert(label.clone());
         self.status = format!("browse {label}: checking the app…");
+        let (slot, bead) = (job.slot, job.bead.clone().unwrap_or_default());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let status = |msg: String| {
-                let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
-                    app.status = msg;
+            let note = |n: browse::Note| {
+                let (label, bead) = (label.clone(), bead.clone());
+                let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| match n {
+                    browse::Note::Status(m) => app.status = format!("browse {label}: {m}"),
+                    browse::Note::Up => app.apps.started(slot, &bead),
+                    browse::Note::Down => app.apps.stopped(slot),
                 })));
             };
-            let r = job.run(&mut |m| status(format!("browse {label}: {m}")));
+            let r = job.run(&mut |n| note(n));
             let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
                 app.browsing.remove(&label);
                 app.status = match r {
@@ -696,6 +774,7 @@ impl App {
                     self.write_focused(&[0x1b]);
                 }
                 self.check_rate_limits();
+                self.probe_apps();
             }
             Event::AgentBell(id) => self.on_bell(&id),
             Event::AgentExited(id, generation) => {

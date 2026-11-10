@@ -50,6 +50,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, id: &str) {
         right.push(theme::soft_pill(loc, theme::LAVENDER));
         right.push(Span::raw(" "));
     }
+    if let Some((live, other)) = app.app_status(id) {
+        let (text, color) = theme::app_badge(live, other);
+        right.push(theme::soft_pill(text, color));
+        right.push(Span::raw(" "));
+    }
     if app.parked_review.as_ref().is_some_and(|d| d.id == id) {
         right.extend(theme::hint(&[("r", "back to review")]));
         right.push(Span::raw(" "));

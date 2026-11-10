@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding};
 
 use crate::beads::Column;
+use crate::browse::Live;
 
 pub const TEXT: Color = Color::Rgb(205, 214, 244);
 pub const SUBTEXT: Color = Color::Rgb(166, 173, 200);
@@ -91,6 +92,15 @@ pub fn soft_pill(text: impl Into<String>, fg: Color) -> Span<'static> {
         format!(" {} ", text.into()),
         Style::new().fg(fg).bg(SURFACE),
     )
+}
+
+pub fn app_badge(live: Live, other: Option<&str>) -> (String, Color) {
+    match (live, other) {
+        (Live::Down, _) => (format!("{} app", live.glyph()), MUTED),
+        (_, Some(o)) => (format!("{} app ({o})", live.glyph()), PEACH),
+        (Live::Up, None) => (format!("{} app", live.glyph()), GREEN),
+        (Live::Partial, None) => (format!("{} app", live.glyph()), YELLOW),
+    }
 }
 
 pub fn key(k: &str) -> Span<'static> {
@@ -285,6 +295,17 @@ mod tests {
         assert_eq!(wrap("a bb ccc", 4), ["a bb", "ccc"]);
         assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrap("", 5), [""]);
+    }
+
+    #[test]
+    fn app_badge_colours_by_liveness_and_owner() {
+        let b = |l, o| app_badge(l, o);
+        assert_eq!(b(Live::Up, None), ("▲ app".into(), GREEN));
+        assert_eq!(b(Live::Partial, None), ("◐ app".into(), YELLOW));
+        assert_eq!(b(Live::Down, None), ("▼ app".into(), MUTED));
+        assert_eq!(b(Live::Up, Some("b-2")), ("▲ app (b-2)".into(), PEACH));
+        assert_eq!(b(Live::Partial, Some("b-2")), ("◐ app (b-2)".into(), PEACH));
+        assert_eq!(b(Live::Down, Some("b-2")), ("▼ app".into(), MUTED));
     }
 
     #[test]

@@ -228,7 +228,13 @@ fn elapsed(secs: i64) -> String {
     }
 }
 
-fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
+fn app_span(app: &App, b: &Bead) -> Option<Span<'static>> {
+    let (live, other) = app.app_status(&b.id)?;
+    let (text, color) = theme::app_badge(live, other);
+    Some(Span::styled(text, Style::new().fg(color)))
+}
+
+fn activity(app: &App, b: &Bead, now: DateTime<Utc>, with_app: bool) -> Line<'static> {
     let mut spans = vec![Span::raw("    ")];
     if let Some(t) = b.state_since() {
         spans.push(Span::styled(
@@ -242,6 +248,9 @@ fn activity(app: &App, b: &Bead, now: DateTime<Utc>) -> Line<'static> {
             Span::styled(format!(" -{}", d.dels), Style::new().fg(theme::RED)),
             Span::styled(format!(" {}f", d.files), Style::new().fg(theme::OVERLAY)),
         ]);
+    }
+    if let Some(a) = app_span(app, b).filter(|_| with_app) {
+        spans.extend([Span::raw(" "), a]);
     }
     let id = if b.state() == Some(State::Reviewing) {
         agent::review_id(&b.id)
@@ -326,7 +335,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .map(|b| {
                 ListItem::new(vec![
                     headline(app, b, Style::new(), relation(chain.as_ref(), b)),
-                    activity(app, b, now),
+                    activity(app, b, now, true),
                 ])
             })
             .collect();
@@ -405,42 +414,45 @@ fn scroll_hints(
 
 fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
     let mut lines = vec![headline(app, b, Style::new().bold(), rel)];
-    let mut meta = vec![b.issue_type.clone(), b.status.clone()];
+    let mut meta: Vec<Span<'static>> = vec![b.issue_type.clone().into(), b.status.clone().into()];
     let labels: Vec<&str> = b.labels.iter().map(String::as_str).collect();
     if !labels.is_empty() {
-        meta.push(labels.join(", "));
+        meta.push(labels.join(", ").into());
     }
     if let Some(p) = app.stacked_on.get(&b.id) {
-        meta.push(format!("stacked on {p}"));
+        meta.push(format!("stacked on {p}").into());
     }
     let blockers = scheduler::blockers(b, &app.blocked, &app.stacked_on);
     if !blockers.is_empty() {
-        meta.push(format!("blocked by {}", blockers.join(", ")));
+        meta.push(format!("blocked by {}", blockers.join(", ")).into());
     }
     if let Some(d) = app.dependents.get(&b.id) {
         if !d.blocks.is_empty() {
-            meta.push(format!("blocks {}", d.blocks.join(", ")));
+            meta.push(format!("blocks {}", d.blocks.join(", ")).into());
         }
         match d.stacked.len() {
             0 => {}
-            1 | 2 => meta.push(format!("stacked: {}", d.stacked.join(", "))),
-            n => meta.push(format!("{n} stacked")),
+            1 | 2 => meta.push(format!("stacked: {}", d.stacked.join(", ")).into()),
+            n => meta.push(format!("{n} stacked").into()),
         }
     }
     if let Some(loc) = app.slot_location(&b.id) {
-        meta.push(loc);
+        meta.push(loc.into());
+    }
+    if let Some(a) = app_span(app, b) {
+        meta.push(a);
     }
     if let Some(u) = app.usage.get(&b.id) {
-        meta.push(u.short());
+        meta.push(u.short().into());
     }
     if let Some(budget) = app.budget_status(&b.id) {
-        meta.push(budget);
+        meta.push(budget.into());
     }
     if let Some(m) = app.over_budget.get(&b.id) {
-        meta.push(m.clone());
+        meta.push(m.clone().into());
     }
     if let Some((id, s)) = stall_of(app, b) {
-        meta.push(match s {
+        let text: String = match s {
             Stall::Waiting => "waiting on input".into(),
             Stall::Stalled => {
                 let mins = app
@@ -450,10 +462,18 @@ fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
                 format!("stalled, no progress for {mins}m")
             }
             Stall::Dead => "in progress but no agent running".into(),
-        });
+        };
+        meta.push(text.into());
     }
-    meta.retain(|m| !m.is_empty());
-    lines.push(Line::from(format!("    {}", meta.join(" · "))).fg(theme::OVERLAY));
+    meta.retain(|m| !m.content.is_empty());
+    let mut spans = vec![Span::raw("    ")];
+    for (i, m) in meta.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" · "));
+        }
+        spans.push(m);
+    }
+    lines.push(Line::from(spans).fg(theme::OVERLAY));
     if let Some(c) = app.conflicts.get(&b.id) {
         let files: Vec<&str> = c.files().into_iter().collect();
         lines.push(
@@ -465,7 +485,7 @@ fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
             .fg(theme::RED),
         );
     }
-    lines.push(activity(app, b, Utc::now()));
+    lines.push(activity(app, b, Utc::now(), false));
     let max = width.saturating_sub(4).max(1);
     for l in b
         .description

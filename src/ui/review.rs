@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
 use serde::{Deserialize, Serialize};
@@ -689,6 +689,7 @@ pub fn released_badge() -> Span<'static> {
 pub struct Header<'a> {
     pub title: &'a str,
     pub loc: Option<&'a str>,
+    pub app: Option<(String, Color)>,
     pub ai: Option<&'a AiReview>,
     pub conflict: Option<(&'a Conflict, &'a str)>,
     pub check: Option<&'a Check>,
@@ -708,6 +709,10 @@ fn header_line(diff: &Diff, h: &Header) -> Line<'static> {
     ];
     if let Some(loc) = h.loc {
         spans.push(theme::soft_pill(loc, theme::LAVENDER));
+        spans.push(Span::raw(" "));
+    }
+    if let Some((text, color)) = &h.app {
+        spans.push(theme::soft_pill(text.clone(), *color));
         spans.push(Span::raw(" "));
     }
     if h.released {

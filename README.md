@@ -43,7 +43,7 @@ Press `?` in the app for the full list.
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree, `E` shell |
 | Review | `jk` `Ctrl-d/u` scroll (counts like `5j` work), `]f` `[f` files, `c` comment (`10c` covers ten lines from the cursor), `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR, with its unpublished stack parents in Review (`workflow = "pr"`), `w` release the worktree to work on the branch yourself (`w` again reclaims it), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree, `E` shell (diff reloads on return from either) |
 | Config (`:config`) | `jk` `Ctrl-d/u` `gg` `G` or mouse wheel move, `Enter`/`za` fold a table or expand a multi-line value, `zM`/`zR` fold/unfold all, `]]` `[[` next/prev table, `d` hide defaults, `/` filter by key path, `y` show `key = value` in the status line, `r` reload the config files, `q`/`Esc` close |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:reload` `:browse [bead\|slot]` (starts the app with `[incus.browse] up` first) `:browse stop [bead\|slot]` |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:reload` `:browse [bead\|slot]` (starts the app with `[incus.browse] up` first) `:browse stop [bead\|slot]` `:browse restart [bead\|slot]` |
 
 ## Config
 
@@ -374,6 +374,22 @@ ready_timeout_secs = 300
   status line (or on stderr for `sulla browse`) and no browser opens. In the TUI all of this runs
   in the background, with progress (`starting app…`, `waiting for app (12s)`) in the status line.
 - `:browse stop [bead|slot]` (or `sulla browse --stop <slot|bead>`) runs `down` in the same way.
+- Slots are shared over time (a reviewer uses its implementer's slot, and a freed slot goes to the
+  next bead), so an app can outlive the bead it was started for. Whenever sulla runs `up` it
+  records which bead the slot's app was started for, in memory and under `apps` in
+  `.sulla/slots.json`. `down` clears the record, and so does a light or hard reset of the slot,
+  since both kill the app. An app sulla did not start (an agent ran it) has no record and counts
+  as the current bead's.
+- `:browse <bead>` on a slot whose app was started for another bead asks
+  `slot 1 is serving <other>; restart app for <bead>?` before opening anything. `y` runs `down`
+  (when set) and then `up` for this bead. `sulla browse` stops with an error instead and
+  `sulla browse --restart <slot|bead>` (or `:browse restart [bead|slot]`) does the restart.
+- Every poll (`poll_secs`) sulla checks, off the UI thread, whether each held slot's app answers
+  on every `ports` entry of its loopback IP (a TCP connection that stays open for 200ms, the
+  `ready` snippet is not run). The board card, the progress title and the review header show
+  `▲ app` in green when all ports answer, `◐ app` in yellow when some do and `▼ app` when none do,
+  next to `host <ip>`. When the app was started for another bead the badge reads
+  `▲ app (<other bead>)` in peach. Without `ports` nothing is probed.
 - Starting or stopping the app needs the bead to hold a slot. A bead without one (it finished or
   was killed) has to be resumed with `A` first.
 - With `hosts`, the browser has to resolve those names to the slot's IP, which needs Chrome's
@@ -384,7 +400,8 @@ ready_timeout_secs = 300
   profile is what makes Chrome honour the rules while another Chrome window is open, and keeps
   each slot's cookies apart. `$SULLA_BROWSER` names a Chromium-based browser to always use.
 - A bead is resolved to its slot through `.sulla/slots.json`, which the running sulla keeps up to
-  date. `sulla status` prints each slot with its container, loopback IP, the beads it holds and
-  its URL, and the board shows `host <ip>` next to the container of a bead with a slot.
+  date. `sulla status` prints each slot with its container, loopback IP, the beads it holds, its
+  app (`up`, `partial` or `down`, with `for <bead>` when sulla knows which bead it was started
+  for) and its URL, and the board shows `host <ip>` next to the container of a bead with a slot.
 - Two repos running incus sulla at once would want the same IPs, so only one of them gets the
   browse devices.

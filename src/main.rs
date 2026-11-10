@@ -75,8 +75,14 @@ enum Cmd {
             help = "Stop the app with `[incus.browse] down` instead of opening it"
         )]
         stop: bool,
+        #[arg(
+            long,
+            conflicts_with = "stop",
+            help = "Run `[incus.browse] down` then `up` for this bead before opening, even when the app serves another bead"
+        )]
+        restart: bool,
     },
-    #[command(about = "List each slot with its container, host address and beads")]
+    #[command(about = "List each slot with its container, host address, beads and app status")]
     Status,
     #[command(about = "Show the effective config and where each key comes from")]
     Config {
@@ -133,7 +139,18 @@ fn main() -> Result<()> {
     let cfg = layers.config().wrap_err("loading config")?;
     match &args.cmd {
         Some(Cmd::Setup { bead }) => return setup::cli(&repo, &cfg, bead),
-        Some(Cmd::Browse { target, stop }) => return browse::run(&cfg, &repo, target, *stop),
+        Some(Cmd::Browse {
+            target,
+            stop,
+            restart,
+        }) => {
+            let kind = match (*stop, *restart) {
+                (true, _) => browse::Kind::Stop,
+                (_, true) => browse::Kind::Restart,
+                _ => browse::Kind::Open,
+            };
+            return browse::run(&cfg, &repo, target, kind);
+        }
         Some(Cmd::Status) => return browse::status(&cfg, &repo),
         _ => {}
     }

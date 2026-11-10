@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use color_eyre::{Result, eyre::eyre};
 
+use super::Note;
 use crate::config::BrowseConfig;
 use crate::git;
 use crate::sandbox::Sandbox;
@@ -138,10 +139,14 @@ pub fn plan(
 }
 
 fn tcp_ready(addr: SocketAddr) -> bool {
-    let Ok(mut s) = TcpStream::connect_timeout(&addr, CONNECT) else {
+    answers(addr, CONNECT, LINGER)
+}
+
+pub fn answers(addr: SocketAddr, connect: Duration, linger: Duration) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(&addr, connect) else {
         return false;
     };
-    if s.set_read_timeout(Some(LINGER)).is_err() {
+    if s.set_read_timeout(Some(linger)).is_err() {
         return false;
     }
     match s.read(&mut [0u8; 1]) {
@@ -234,7 +239,11 @@ impl Plan {
         }
     }
 
-    pub fn ensure_up(&self, report: &mut dyn FnMut(String)) -> Result<()> {
+    pub fn has_down(&self) -> bool {
+        self.down.is_some()
+    }
+
+    pub fn ensure_up(&self, force: bool, note: &mut dyn FnMut(Note)) -> Result<()> {
         let Some(up) = &self.up else {
             return Ok(());
         };
@@ -243,12 +252,13 @@ impl Plan {
         }
         let start = Instant::now();
         let deadline = start + self.timeout;
-        if self.ready(deadline)? {
+        if !force && self.ready(deadline)? {
             return Ok(());
         }
-        report("starting app…".into());
+        note(Note::Status("starting app…".into()));
         header(&self.log, "up", &up.script)?;
         let mut child = Some(spawn_logged(&up.spec, &self.log)?);
+        note(Note::Up);
         loop {
             if let Some(c) = child.as_mut()
                 && let Some(st) = c.try_wait()?
@@ -278,7 +288,10 @@ impl Plan {
                     &self.log,
                 ));
             }
-            report(format!("waiting for app ({}s)", waited.as_secs()));
+            note(Note::Status(format!(
+                "waiting for app ({}s)",
+                waited.as_secs()
+            )));
             std::thread::sleep(
                 self.interval
                     .min(deadline.saturating_duration_since(Instant::now())),
@@ -286,16 +299,19 @@ impl Plan {
         }
     }
 
-    pub fn stop(&self, report: &mut dyn FnMut(String)) -> Result<()> {
+    pub fn stop(&self, note: &mut dyn FnMut(Note)) -> Result<()> {
         let down = self
             .down
             .as_ref()
             .ok_or_else(|| eyre!("browse stop needs [incus.browse] down"))?;
-        report("stopping app…".into());
+        note(Note::Status("stopping app…".into()));
         header(&self.log, "down", &down.script)?;
         let mut child = spawn_logged(&down.spec, &self.log)?;
         match wait_until(&mut child, Instant::now() + self.timeout)? {
-            Some(st) if st.success() => Ok(()),
+            Some(st) if st.success() => {
+                note(Note::Down);
+                Ok(())
+            }
             Some(st) => Err(failure(format!("`down` failed ({st})"), &self.log)),
             None => Err(failure(
                 format!("`down` did not finish within {}s", self.timeout.as_secs()),
@@ -341,6 +357,14 @@ mod tests {
             timeout: Duration::from_millis(timeout_ms),
             interval: Duration::from_millis(10),
             log: log_path(dir, "a-1"),
+        }
+    }
+
+    fn text(n: Note) -> String {
+        match n {
+            Note::Status(s) => s,
+            Note::Up => "<up>".into(),
+            Note::Down => "<down>".into(),
         }
     }
 
@@ -449,7 +473,7 @@ mod tests {
         let d = scratch("noup");
         let p = quick(&d, None, Probe::Shell(host_step("exit 1", &d)), 10);
         let mut seen = Vec::new();
-        p.ensure_up(&mut |m| seen.push(m)).unwrap();
+        p.ensure_up(false, &mut |n| seen.push(text(n))).unwrap();
         assert!(seen.is_empty());
         assert!(!p.log.exists());
         std::fs::remove_dir_all(d).unwrap();
@@ -465,7 +489,7 @@ mod tests {
             1000,
         );
         let mut seen = Vec::new();
-        p.ensure_up(&mut |m| seen.push(m)).unwrap();
+        p.ensure_up(false, &mut |n| seen.push(text(n))).unwrap();
         assert!(seen.is_empty());
         assert!(!d.join("started").exists());
         assert_eq!(tail(&p.log).last().map(String::as_str), Some("up"));
@@ -482,8 +506,9 @@ mod tests {
             5000,
         );
         let mut seen = Vec::new();
-        p.ensure_up(&mut |m| seen.push(m)).unwrap();
+        p.ensure_up(false, &mut |n| seen.push(text(n))).unwrap();
         assert_eq!(seen.first().map(String::as_str), Some("starting app…"));
+        assert_eq!(seen.get(1).map(String::as_str), Some("<up>"));
         assert!(d.join("started").exists());
         let log = std::fs::read_to_string(&p.log).unwrap();
         assert!(log.contains("ready: test -e started"), "{log}");
@@ -502,7 +527,7 @@ mod tests {
             5000,
         );
         let t = Instant::now();
-        p.ensure_up(&mut |_| {}).unwrap();
+        p.ensure_up(false, &mut |_| {}).unwrap();
         assert!(t.elapsed() < Duration::from_secs(5));
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -517,7 +542,10 @@ mod tests {
             200,
         );
         let mut seen = Vec::new();
-        let e = p.ensure_up(&mut |m| seen.push(m)).unwrap_err().to_string();
+        let e = p
+            .ensure_up(false, &mut |n| seen.push(text(n)))
+            .unwrap_err()
+            .to_string();
         assert!(e.starts_with("app was not ready within 0s"), "{e}");
         let lines: Vec<&str> = e.lines().skip(1).collect();
         assert_eq!(lines, ["line3", "line4", "line5", "line6", "line7"]);
@@ -538,7 +566,7 @@ mod tests {
             10_000,
         );
         let t = Instant::now();
-        let e = p.ensure_up(&mut |_| {}).unwrap_err().to_string();
+        let e = p.ensure_up(false, &mut |_| {}).unwrap_err().to_string();
         assert!(t.elapsed() < Duration::from_secs(5));
         assert!(e.starts_with("`up` failed"), "{e}");
         assert!(e.ends_with("no compose file"), "{e}");
@@ -552,12 +580,31 @@ mod tests {
         let e = p.stop(&mut |_| {}).unwrap_err().to_string();
         assert!(e.contains("needs [incus.browse] down"), "{e}");
         p.down = Some(host_step("echo bye; touch stopped", &d));
-        p.stop(&mut |_| {}).unwrap();
+        let mut seen = Vec::new();
+        p.stop(&mut |n| seen.push(text(n))).unwrap();
+        assert_eq!(seen, ["stopping app…", "<down>"]);
         assert!(d.join("stopped").exists());
         assert_eq!(tail(&p.log).last().map(String::as_str), Some("bye"));
         p.down = Some(host_step("echo oops; exit 1", &d));
-        let e = p.stop(&mut |_| {}).unwrap_err().to_string();
+        let mut seen = Vec::new();
+        let e = p.stop(&mut |n| seen.push(text(n))).unwrap_err().to_string();
         assert!(e.ends_with("oops"), "{e}");
+        assert_eq!(seen, ["stopping app…"]);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn forced_up_runs_even_when_the_app_is_ready() {
+        let d = scratch("force");
+        let p = quick(
+            &d,
+            Some("touch started"),
+            Probe::Shell(host_step("echo up", &d)),
+            5000,
+        );
+        let mut seen = Vec::new();
+        p.ensure_up(true, &mut |n| seen.push(text(n))).unwrap();
+        assert_eq!(seen, ["starting app…", "<up>"]);
         std::fs::remove_dir_all(d).unwrap();
     }
 }

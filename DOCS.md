@@ -134,7 +134,13 @@ closing it without merging, unstacks its children so they keep its commits in th
 - `:browse [bead|slot]` opens the app the bead's container serves through the slot's loopback IP,
   in the default browser, or in a Chromium profile of its own when `hosts` need mapping (`[incus.browse]`, see the README). Without an argument it uses
   the bead being viewed or selected. `sulla browse <slot|bead>` does the same from a shell, and
-  `sulla status` lists slots with their IP and beads.
+  `sulla status` lists slots with their IP, beads and app status (`up`, `partial`, `down`, plus
+  `for <bead>` when sulla started it).
+- Cards, progress titles and the review header show `▲ app` (green, every `[incus.browse] ports`
+  entry answers), `◐ app` (yellow, some do) or `▼ app` (muted, none do) for the bead's slot, and
+  `▲ app (<other bead>)` in peach when the app there was started for another bead. If so,
+  `:browse` asks before restarting the app for the bead you asked for (`down`, then `up`);
+  `:browse restart [bead|slot]` and `sulla browse --restart` do that without asking.
 
 ### Worktree setup
 

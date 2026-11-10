@@ -54,6 +54,10 @@ impl Sandbox for Gated {
     }
 
     fn shutdown(&mut self) {}
+
+    fn loopback(&self, slot: usize) -> Option<String> {
+        browse::loopback(slot)
+    }
 }
 
 struct Harness {
@@ -1756,4 +1760,203 @@ fn browse_runs_the_app_lifecycle_off_the_ui_thread() {
         h.app.status,
         "browse: browse stop needs [incus.browse] down"
     );
+}
+
+fn browse_cfg(h: &mut Harness, browse: crate::config::BrowseConfig) {
+    h.app.cfg.sandbox = crate::config::SandboxKind::Incus;
+    h.app.cfg.incus.browse = browse;
+}
+
+fn drain_browse(h: &mut Harness, label: &str) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen = Vec::new();
+    while h.app.browsing.contains(label) {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let ev = h.rx.recv_timeout(wait).expect("browse did not finish");
+        if matches!(ev, Event::Finished(_)) {
+            h.app.dispatch(ev);
+            seen.push(h.app.status.clone());
+        }
+    }
+    seen
+}
+
+#[test]
+fn browse_records_the_app_owner_on_up_and_clears_it_on_down_or_reset() {
+    let mut h = Harness::new("app-owner", &[("t-1", Some(State::Running))]);
+    browse_cfg(
+        &mut h,
+        crate::config::BrowseConfig {
+            ports: vec![8000],
+            up: Some("true".into()),
+            down: Some("true".into()),
+            ready: Some("false".into()),
+            ready_timeout_secs: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(h.app.slots.acquire("t-1", 2), Some(0));
+    std::fs::create_dir_all(h.app.git.worktree_path("t-1")).unwrap();
+    h.app.browse("t-1");
+    drain_browse(&mut h, "t-1");
+    assert_eq!(h.app.apps.owner(0), Some("t-1"));
+    h.app.publish_slots();
+    assert_eq!(browse::read_own_apps(&h.dir).owner(0), Some("t-1"));
+
+    h.app.browse("stop t-1");
+    drain_browse(&mut h, "t-1");
+    assert_eq!(h.app.apps.owner(0), None);
+    h.app.publish_slots();
+    assert!(browse::read_own_apps(&h.dir).is_empty());
+
+    h.app.apps.started(0, "t-1");
+    h.app.slots.release("t-1");
+    h.app.finish(Some(0), "t-1", Outcome::Exited);
+    assert_eq!(h.app.apps.owner(0), Some("t-1"));
+    h.app.finish(Some(0), "t-1", Outcome::Killed);
+    assert_eq!(h.app.apps.owner(0), None);
+    h.app.apps.started(0, "t-1");
+    h.app.finish(Some(0), "t-1", Outcome::Discarded);
+    assert_eq!(h.app.apps.owner(0), None);
+}
+
+#[test]
+fn publishing_slots_keeps_app_owners_another_process_recorded() {
+    let mut h = Harness::new("app-merge", &[("t-1", Some(State::Running))]);
+    h.app.slots.acquire("t-1", 2);
+    h.app.apps.started(0, "t-1");
+    h.app.publish_slots();
+    let mut theirs = browse::read_own_apps(&h.dir);
+    theirs.started(1, "t-2");
+    browse::write_slots(&h.dir, &h.app.slots.snapshot(), &theirs).unwrap();
+    h.app.slots.acquire("t-3", 2);
+    h.app.apps.stopped(0);
+    h.app.publish_slots();
+    let file = browse::read_own_apps(&h.dir);
+    assert_eq!(file.owner(0), None);
+    assert_eq!(file.owner(1), Some("t-2"));
+    assert_eq!(h.app.apps, file);
+}
+
+#[test]
+fn browse_asks_before_replacing_another_beads_app() {
+    let mut h = Harness::new("app-stale", &[("t-1", Some(State::Running))]);
+    browse_cfg(
+        &mut h,
+        crate::config::BrowseConfig {
+            ports: vec![8000],
+            up: Some("true".into()),
+            ready: Some("false".into()),
+            ready_timeout_secs: 1,
+            ..Default::default()
+        },
+    );
+    assert_eq!(h.app.slots.acquire("t-1", 2), Some(0));
+    std::fs::create_dir_all(h.app.git.worktree_path("t-1")).unwrap();
+    h.app.apps.started(0, "o-9");
+    h.app.browse("t-1");
+    let Mode::Confirm { msg, action } = std::mem::replace(&mut h.app.mode, Mode::Normal) else {
+        panic!("no confirm");
+    };
+    assert_eq!(msg, "slot 0 is serving o-9; restart app for t-1? y/n");
+    assert!(!h.app.browsing.contains("t-1"));
+    assert!(matches!(&action, Action::RestartApp(t) if t == "t-1"));
+    h.app.confirm(action);
+    assert!(h.app.browsing.contains("t-1"));
+    let seen = drain_browse(&mut h, "t-1");
+    assert!(
+        seen.contains(&"browse t-1: starting app…".to_string()),
+        "{seen:?}"
+    );
+    assert_eq!(h.app.apps.owner(0), Some("t-1"));
+}
+
+#[test]
+fn probing_runs_off_the_ui_thread_and_skips_without_ports() {
+    let mut h = Harness::new("app-probe", &[("t-1", Some(State::Running))]);
+    h.app.slots.acquire("t-1", 2);
+    h.app.probe_apps();
+    assert!(!h.app.probing);
+    assert!(h.app.app_live.is_empty());
+    let held = std::net::TcpListener::bind("127.0.100.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    h.app.cfg.incus.browse.ports = vec![port];
+    h.app.probed = None;
+    let called = Instant::now();
+    h.app.probe_apps();
+    assert!(called.elapsed() < Duration::from_millis(100));
+    assert!(h.app.probing);
+    h.app.probe_apps();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.app.probing {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let ev = h.rx.recv_timeout(wait).expect("probe did not finish");
+        if matches!(ev, Event::Finished(_)) {
+            h.app.dispatch(ev);
+        }
+    }
+    assert_eq!(h.app.app_live.get(&0), Some(&browse::Live::Up));
+    assert_eq!(h.app.app_status("t-1"), Some((browse::Live::Up, None)));
+    assert_eq!(h.app.app_status(&agent::review_id("t-1")), None);
+    drop(held);
+}
+
+fn screen(app: &App, w: u16, ht: u16) -> ratatui::buffer::Buffer {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut t = Terminal::new(TestBackend::new(w, ht)).unwrap();
+    t.draw(|f| crate::ui::draw(f, app)).unwrap();
+    t.backend().buffer().clone()
+}
+
+fn find(buf: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Color> {
+    let area = buf.area;
+    for y in 0..area.height {
+        let row: Vec<&str> = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let line: String = row.concat();
+        if let Some(at) = line.find(text) {
+            let x = line[..at].chars().count() as u16;
+            return Some(buf[(x, y)].fg);
+        }
+    }
+    None
+}
+
+#[test]
+fn app_status_shows_on_cards_titles_and_review_header() {
+    use crate::ui::theme;
+    let mut h = Harness::new("app-badge", &[("t-1", Some(State::Running))]);
+    h.app.slots.acquire("t-1", 2);
+    assert_eq!(find(&screen(&h.app, 200, 40), "app"), None);
+    h.app.app_live.insert(0, browse::Live::Up);
+    h.app.col = Column::ALL
+        .iter()
+        .position(|c| *c == Column::InProgress)
+        .unwrap();
+    for zoom in [false, true] {
+        h.app.zoom = zoom;
+        assert_eq!(find(&screen(&h.app, 200, 40), "▲ app"), Some(theme::GREEN));
+    }
+    h.app.app_live.insert(0, browse::Live::Partial);
+    assert_eq!(find(&screen(&h.app, 200, 40), "◐ app"), Some(theme::YELLOW));
+    h.app.app_live.insert(0, browse::Live::Down);
+    assert_eq!(find(&screen(&h.app, 200, 40), "▼ app"), Some(theme::MUTED));
+    h.app.app_live.insert(0, browse::Live::Up);
+    h.app.apps.started(0, "o-9");
+    assert_eq!(
+        find(&screen(&h.app, 200, 40), "▲ app (o-9)"),
+        Some(theme::PEACH)
+    );
+    h.app.view = View::Progress("t-1".into());
+    assert_eq!(
+        find(&screen(&h.app, 200, 40), "▲ app (o-9)"),
+        Some(theme::PEACH)
+    );
+    h.app.apps.started(0, "t-1");
+    let buf = screen(&h.app, 200, 40);
+    assert_eq!(find(&buf, "▲ app"), Some(theme::GREEN));
+    assert_eq!(find(&buf, "▲ app ("), None);
+    let diff = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    h.app.view = View::Review(crate::ui::review::Diff::parse("t-1", diff));
+    assert_eq!(find(&screen(&h.app, 200, 40), "▲ app"), Some(theme::GREEN));
 }

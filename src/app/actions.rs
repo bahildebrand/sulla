@@ -2,6 +2,7 @@ use color_eyre::eyre::bail;
 
 use crate::agent::{self, CHAT_ID};
 use crate::beads::{Bead, State};
+use crate::browse;
 use crate::sandbox::{self, Outcome};
 
 use super::merge::Restacked;
@@ -84,6 +85,7 @@ impl App {
             Action::Discard(id) => self.discard(&id),
             Action::Delete(id) => self.delete(&id),
             Action::Release(id) => self.release_worktree(&id),
+            Action::RestartApp(target) => self.start_browse(&target, browse::Kind::Restart),
         }
     }
 

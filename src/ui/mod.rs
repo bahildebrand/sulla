@@ -33,6 +33,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                 review::Header {
                     title,
                     loc: app.slot_location(&d.id).as_deref(),
+                    app: app
+                        .app_status(&d.id)
+                        .map(|(live, other)| theme::app_badge(live, other)),
                     ai: app.ai_reviews.get(&d.id),
                     conflict: app.conflicts.get(&d.id).map(|c| (c, app.base.as_str())),
                     check: app.checks.get(&d.id),

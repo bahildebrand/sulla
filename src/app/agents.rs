@@ -56,6 +56,9 @@ impl App {
             .remove(&slot)
             .map_or(outcome, |d| d.worst(outcome));
         let r = self.sandbox.finished(slot, id, outcome);
+        if outcome != Outcome::Exited {
+            self.apps.stopped(slot);
+        }
         self.report(r);
     }
 
