@@ -135,6 +135,14 @@ pub enum NotifyMethod {
     Tmux,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WhenPresent {
+    #[default]
+    Quiet,
+    Always,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Trigger {
@@ -162,6 +170,9 @@ pub struct NotifyConfig {
     #[serde(deserialize_with = "triggers")]
     pub on: Vec<Trigger>,
     pub cooldown_secs: u64,
+    pub idle_secs: u64,
+    pub when_present: WhenPresent,
+    pub batch_secs: u64,
     pub notify_send: String,
     pub tmux_option: String,
 }
@@ -178,6 +189,9 @@ impl Default for NotifyConfig {
                 Trigger::Pr,
             ],
             cooldown_secs: 60,
+            idle_secs: 120,
+            when_present: WhenPresent::Quiet,
+            batch_secs: 5,
             notify_send: "notify-send".into(),
             tmux_option: "@sulla".into(),
         }
@@ -512,6 +526,13 @@ mod tests {
         );
         assert_eq!(cfg.notify.on, [Trigger::Review]);
         assert_eq!(cfg.notify.tmux_option, "@sulla");
+        assert_eq!(cfg.notify.when_present, WhenPresent::Quiet);
+        assert_eq!((cfg.notify.idle_secs, cfg.notify.batch_secs), (120, 5));
+        let cfg: Config =
+            toml::from_str("[notify]\nwhen_present = \"always\"\nidle_secs = 30\nbatch_secs = 0")
+                .unwrap();
+        assert_eq!(cfg.notify.when_present, WhenPresent::Always);
+        assert_eq!((cfg.notify.idle_secs, cfg.notify.batch_secs), (30, 0));
     }
 
     #[test]

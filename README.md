@@ -139,6 +139,9 @@ keep_minutes = 30         # a bead you browsed is evicted last for this long, 0 
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
 on = ["review", "waiting", "dead", "budget", "pr"] # also "stalled" and "chat", off by default
 cooldown_secs = 60        # within this, only a more actionable notification for one bead fires
+idle_secs = 120           # no input for this long, or the terminal losing focus, means you are away
+when_present = "quiet"    # "quiet": no bell or desktop notification while you are at sulla, "always"
+batch_secs = 5            # notifications within this window of the first are sent as one, 0 = at once
 notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
 
@@ -200,8 +203,24 @@ actionable than the bead's current flag fires (`dead` > `budget` > `waiting` > `
 `review` > `pr`), and the flag keeps the most actionable one. Opening the bead's progress or review
 view clears its flag. Notifications are skipped for the bead you are currently viewing.
 
-- `bell` rings the terminal bell in the terminal running sulla.
-- `desktop` runs `notify-send -a sulla <summary> <title>`.
+Sulla does not buzz you about what you can already see. You count as present while sulla's terminal
+has focus and you pressed a key, pasted or scrolled within `[notify] idle_secs`. While present, a
+notification only sets the tmux option and shows `🔔 <bead> ready for review` (or similar) in yellow
+on the status line for a few seconds; the bell and desktop notification are skipped. Set
+`when_present = "always"` to ring and notify anyway. Focus comes from terminal focus reporting. Under
+tmux it needs `set -g focus-events on`; without it (or in a terminal that does not report focus) only
+`idle_secs` decides.
+
+While you are away, notifications that fire within `batch_secs` of the first one are sent together:
+one bell, and one desktop notification `sulla: 3 need you` whose body lists each bead, such as
+`a ready for review` and `b waiting for input`. A single notification keeps its usual text. When you
+come back (focus returns, or your first input after being away), the status line sums up what you
+missed, e.g. `while you were away: 2 ready for review, 1 waiting`, and anything still waiting to be
+batched is dropped instead of sent.
+
+- `bell` rings the terminal bell in the terminal running sulla, once per batch.
+- `desktop` runs `notify-send -a sulla <summary> <body>`, the body being the bead's title, or one line
+  per bead for a batch.
 - `tmux` sets the `@sulla` user option to `sulla:<n>` while beads need attention, and unsets it
   when none do. Show it with e.g. `set -g status-right '#{@sulla} ...'`.
 

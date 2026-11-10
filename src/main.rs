@@ -34,8 +34,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use color_eyre::{Result, eyre::WrapErr};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, MouseEventKind,
 };
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::DefaultTerminal;
@@ -198,10 +198,20 @@ fn main() -> Result<()> {
     });
 
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(stdout(), EnableBracketedPaste, EnableMouseCapture);
+    let _ = crossterm::execute!(
+        stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        EnableFocusChange
+    );
     let res = run(&mut terminal, &mut app, rx, &gate);
     app.shutdown();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = crossterm::execute!(
+        stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        DisableFocusChange
+    );
     ratatui::restore();
     res
 }
@@ -252,6 +262,7 @@ fn run(
         if let Some(s) = app.suspend.take() {
             let name = s.name();
             let r = suspend(terminal, gate, s);
+            app.resumed();
             let size = terminal.size()?;
             app.on_resize(size.width, size.height);
             for ev in rx.try_iter().collect::<Vec<_>>() {
@@ -267,7 +278,12 @@ fn run(
 
 fn suspend(terminal: &mut DefaultTerminal, gate: &Gate, s: Suspend) -> std::io::Result<ExitStatus> {
     gate.pause();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = crossterm::execute!(
+        stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        DisableFocusChange
+    );
     ratatui::restore();
     let cmd = match s {
         Suspend::Editor(dir) => editor_command(&editor_spec(), &dir),
@@ -283,7 +299,8 @@ fn suspend(terminal: &mut DefaultTerminal, gate: &Gate, s: Suspend) -> std::io::
         stdout(),
         EnterAlternateScreen,
         EnableBracketedPaste,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableFocusChange
     );
     let _ = terminal.clear();
     gate.resume();

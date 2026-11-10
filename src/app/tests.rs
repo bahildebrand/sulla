@@ -2613,3 +2613,58 @@ fn pr_approved_or_closed_notifies() {
     assert_eq!(h.app.status, "PR #7 for a: closed without merging");
     assert_eq!(fired(&h).len(), 2);
 }
+
+#[test]
+fn present_user_gets_a_status_chime_instead_of_a_bell() {
+    let mut h = Harness::new("notify-present", &[("a", Some(State::Review))]);
+    h.app.notify(Trigger::Review, "a", "A");
+    assert_eq!(fired(&h), [(Trigger::Review, "a".to_string())]);
+    assert_eq!(h.app.chime(), Some("🔔 a ready for review"));
+    h.app
+        .notifier
+        .flush(Instant::now() + Duration::from_secs(60));
+    assert!(h.app.notifier.sent.is_empty());
+}
+
+#[test]
+fn away_user_is_notified_and_greeted_with_a_summary() {
+    let mut h = Harness::new(
+        "notify-away",
+        &[("a", Some(State::Review)), ("b", Some(State::Running))],
+    );
+    let now = Instant::now();
+    h.app.last_input = now - Duration::from_secs(300);
+    h.app.notify(Trigger::Review, "a", "A");
+    h.app.notify(Trigger::Waiting, "b", "B");
+    assert_eq!(h.app.chime(), None);
+    h.app.notifier.flush(now + Duration::from_secs(10));
+    assert_eq!(h.app.notifier.sent.len(), 1);
+    assert_eq!(h.app.notifier.sent[0].0, "sulla: 2 need you");
+    h.app.on_input(now);
+    assert_eq!(
+        h.app.status,
+        "while you were away: 1 waiting, 1 ready for review"
+    );
+    h.app.status.clear();
+    h.app.on_input(now);
+    assert!(h.app.status.is_empty());
+}
+
+#[test]
+fn losing_focus_counts_as_away_and_regaining_it_returns() {
+    let mut h = Harness::new("notify-focus", &[("a", Some(State::Review))]);
+    let now = Instant::now();
+    h.app.on_input(now);
+    assert_eq!(h.app.focused, None);
+    h.app.on_focus(false, now);
+    h.app.notify(Trigger::Review, "a", "A");
+    assert_eq!(h.app.chime(), None);
+    h.app.on_input(now);
+    assert_eq!(h.app.focused, Some(true));
+    assert_eq!(h.app.status, "while you were away: 1 ready for review");
+    h.app.on_focus(false, now);
+    h.app.status.clear();
+    h.app.on_focus(true, now);
+    assert!(h.app.status.is_empty());
+    assert!(h.app.notifier.sent.is_empty());
+}

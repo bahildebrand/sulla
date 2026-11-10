@@ -198,7 +198,13 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                     Style::new().fg(theme::YELLOW).bold(),
                 ));
             }
-            spans.extend(status_spans(&app.status));
+            match app.chime() {
+                Some(c) => spans.push(Span::styled(
+                    format!(" {c}"),
+                    Style::new().fg(theme::YELLOW).bold(),
+                )),
+                None => spans.extend(status_spans(&app.status)),
+            }
             spans
         }
         Mode::Insert => [

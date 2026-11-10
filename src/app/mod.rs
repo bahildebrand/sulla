@@ -33,7 +33,7 @@ use crate::conflicts::Conflict;
 use crate::filter::Filter;
 use crate::git::{DiffStat, Git};
 use crate::health::Tool;
-use crate::notify::Notifier;
+use crate::notify::{self, Notifier};
 use crate::pr::{self, PrStatus};
 use crate::presets;
 use crate::sandbox::{self, Outcome, Sandbox, Slots};
@@ -226,6 +226,7 @@ pub enum Mode {
 }
 
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
+const CHIME: Duration = Duration::from_secs(5);
 
 pub struct App {
     pub cfg: Config,
@@ -264,6 +265,9 @@ pub struct App {
     rate_scanned: Instant,
     restack_stuck: HashMap<String, Option<String>>,
     notifier: Notifier,
+    focused: Option<bool>,
+    last_input: Instant,
+    chime: Option<(String, Instant)>,
     pub pr_watch: pr::Watch,
     pr_refresh: Option<Sender<()>>,
     pub stalls: HashMap<String, Stall>,
@@ -346,6 +350,9 @@ impl App {
         let config_watch = ConfigWatch::new(layers.paths());
         Ok(Self {
             notifier: Notifier::new(cfg.notify.clone()),
+            focused: None,
+            last_input: started,
+            chime: None,
             pr_watch,
             pr_refresh,
             stalls: HashMap::new(),
@@ -773,6 +780,7 @@ impl App {
         if let Some(id) = self.viewing() {
             self.notifier.clear(&id);
         }
+        self.notifier.flush(Instant::now());
     }
 
     fn viewing(&self) -> Option<String> {
@@ -784,9 +792,60 @@ impl App {
     }
 
     fn notify(&mut self, trigger: Trigger, id: &str, title: &str) {
-        if self.viewing().as_deref() != Some(id) {
-            self.notifier.fire(trigger, id, title);
+        if self.viewing().as_deref() == Some(id) {
+            return;
         }
+        let now = Instant::now();
+        let present = self.present(now);
+        if self.notifier.fire(trigger, id, title, present, now) && present {
+            let msg = format!("{} {}", notify::BELL_GLYPH, notify::line(trigger, id));
+            self.chime = Some((msg, now));
+        }
+    }
+
+    fn present(&self, now: Instant) -> bool {
+        notify::present(
+            self.focused,
+            self.notifier.idle(),
+            now.saturating_duration_since(self.last_input),
+        )
+    }
+
+    pub fn chime(&self) -> Option<&str> {
+        self.chime
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < CHIME)
+            .map(|(m, _)| m.as_str())
+    }
+
+    fn on_input(&mut self, now: Instant) {
+        let away = !self.present(now);
+        self.focused = self.focused.map(|_| true);
+        self.last_input = now;
+        self.returned(away, now);
+    }
+
+    fn on_focus(&mut self, focused: bool, now: Instant) {
+        let away = !self.present(now);
+        self.focused = Some(focused);
+        if focused {
+            self.last_input = now;
+        }
+        self.returned(away, now);
+    }
+
+    fn returned(&mut self, away: bool, now: Instant) {
+        if away
+            && self.present(now)
+            && let Some(s) = self.notifier.welcome_back()
+        {
+            self.status = s;
+        }
+    }
+
+    pub fn resumed(&mut self) {
+        self.last_input = Instant::now();
+        self.focused = self.focused.map(|_| true);
     }
 
     fn on_bell(&mut self, id: &str) {
@@ -800,10 +859,21 @@ impl App {
 
     fn dispatch(&mut self, ev: Event) {
         match ev {
-            Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => self.on_key(k),
-            Event::Input(CEvent::Paste(s)) => self.on_paste(&s),
+            Event::Input(CEvent::Key(k)) if k.kind != KeyEventKind::Release => {
+                self.on_input(Instant::now());
+                self.on_key(k);
+            }
+            Event::Input(CEvent::Paste(s)) => {
+                self.on_input(Instant::now());
+                self.on_paste(&s);
+            }
             Event::Input(CEvent::Resize(w, h)) => self.on_resize(w, h),
-            Event::Input(CEvent::Mouse(m)) => self.on_mouse(m),
+            Event::Input(CEvent::Mouse(m)) => {
+                self.on_input(Instant::now());
+                self.on_mouse(m);
+            }
+            Event::Input(CEvent::FocusGained) => self.on_focus(true, Instant::now()),
+            Event::Input(CEvent::FocusLost) => self.on_focus(false, Instant::now()),
             Event::Input(_) | Event::AgentOutput => {}
             Event::Tick => {
                 if self.esc_at.is_some_and(|t| t.elapsed() >= ESC_TIMEOUT) {
