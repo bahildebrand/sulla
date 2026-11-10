@@ -412,7 +412,9 @@ restart):
 
 With `sandbox = "incus"` and the default `[incus] agent = "host"`, Claude runs on the host (only
 its Bash commands go to the container), so its sessions are the host's `~/.claude` (or the host's
-`CLAUDE_CONFIG_DIR`). Copilot agents, and Claude with `agent = "container"`, run in the container
+`CLAUDE_CONFIG_DIR`). Its Edit, Write, MultiEdit and NotebookEdit tools may only change files
+inside the bead's worktree, and its Read, Grep and Glob tools may not look at `~/.ssh`, `~/.gnupg`
+and similar secrets (see "Where Claude runs" in the README). Copilot agents, and Claude with `agent = "container"`, run in the container
 with the host `HOME`, and the default `[incus] mounts` share `~/.copilot` and `~/.claude` with the
 host, so sessions are backed up and restored on the host. If `[incus] env` points `COPILOT_HOME`
 or `CLAUDE_CONFIG_DIR` elsewhere, that path is used instead. When the session directory is not

@@ -17,6 +17,7 @@ use crate::agent::Launch;
 use crate::beads;
 use crate::browse;
 use crate::config::{AgentKind, IncusAgent, IncusConfig};
+use crate::guard;
 use crate::sessions;
 
 const MAX_NAME: usize = 63;
@@ -697,7 +698,7 @@ impl Sandbox for Incus {
         cmd: CommandBuilder,
     ) -> Result<CommandBuilder> {
         if self.driver.hosted(kind) {
-            return self.driver.host_agent(slot, cmd);
+            return self.driver.host_agent(slot, &launch.worktree, cmd);
         }
         let cwd = cmd
             .get_cwd()
@@ -799,7 +800,12 @@ impl Driver {
         kind == AgentKind::Claude && self.cfg.agent == IncusAgent::Host
     }
 
-    fn host_agent(&self, slot: usize, mut cmd: CommandBuilder) -> Result<CommandBuilder> {
+    fn host_agent(
+        &self,
+        slot: usize,
+        worktree: &Path,
+        mut cmd: CommandBuilder,
+    ) -> Result<CommandBuilder> {
         let dir = host_dir(&self.repo);
         let tmp = dir.join("tmp");
         std::fs::create_dir_all(&tmp)?;
@@ -814,6 +820,9 @@ impl Driver {
         cmd.env("CLAUDE_CODE_TMPDIR", &tmp);
         cmd.env(CONTAINER_VAR, self.name(slot));
         cmd.env(FORWARD_VAR, names.join(" "));
+        let hooks = guard::hooks(&std::env::current_exe()?, worktree);
+        let cwd = cmd.get_cwd().map_or(worktree.into(), PathBuf::from);
+        guard::add_settings(cmd.get_argv_mut(), hooks, &cwd)?;
         Ok(cmd)
     }
 
@@ -1508,7 +1517,15 @@ mod tests {
         let out = i
             .wrap(1, AgentKind::Claude, &launch(&wt), agent_cmd("claude", &wt))
             .unwrap();
-        assert_eq!(strs(out.get_argv()), ["claude", "--resume", "s", "do it"]);
+        let argv = strs(out.get_argv());
+        assert_eq!(argv[..2], ["claude", "--settings"]);
+        assert_eq!(argv[3..], ["--resume", "s", "do it"]);
+        let settings: Value = serde_json::from_str(&argv[2]).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            settings,
+            json!({"hooks": {"PreToolUse": guard::hooks(&exe, &wt)}})
+        );
         assert_eq!(out.get_cwd().map(PathBuf::from), Some(wt.clone()));
         let env = extra_env(&out);
         let dir = repo.join(".sulla/incus");

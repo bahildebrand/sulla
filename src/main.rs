@@ -9,6 +9,7 @@ mod conflicts;
 mod filter;
 mod git;
 mod graphite;
+mod guard;
 mod health;
 mod init;
 mod notify;
@@ -91,6 +92,8 @@ enum Cmd {
         #[arg(long, help = "Print plain TOML without source tags or colour")]
         raw: bool,
     },
+    #[command(hide = true)]
+    Guard { root: PathBuf },
 }
 
 impl Args {
@@ -128,8 +131,10 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
-    if let Some(Cmd::Init) = args.cmd {
-        return init::run(&args.repo);
+    match &args.cmd {
+        Some(Cmd::Init) => return init::run(&args.repo),
+        Some(Cmd::Guard { root }) => return guard::run(root),
+        _ => {}
     }
     let repo = git::toplevel(&args.repo).wrap_err("not a git repository")?;
     if let Some(Cmd::Config { no_defaults, raw }) = args.cmd {

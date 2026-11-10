@@ -270,6 +270,17 @@ with the container's `PATH`. Interrupting a command, a Bash timeout or stopping 
 task signals the whole command in the container, not just the local `incus exec` client.
 Host Claude asks once per repo whether to trust it, as with `sandbox = "worktree"`.
 
+Host Claude's file tools run on the host, so sulla restricts them. It starts `claude` with
+`--settings` holding a PreToolUse hook (merged into any `--settings` in `[claude] extra_args`) that
+runs `sulla guard <worktree>` before each Read, Grep, Glob, Edit, Write, MultiEdit and
+NotebookEdit call. Edit, Write, MultiEdit and NotebookEdit are denied for any path that does not
+resolve inside the bead's worktree, after following symlinks and `..`, and the agent is told to
+work inside its worktree instead. New files in new directories under the worktree are fine. Reads
+and searches elsewhere on the host stay allowed (cargo registries, docs, ...), except Read, Grep
+and Glob on or covering `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh` and `~/.netrc`. This
+means Claude cannot write its memory or plan files under `~/.claude` in host mode. Bash commands
+are not checked by the hook because they already run in the container.
+
 ### How slots work
 
 - Slot containers are named `<prefix>-<repo-slug>-<slot>`, copied from the golden container on
