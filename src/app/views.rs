@@ -129,6 +129,7 @@ impl App {
             Ok(s) => self.status = format!("{name} exited with {s}"),
             Err(e) => self.status = format!("{name} failed: {e}"),
         }
+        self.config_edited();
         let View::Review(d) = &mut self.view else {
             return;
         };

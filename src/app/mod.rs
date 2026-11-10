@@ -1,6 +1,7 @@
 mod actions;
 mod agents;
 mod checking;
+mod config_edit;
 mod input;
 mod launch;
 mod merge;
@@ -25,7 +26,7 @@ use crate::beads::{Bead, Beads, Column, State};
 use crate::browse;
 use crate::budget;
 use crate::checks::{self, Check};
-use crate::config::effective::Layers;
+use crate::config::effective::{Layers, Source};
 use crate::config::reload::{self as config_reload, Watch as ConfigWatch};
 use crate::config::{AgentKind, Config, Trigger, Workflow};
 use crate::conflicts::Conflict;
@@ -92,6 +93,7 @@ fn spawn_bd_worker(beads: Beads, tx: Sender<Event>) -> Sender<BdJob> {
 
 pub enum Suspend {
     Editor(PathBuf),
+    File(PathBuf),
     Shell {
         cmd: std::process::Command,
         place: String,
@@ -101,7 +103,7 @@ pub enum Suspend {
 impl Suspend {
     pub fn name(&self) -> &'static str {
         match self {
-            Suspend::Editor(_) => "editor",
+            Suspend::Editor(_) | Suspend::File(_) => "editor",
             Suspend::Shell { .. } => "shell",
         }
     }
@@ -230,6 +232,7 @@ pub struct App {
     pub layers: Layers,
     pub reload: config_reload::State,
     config_watch: ConfigWatch,
+    config_edit: Option<Source>,
     poll_every: Interval,
     pr_every: Interval,
     pub base: String,
@@ -418,6 +421,7 @@ impl App {
             republishing: HashMap::new(),
             term: (80, 24),
             suspend: None,
+            config_edit: None,
             paused: false,
             health: None,
             bd_error: None,

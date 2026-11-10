@@ -11,6 +11,7 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 
 use super::theme;
 use crate::config::Config;
+use crate::config::edit::{self, Kind};
 use crate::config::effective::{Layers, Source};
 use crate::config::reload;
 use crate::config::show::{display_path, dotted, key, source_color, value_color};
@@ -73,8 +74,127 @@ pub enum Row {
     Item(usize, usize),
 }
 
+#[derive(Debug, Clone)]
+pub struct Editor {
+    pub path: Vec<String>,
+    pub kind: Kind,
+    pub buf: String,
+    pub at: usize,
+    pub target: Source,
+    pub error: Option<String>,
+}
+
+impl Editor {
+    pub fn new(path: Vec<String>, kind: Kind, value: Option<&toml::Value>, target: Source) -> Self {
+        let buf = match value {
+            Some(toml::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => String::new(),
+        };
+        Self {
+            path,
+            kind,
+            at: buf.chars().count(),
+            buf,
+            target,
+            error: None,
+        }
+    }
+
+    fn byte(&self, at: usize) -> usize {
+        self.buf
+            .char_indices()
+            .nth(at)
+            .map_or(self.buf.len(), |(i, _)| i)
+    }
+
+    fn len(&self) -> usize {
+        self.buf.chars().count()
+    }
+
+    pub fn insert(&mut self, text: &str) {
+        let i = self.byte(self.at);
+        self.buf.insert_str(i, text);
+        self.at += text.chars().count();
+        self.error = None;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.at > 0 {
+            self.at -= 1;
+            self.delete();
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.at < self.len() {
+            let i = self.byte(self.at);
+            self.buf.remove(i);
+            self.error = None;
+        }
+    }
+
+    pub fn left(&mut self) {
+        self.at = self.at.saturating_sub(1);
+    }
+
+    pub fn right(&mut self) {
+        self.at = (self.at + 1).min(self.len());
+    }
+
+    pub fn home(&mut self) {
+        self.at = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.at = self.len();
+    }
+
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.at = 0;
+        self.error = None;
+    }
+
+    pub fn cycle(&mut self, forward: bool) -> bool {
+        let Some(next) = self.kind.cycle(&self.buf, forward) else {
+            return false;
+        };
+        self.buf = next.to_string();
+        self.end();
+        self.error = None;
+        true
+    }
+
+    pub fn switch(&mut self, global: bool) -> bool {
+        self.target = match self.target {
+            Source::Repo if global => Source::Global,
+            _ => Source::Repo,
+        };
+        self.error = None;
+        global
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Prompt {
+    Edit(Editor),
+    Remove {
+        path: Vec<String>,
+        source: Source,
+        fallback: Option<toml::Value>,
+        unknown: bool,
+    },
+    Invalid {
+        source: Source,
+        error: String,
+    },
+}
+
 #[derive(Debug)]
 pub struct ConfigView {
+    layers: Layers,
+    pub prompt: Option<Prompt>,
     files: Vec<File>,
     flags: Vec<(String, toml::Value)>,
     pub sections: Vec<Section>,
@@ -201,6 +321,8 @@ impl ConfigView {
             exists: Some(l.exists()),
         }));
         Ok(Self {
+            layers: base.clone(),
+            prompt: None,
             files,
             flags: layers
                 .flags
@@ -228,7 +350,81 @@ impl ConfigView {
         self.typing = old.typing;
         self.cursor = old.cursor;
         self.offset.set(old.offset.get());
+        self.prompt = old.prompt.clone();
         self.retarget(None);
+    }
+
+    fn selected(&self) -> Option<&Item> {
+        self.item(self.current()?)
+    }
+
+    fn file_value(item: &Item) -> Option<&toml::Value> {
+        match &item.restart {
+            Some(v) => v.as_ref(),
+            None => item.value.as_ref(),
+        }
+    }
+
+    pub fn begin_edit(&mut self) -> Result<(), String> {
+        let item = self.selected().ok_or("select a key to edit it")?;
+        if item.file.is_some() {
+            return Err(format!(
+                "{} is not a sulla setting, press x to remove it",
+                item.dotted()
+            ));
+        }
+        let value = Self::file_value(item);
+        let kind = Kind::of(&item.path, value).ok_or_else(|| {
+            format!(
+                "{} can't be edited inline, press e to edit in $EDITOR",
+                item.dotted()
+            )
+        })?;
+        let ed = Editor::new(item.path.clone(), kind, value, Source::Repo);
+        self.prompt = Some(Prompt::Edit(ed));
+        Ok(())
+    }
+
+    pub fn toggled(&self) -> Option<(Vec<String>, bool)> {
+        let item = self.selected().filter(|i| i.file.is_none())?;
+        match Self::file_value(item) {
+            Some(toml::Value::Boolean(b)) => Some((item.path.clone(), !b)),
+            _ => None,
+        }
+    }
+
+    pub fn begin_remove(&mut self) -> Result<(), String> {
+        let item = self.selected().ok_or("select a key to remove it")?;
+        let unknown = item.file.is_some();
+        let source = if unknown {
+            item.source
+        } else {
+            [Source::Repo, Source::Global]
+                .into_iter()
+                .find(|s| self.layers.sets(*s, &item.path))
+                .ok_or_else(|| format!("{} is not set in a config file", item.dotted()))?
+        };
+        let path = item.path.clone();
+        let fallback = if unknown {
+            None
+        } else {
+            edit::fallback(&self.layers, source, &path).map_err(|e| edit::message(&e))?
+        };
+        self.prompt = Some(Prompt::Remove {
+            path,
+            source,
+            fallback,
+            unknown,
+        });
+        Ok(())
+    }
+
+    pub fn shadowed(&self, ed: &Editor) -> Option<String> {
+        [Source::Flag, Source::Repo]
+            .into_iter()
+            .filter(|s| *s > ed.target)
+            .find(|s| self.layers.sets(*s, &ed.path))
+            .map(|s| format!("{} overrides this", s.name()))
     }
 
     pub fn flashing(&self, item: &Item) -> bool {
@@ -700,6 +896,102 @@ impl ConfigView {
             .collect()
     }
 
+    fn editor_lines(
+        &self,
+        ed: &Editor,
+        indent: usize,
+        width: usize,
+        accent: Color,
+    ) -> Vec<Line<'static>> {
+        let inner = width.saturating_sub(indent + 3);
+        let bg = Style::new().bg(theme::RAISED);
+        let row = |spans: Vec<Span<'static>>| {
+            let mut out = vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled("▎", bg.fg(accent)),
+                Span::styled(" ", bg),
+            ];
+            let mut used = 0;
+            for mut sp in spans {
+                let room = inner.saturating_sub(used);
+                if room == 0 {
+                    break;
+                }
+                if sp.width() > room {
+                    sp.content = clip(&sp.content, room).into();
+                }
+                used += sp.width();
+                if sp.style.bg.is_none() {
+                    sp.style = sp.style.bg(theme::RAISED);
+                }
+                out.push(sp);
+            }
+            out.push(Span::styled(" ".repeat(inner.saturating_sub(used) + 1), bg));
+            Line::from(out)
+        };
+        let mut lines = Vec::new();
+        let mut target = vec![Span::styled("write to ", Style::new().fg(theme::OVERLAY))];
+        let mut layers = vec![Source::Repo];
+        if self.layers.global.is_some() {
+            layers.push(Source::Global);
+        }
+        for s in layers {
+            target.push(if s == ed.target {
+                theme::pill(s.name(), source_color(s))
+            } else {
+                theme::soft_pill(s.name(), theme::MUTED)
+            });
+            target.push(Span::raw(" "));
+        }
+        if let Some(why) = self.shadowed(ed) {
+            target.push(Span::styled(
+                format!(" ⚠ {why}"),
+                Style::new().fg(theme::PEACH).bold(),
+            ));
+        }
+        lines.push(row(target));
+        let chars: Vec<char> = ed.buf.chars().collect();
+        let room = inner.saturating_sub(4).max(1);
+        let start = (ed.at + 1).saturating_sub(room);
+        let before: String = chars[start..ed.at].iter().collect();
+        let after: String = chars[ed.at..].iter().collect();
+        lines.push(row(vec![
+            Span::styled("› ", Style::new().fg(accent).bold()),
+            Span::styled(before, Style::new().fg(theme::TEXT)),
+            Span::styled("▏", Style::new().fg(accent)),
+            Span::styled(after, Style::new().fg(theme::TEXT)),
+        ]));
+        let opts = ed.kind.options();
+        if !opts.is_empty() {
+            let mut spans = vec![Span::styled("Tab ", Style::new().fg(theme::OVERLAY))];
+            for (i, o) in opts.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" · ", Style::new().fg(theme::MUTED)));
+                }
+                let style = if *o == ed.buf.trim() {
+                    Style::new().fg(accent).bold()
+                } else {
+                    Style::new().fg(theme::SUBTEXT)
+                };
+                spans.push(Span::styled(o.to_string(), style));
+            }
+            lines.push(row(spans));
+        }
+        if let Some(e) = &ed.error {
+            for (i, l) in theme::wrap(e, inner.saturating_sub(2).max(1))
+                .into_iter()
+                .enumerate()
+            {
+                let glyph = if i == 0 { "✗ " } else { "  " };
+                lines.push(row(vec![Span::styled(
+                    format!("{glyph}{l}"),
+                    Style::new().fg(theme::RED).bold(),
+                )]));
+            }
+        }
+        lines
+    }
+
     fn body(&self, width: usize) -> Body {
         let rows = self.rows();
         let mut lines = Vec::new();
@@ -739,6 +1031,12 @@ impl ConfigView {
                             width,
                             self.sections[s].accent,
                         ));
+                    }
+                    if here
+                        && let Some(Prompt::Edit(ed)) = &self.prompt
+                        && ed.path == item.path
+                    {
+                        lines.extend(self.editor_lines(ed, 4, width, self.sections[s].accent));
                     }
                 }
             }
@@ -823,6 +1121,94 @@ impl ConfigView {
             }
         }
         lines.into_iter().map(Line::from).collect()
+    }
+}
+
+fn ask(f: &mut Frame, outer: Rect, accent: Color, title: &str, mut lines: Vec<Line<'static>>) {
+    let width = outer.width.saturating_sub(4).min(72);
+    lines.insert(0, Line::raw(""));
+    lines.push(Line::raw(""));
+    let area = theme::centered(outer, width, lines.len() as u16 + 2);
+    let inner = theme::popup(f, area, accent, theme::popup_title("?", title, accent));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn overlay(f: &mut Frame, outer: Rect, view: &ConfigView) {
+    let wrap_w = outer.width.saturating_sub(4).min(72).saturating_sub(6) as usize;
+    let text = |s: &str, style: Style| -> Vec<Line<'static>> {
+        theme::wrap(s, wrap_w)
+            .into_iter()
+            .map(|l| Line::styled(l, style))
+            .collect()
+    };
+    let choice = |k: &str, what: &str| {
+        vec![
+            theme::key(k),
+            Span::styled(format!(" {what}   "), Style::new().fg(theme::SUBTEXT)),
+        ]
+    };
+    match &view.prompt {
+        Some(Prompt::Remove {
+            path,
+            source,
+            fallback,
+            unknown,
+        }) => {
+            let file = view
+                .layers
+                .layer(*source)
+                .map(|l| display_path(&l.path))
+                .unwrap_or_default();
+            let mut lines = text(
+                &format!("remove {} from {}?", dotted(path), source.name()),
+                Style::new().fg(theme::TEXT).bold(),
+            );
+            lines.extend(text(&file, Style::new().fg(theme::OVERLAY)));
+            if !unknown {
+                let lower = [Source::Global]
+                    .into_iter()
+                    .filter(|s| s < source)
+                    .find(|s| view.layers.sets(*s, path))
+                    .map_or("default", |s| s.name());
+                let to = match fallback {
+                    Some(v) => format!("falls back to {lower}: {}", inline(v)),
+                    None => format!("falls back to {lower}: unset"),
+                };
+                lines.extend(text(&to, Style::new().fg(theme::SUBTEXT)));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(
+                [
+                    vec![theme::pill("y", theme::GREEN)],
+                    vec![Span::styled(" remove   ", Style::new().fg(theme::SUBTEXT))],
+                    choice("any key", "cancel"),
+                ]
+                .concat(),
+            ));
+            ask(f, outer, theme::YELLOW, "remove key", lines);
+        }
+        Some(Prompt::Invalid { source, error }) => {
+            let mut lines = text(
+                &format!("the {} config is invalid", source.name()),
+                Style::new().fg(theme::TEXT).bold(),
+            );
+            lines.extend(text(error, Style::new().fg(theme::RED)));
+            lines.push(Line::raw(""));
+            lines.extend(text(
+                "the running config is unchanged",
+                Style::new().fg(theme::OVERLAY),
+            ));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(
+                [
+                    choice("e", "edit again"),
+                    choice("Esc", "keep the file as is"),
+                ]
+                .concat(),
+            ));
+            ask(f, outer, theme::RED, "invalid config", lines);
+        }
+        _ => {}
     }
 }
 
@@ -917,6 +1303,7 @@ pub fn render(f: &mut Frame, outer: Rect, view: &ConfigView) {
             foot,
         );
     }
+    overlay(f, outer, view);
 }
 
 #[cfg(test)]
@@ -1309,12 +1696,112 @@ mounts = ["~/.claude", "~/.a-really-long-mount-path-that-will-not-fit-in-eighty-
         assert_eq!(v.cursor, 0);
     }
 
+    fn cell_at(screen: &[String], needle: &str) -> (u16, u16) {
+        let y = screen.iter().position(|l| l.contains(needle)).unwrap();
+        let x = screen[y][..screen[y].find(needle).unwrap()].chars().count();
+        (x as u16, y as u16)
+    }
+
+    #[test]
+    fn inline_editor_renders_a_raised_box_under_the_row() {
+        let d = Dir::new("editor");
+        let layers = d.layers("max_agents = 7", Some("max_agents = 4"), "");
+        let cfg = layers.config().unwrap();
+        let mut v = ConfigView::new(&layers, &cfg, &reload::State::default()).unwrap();
+        assert!(v.select(find(&v, "max_agents")));
+        v.begin_edit().unwrap();
+        let Some(Prompt::Edit(ed)) = &mut v.prompt else {
+            panic!("no editor");
+        };
+        assert_eq!(ed.buf, "4");
+        ed.switch(true);
+        ed.error = Some("invalid value: integer `-1`, expected usize".into());
+        let b = draw(&v, 100, 40);
+        let screen = text(&b);
+        let row = screen
+            .iter()
+            .position(|l| l.contains("  max_agents "))
+            .unwrap();
+        assert!(
+            screen[row + 1].contains("write to  repo   global"),
+            "{}",
+            screen[row + 1]
+        );
+        assert!(screen[row + 1].contains("⚠ repo overrides this"));
+        assert!(screen[row + 2].contains("› 4▏"), "{}", screen[row + 2]);
+        assert!(
+            screen[row + 3].contains("✗ invalid value"),
+            "{}",
+            screen[row + 3]
+        );
+        let (x, y) = cell_at(&screen, "› 4");
+        assert_eq!(b[(x, y)].bg, theme::RAISED);
+        let (x, y) = cell_at(&screen, "⚠ repo");
+        assert_eq!(b[(x, y)].fg, theme::PEACH);
+        let (x, y) = cell_at(&screen, "✗ invalid");
+        assert_eq!(b[(x, y)].fg, theme::RED);
+        let (x, y) = cell_at(&screen, "global   ⚠");
+        assert_eq!(b[(x, y)].bg, source_color(Source::Global));
+        let (x, y) = cell_at(&screen, "repo   global");
+        assert_eq!(b[(x, y)].bg, theme::SURFACE);
+
+        v.prompt = None;
+        assert!(v.select(find(&v, "agent")));
+        v.begin_edit().unwrap();
+        let screen = text(&draw(&v, 100, 40));
+        assert!(line(&screen, "Tab copilot · claude").contains('▎'));
+        assert!(!screen.iter().any(|l| l.contains("overrides this")));
+    }
+
+    #[test]
+    fn remove_and_invalid_prompts_render_as_popups() {
+        let d = Dir::new("prompts");
+        let layers = d.layers("max_agents = 7", Some("max_agents = 4"), "");
+        let cfg = layers.config().unwrap();
+        let mut v = ConfigView::new(&layers, &cfg, &reload::State::default()).unwrap();
+        assert!(v.select(find(&v, "max_agents")));
+        v.begin_remove().unwrap();
+        let screen = text(&draw(&v, 100, 40));
+        assert!(line(&screen, "remove max_agents from repo?").contains('│'));
+        assert!(line(&screen, "falls back to global: 7").contains('│'));
+        assert!(line(&screen, " y  remove").contains("cancel"));
+        assert!(v.select(find(&v, "poll_secs")));
+        assert_eq!(
+            v.begin_remove().unwrap_err(),
+            "poll_secs is not set in a config file"
+        );
+        v.prompt = Some(Prompt::Invalid {
+            source: Source::Repo,
+            error: "repo.toml line 2, column 1: invalid table header".into(),
+        });
+        let b = draw(&v, 100, 40);
+        let screen = text(&b);
+        assert!(line(&screen, "the repo config is invalid").contains('│'));
+        let (x, y) = cell_at(&screen, "repo.toml line 2, column 1");
+        assert_eq!(b[(x, y)].fg, theme::RED);
+        assert!(line(&screen, " e  edit again").contains("keep the file as is"));
+        for (w, h) in [(24, 8), (6, 3), (1, 1)] {
+            draw(&v, w, h);
+        }
+    }
+
     #[test]
     fn renders_at_tiny_sizes() {
         let (mut v, _d) = view("tiny", |_| {});
         v.typing = true;
         v.filter = "a".into();
         for (w, h) in [(24, 8), (6, 3), (1, 1)] {
+            draw(&v, w, h);
+        }
+        v.typing = false;
+        v.filter.clear();
+        assert!(v.select(find(&v, "claude.bin")));
+        v.begin_edit().unwrap();
+        if let Some(Prompt::Edit(ed)) = &mut v.prompt {
+            ed.insert(&"x".repeat(300));
+            ed.error = Some("e ".repeat(100));
+        }
+        for (w, h) in [(100, 40), (24, 8), (6, 3), (1, 1)] {
             draw(&v, w, h);
         }
     }

@@ -42,8 +42,8 @@ Press `?` in the app for the full list.
 | Board | `hjkl` `gg` `G` move, `z` zoom focused column (`z`/`Esc` to exit), `/` filter (words match title/id, `label:x`, `p:1`, `p:0-2`; `Esc` clears), `Enter` open, `p` progress, `r` review, `i` inspect bead (`l` there shows the session log, `h` the timeline), `H` bead timeline (time per state, review rounds, ai verdicts), `e` open `$EDITOR` in worktree, `E` shell in the container or worktree, `n` new bead, `c`/`C` conversation (resume/fresh), `+`/`-` priority, `X` kill, `D` discard, `dd` delete bead, `F` retry with note, `s` release, `S` release all backlog, `P` pause/resume scheduling, `R` mark review, `V` ai review, `A` launch/resume, `t`/`T` check output/rerun, `U` revise from PR feedback (also in the review), `w` release the worktree of a Review or Awaiting PR bead so you can work on its branch (`sulla:released`, also in the review), `w` again reclaims it once the branch is not checked out elsewhere, `q` quit |
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree, `E` shell |
 | Review | `jk` `Ctrl-d/u` scroll (counts like `5j` work), `]f` `[f` files, `c` comment (`10c` covers ten lines from the cursor), `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR, with its unpublished stack parents in Review (`workflow = "pr"`), `w` release the worktree to work on the branch yourself (`w` again reclaims it), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree, `E` shell (diff reloads on return from either) |
-| Config (`:config`) | `jk` `Ctrl-d/u` `gg` `G` or mouse wheel move, `Enter`/`za` fold a table or expand a multi-line value, `zM`/`zR` fold/unfold all, `]]` `[[` next/prev table, `d` hide defaults, `/` filter by key path, `y` show `key = value` in the status line, `r` reload the config files, `q`/`Esc` close |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:reload` `:browse [bead\|slot]` (starts the app with `[incus.browse] up` first) `:browse stop [bead\|slot]` `:browse restart [bead\|slot]` |
+| Config (`:config`) | `jk` `Ctrl-d/u` `gg` `G` or mouse wheel move, `Enter`/`i` edit the value inline (`Ctrl-g` repo/global, `Tab` cycles enum values), `Space` toggle a boolean, `x` remove the key from its file, `e`/`E` edit the repo/global file in `$EDITOR`, `Enter` on a header or `za` fold a table or expand a multi-line value, `zM`/`zR` fold/unfold all, `]]` `[[` next/prev table, `d` hide defaults, `/` filter by key path, `y` show `key = value` in the status line, `r` reload the config files, `q`/`Esc` close |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:config edit [global]` `:reload` `:browse [bead\|slot]` (starts the app with `[incus.browse] up` first) `:browse stop [bead\|slot]` `:browse restart [bead\|slot]` |
 
 ## Config
 
@@ -64,6 +64,15 @@ saving as a config file. Colour is used on a terminal unless `NO_COLOR` is set.
 `:config` shows the same inside the TUI as a scrollable popup, with foldable tables, a filter, and
 a `runtime` source for values changed in the session (like `:max 5`). See
 [DOCS.md](DOCS.md#config-viewer).
+
+The popup also edits the config. `Enter` on a number, string, boolean or enum key opens a
+one-line editor under the row that writes to the repo file by default (`Ctrl-g` switches to the
+global one). The value is checked against the full config before anything is written, so a bad
+value shows its error in red and leaves the file alone. Writes change only that key and keep the
+file's comments and formatting, then the config reloads. `Space` toggles a boolean, `x` removes a
+key from the file that sets it, and `e`/`E` (or `:config edit [global]`) open the repo/global
+file in `$EDITOR`, validated and reloaded when the editor exits. See
+[DOCS.md](DOCS.md#editing-the-config).
 
 A running sulla reloads its config when either file changes on disk (created, edited or deleted),
 and on `:reload` or `r` in the `:config` popup. The status line sums it up, for example

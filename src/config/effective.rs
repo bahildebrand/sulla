@@ -44,8 +44,13 @@ impl Layer {
             }
             Err(e) => return Err(e).wrap_err_with(at),
         };
-        let table: toml::Table = toml::from_str(&text).wrap_err_with(at)?;
-        toml::from_str::<Config>(&text).wrap_err_with(at)?;
+        Self::parse(path, &text)
+    }
+
+    pub fn parse(path: &Path, text: &str) -> Result<Self> {
+        let at = || path.display().to_string();
+        let table: toml::Table = toml::from_str(text).wrap_err_with(at)?;
+        toml::from_str::<Config>(text).wrap_err_with(at)?;
         Ok(Self {
             path: path.to_path_buf(),
             table: Some(table),
@@ -150,6 +155,31 @@ impl Layers {
         let mut layers = self.clone();
         merge(&mut layers.runtime, changed(&running, &base));
         Ok(layers)
+    }
+
+    pub fn layer(&self, source: Source) -> Option<&Layer> {
+        match source {
+            Source::Global => self.global.as_ref(),
+            Source::Repo => Some(&self.repo),
+            _ => None,
+        }
+    }
+
+    pub fn layer_mut(&mut self, source: Source) -> Option<&mut Layer> {
+        match source {
+            Source::Global => self.global.as_mut(),
+            Source::Repo => Some(&mut self.repo),
+            _ => None,
+        }
+    }
+
+    pub fn sets(&self, source: Source, path: &[String]) -> bool {
+        let table = match source {
+            Source::Flag => Some(&self.flags),
+            Source::Runtime => Some(&self.runtime),
+            s => self.layer(s).and_then(|l| l.table.as_ref()),
+        };
+        table.is_some_and(|t| lookup(t, path).is_some())
     }
 
     pub fn source(&self, path: &[String]) -> Source {

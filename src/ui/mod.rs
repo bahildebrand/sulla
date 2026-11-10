@@ -141,11 +141,40 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
             status_spans(v.flash.as_deref().unwrap_or_default()),
         ]
         .concat(),
+        Mode::Config(v) if matches!(v.prompt, Some(config::Prompt::Edit(_))) => {
+            let cycle = match &v.prompt {
+                Some(config::Prompt::Edit(ed)) => !ed.kind.options().is_empty(),
+                _ => false,
+            };
+            let mut pairs = vec![
+                ("Enter", "save"),
+                ("Esc", "cancel"),
+                ("Ctrl-g", "repo/global"),
+            ];
+            if cycle {
+                pairs.push(("Tab S-Tab", "cycle"));
+            }
+            pairs.push(("Ctrl-u", "clear"));
+            [vec![tag("EDIT", theme::GREEN)], hints(&pairs)].concat()
+        }
+        Mode::Config(v) if matches!(v.prompt, Some(config::Prompt::Remove { .. })) => [
+            vec![tag("CONFIRM", theme::YELLOW)],
+            hints(&[("y", "remove"), ("any", "cancel")]),
+        ]
+        .concat(),
+        Mode::Config(v) if matches!(v.prompt, Some(config::Prompt::Invalid { .. })) => [
+            vec![tag("INVALID", theme::RED)],
+            hints(&[("e", "edit again"), ("Esc", "keep the file")]),
+        ]
+        .concat(),
         Mode::Config(_) => [
             vec![tag("CONFIG", theme::BLUE)],
             hints(&[
                 ("j k", "move"),
-                ("Enter", "fold/expand"),
+                ("Enter", "edit/fold"),
+                ("Space", "toggle"),
+                ("x", "remove"),
+                ("e E", "edit repo/global file"),
                 ("zM zR", "fold all/none"),
                 ("]] [[", "table"),
                 ("d", "defaults"),
@@ -373,11 +402,15 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :reload :browse [bead|slot] :browse stop [bead|slot])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config [edit [global]] :reload :browse [bead|slot] :browse stop [bead|slot])",
     ),
     (
         ":config",
         "effective config, grouped by table, with the layer that set each key",
+    ),
+    (
+        ":config edit [global]",
+        "open the repo (or global) config file in $EDITOR, validate and reload it",
     ),
     (
         ":reload",
@@ -456,7 +489,27 @@ const HELP: &[(&str, &str)] = &[
     ("Config", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move (mouse wheel too)"),
     ("]] / [[", "next / prev table"),
-    ("Enter / za", "fold the table, or expand a multi-line value"),
+    (
+        "Enter / i",
+        "edit the value inline (Enter on a header folds it, on a multi-line value expands it)",
+    ),
+    (
+        "  in the editor",
+        "Enter save, Esc cancel, Ctrl-g repo/global, Tab S-Tab cycle enum values",
+    ),
+    (
+        "Space",
+        "toggle a true/false key, written to the repo config",
+    ),
+    (
+        "x",
+        "remove the key from the file that sets it (asks first)",
+    ),
+    (
+        "e / E",
+        "edit the repo / global config file in $EDITOR, then validate and reload",
+    ),
+    ("za", "fold the table, or expand a multi-line value"),
     ("zM / zR", "fold / unfold every table"),
     ("d", "hide / show keys that have their default value"),
     ("/", "filter by key path, Enter keeps it, Esc clears it"),

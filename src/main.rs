@@ -271,6 +271,7 @@ fn suspend(terminal: &mut DefaultTerminal, gate: &Gate, s: Suspend) -> std::io::
     ratatui::restore();
     let cmd = match s {
         Suspend::Editor(dir) => editor_command(&editor_spec(), &dir),
+        Suspend::File(path) => file_command(&editor_spec(), &path),
         Suspend::Shell { cmd, place } => {
             println!("sulla: {place}, exit to return");
             Ok(cmd)
@@ -307,6 +308,13 @@ fn editor_command(spec: &str, dir: &Path) -> std::io::Result<Command> {
     Ok(cmd)
 }
 
+fn file_command(spec: &str, path: &Path) -> std::io::Result<Command> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut cmd = editor_command(spec, dir)?;
+    cmd.arg(path);
+    Ok(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +326,16 @@ mod tests {
         assert_eq!(c.get_args().collect::<Vec<_>>(), ["-u", "NONE"]);
         assert_eq!(c.get_current_dir(), Some(Path::new("/tmp")));
         assert!(editor_command("  ", Path::new("/tmp")).is_err());
+    }
+
+    #[test]
+    fn file_command_opens_the_file_from_its_directory() {
+        let c = file_command("vim -n", Path::new("/tmp/sulla/config.toml")).unwrap();
+        assert_eq!(c.get_program(), "vim");
+        assert_eq!(
+            c.get_args().collect::<Vec<_>>(),
+            ["-n", "/tmp/sulla/config.toml"]
+        );
+        assert_eq!(c.get_current_dir(), Some(Path::new("/tmp/sulla")));
     }
 }

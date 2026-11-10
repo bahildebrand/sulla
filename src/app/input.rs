@@ -4,9 +4,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 
 use crate::agent::{self, CHAT_ID};
 use crate::beads::{Column, State};
+use crate::config::effective::Source;
 use crate::filter::Filter;
 use crate::presets;
-use crate::ui::config::ConfigView;
+use crate::ui::config::{ConfigView, Prompt, Row};
 use crate::ui::keys;
 
 use super::{App, InputKind, Mode, NewBeadForm, View};
@@ -27,6 +28,11 @@ impl App {
                 2 => form.acceptance.push_str(&text.replace('\r', "")),
                 _ => {}
             },
+            Mode::Config(v) => {
+                if let Some(Prompt::Edit(ed)) = &mut v.prompt {
+                    ed.insert(&text.replace(['\r', '\n'], " "));
+                }
+            }
             _ => {}
         }
     }
@@ -347,7 +353,7 @@ impl App {
             },
             "chat" => self.open_chat(rest == "new"),
             "health" => self.open_health(),
-            "config" => self.open_config(),
+            "config" => self.config_command(rest),
             "reload" => self.reload_config(),
             "browse" => self.browse(rest),
             _ => self.status = format!("unknown command: {cmd}"),
@@ -446,6 +452,11 @@ impl App {
         let pending = self.pending.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         v.flash = None;
+        if let Some(prompt) = v.prompt.take() {
+            self.config_prompt_key(k, &mut v, prompt);
+            self.mode = Mode::Config(v);
+            return;
+        }
         if v.typing {
             match k.code {
                 KeyCode::Esc => {
@@ -488,9 +499,31 @@ impl App {
             KeyCode::Char('M') if pending == Some('z') => v.fold_all(true),
             KeyCode::Char('R') if pending == Some('z') => v.fold_all(false),
             KeyCode::Char(c @ ('g' | ']' | '[' | 'z')) => self.pending = Some(c),
-            KeyCode::Enter => {
-                if !v.toggle() {
-                    v.flash = Some("nothing to expand on this row".into());
+            KeyCode::Enter if matches!(v.current(), Some(Row::Header(_))) => {
+                v.toggle();
+            }
+            KeyCode::Enter | KeyCode::Char('i') => {
+                if let Err(e) = v.begin_edit() {
+                    if k.code == KeyCode::Enter {
+                        v.toggle();
+                    }
+                    v.flash = Some(e);
+                }
+            }
+            KeyCode::Char(' ') => self.config_toggle(&mut v),
+            KeyCode::Char('x') => {
+                if let Err(e) = v.begin_remove() {
+                    v.flash = Some(e);
+                }
+            }
+            KeyCode::Char(c @ ('e' | 'E')) => {
+                let source = if c == 'e' {
+                    Source::Repo
+                } else {
+                    Source::Global
+                };
+                if let Err(e) = self.edit_config_file(source) {
+                    v.flash = Some(e);
                 }
             }
             KeyCode::Char('d') => v.toggle_defaults(),

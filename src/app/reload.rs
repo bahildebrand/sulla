@@ -15,8 +15,12 @@ impl App {
     }
 
     pub(super) fn reload_config(&mut self) {
+        self.reload_config_forcing(None);
+    }
+
+    pub(super) fn reload_config_forcing(&mut self, key: Option<&[String]>) {
         self.config_watch.sync();
-        match self.apply_reload() {
+        match self.apply_reload(key) {
             Ok(summary) => {
                 tracing::info!("{summary}");
                 self.reload.error = None;
@@ -47,11 +51,15 @@ impl App {
         }
     }
 
-    fn apply_reload(&mut self) -> Result<String> {
+    fn apply_reload(&mut self, force: Option<&[String]>) -> Result<String> {
         let layers = self.layers.reload()?;
         let new = layers.config()?;
         let old = self.layers.config()?;
-        let plan = reload::plan(&self.cfg, &old, &new, &self.reload.restart)?;
+        let mut pending = self.reload.restart.clone();
+        if let Some(key) = force {
+            pending.entry(key.to_vec()).or_insert(None);
+        }
+        let plan = reload::plan(&self.cfg, &old, &new, &pending)?;
         let summary = plan.summary();
         let (backends_changed, notify_changed) = (
             plan.touched("copilot") || plan.touched("claude"),

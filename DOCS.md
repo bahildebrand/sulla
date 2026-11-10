@@ -567,7 +567,8 @@ in a scrollable popup.
   or `runtime` for a value changed in this session that no file or flag set, like `:max 5`.
   Edits to the files are picked up live, see [Reloading the config](#reloading-the-config).
 - Multi-line strings (`system_prompt`, `[incus] init`, `[hooks] setup`) show their first line and
-  `… (+N lines)`. `Enter` on the row expands the full text below it.
+  `… (+N lines)`. `Enter` on the row expands the full text below it (they are edited with `e`,
+  see [Editing the config](#editing-the-config)).
 - `Enter` or `za` on a table header folds it to `▸ incus (14)`, `zM` folds every table and `zR`
   opens them all. `]]` and `[[` jump to the next and previous table.
 - `d` hides keys that still have their default value. `/` filters by dotted key path (case
@@ -578,6 +579,48 @@ in a scrollable popup.
 - `r` reloads both config files and refreshes the popup, keeping folds, filter and cursor.
 - `j`/`k`, `Ctrl-d`/`Ctrl-u`, `gg`/`G` and the mouse wheel move. `q` closes, and so does `Esc`
   once no filter is active.
+
+### Editing the config
+
+The `:config` popup edits both config files. Writes go through `toml_edit`, so only the key you
+change is touched: comments, blank lines, key order and spacing elsewhere in the file stay as they
+were, and a trailing comment on the edited line is kept. A missing file (and its directory) is
+created on the first write.
+
+Inline, for numbers, strings, booleans and enum keys:
+
+- `Enter` or `i` on a row opens a one-line editor in a raised box under it, filled with the
+  current value. `←`/`→`, `Home`/`End` (`Ctrl-a`/`Ctrl-e`), `Backspace`, `Delete` and `Ctrl-u`
+  edit the text, and a paste goes into it.
+- Above the input a pill shows the file it writes to: `repo` by default, `Ctrl-g` switches to
+  `global` and back. When a higher layer sets the same key, a peach warning says so, for example
+  `⚠ repo overrides this` while writing `max_agents` to the global file of a repo that sets it.
+- Enum keys (`agent`, `sandbox`, `workflow`, `[pr] tool`) list their values under the input, and
+  `Tab`/`Shift-Tab` cycle through them. On a boolean, `Tab` and `Space` flip it.
+- Unset optional keys (`check`, `[claude] model`, `[incus] cpus`, ...) take whatever fits: `4`
+  becomes a number where the key wants one and a string where it wants text.
+- `Enter` saves. The change is applied to a copy of the layer and the whole config is
+  deserialized first; if that fails, the error shows in red under the input, the editor stays
+  open and the file is not touched. On success the file is written and the config reloads, with
+  the status line reading for example
+  `set max_agents = 6 in repo · config reloaded: 1 changed (max_agents 4→6)`. A saved key also
+  replaces a runtime value for it, like one from `:max 5`. `Esc` cancels.
+- `Space` on a boolean row flips it and writes it to the repo file straight away.
+- `x` removes the key from the file that sets it (the repo file when both do), after a confirm
+  that names the value it falls back to, for example `falls back to global: 7`. Unknown keys can
+  be removed the same way.
+- Arrays, tables and multi-line strings are not edited inline; `Enter` on them says
+  `press e to edit in $EDITOR`.
+
+In `$EDITOR`:
+
+- `e` opens the repo file and `E` the global one in `$VISUAL`, `$EDITOR` or `nvim`, creating an
+  empty file (and its directory) when it does not exist yet. `:config edit` and
+  `:config edit global` do the same from the command line.
+- When the editor exits, sulla reads both files again. If they are valid the config reloads and
+  the popup comes back at the same row. If not, a red popup shows the error with its line and
+  column: `e` opens the editor again, `Esc` keeps the file as it is. The running config stays
+  as it was until the file is fixed, and the next valid save reloads it as usual.
 
 ### Reloading the config
 
