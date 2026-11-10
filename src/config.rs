@@ -207,12 +207,48 @@ pub enum IncusAgent {
     Container,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowseConfig {
     pub ports: Vec<u16>,
     pub hosts: Vec<String>,
     pub url: Option<String>,
+    pub up: Option<String>,
+    pub down: Option<String>,
+    pub ready: Option<String>,
+    pub ready_timeout_secs: u64,
+}
+
+impl Default for BrowseConfig {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            hosts: Vec::new(),
+            url: None,
+            up: None,
+            down: None,
+            ready: None,
+            ready_timeout_secs: 300,
+        }
+    }
+}
+
+fn script(s: &Option<String>) -> Option<&str> {
+    s.as_deref().filter(|s| !s.trim().is_empty())
+}
+
+impl BrowseConfig {
+    pub fn up_script(&self) -> Option<&str> {
+        script(&self.up)
+    }
+
+    pub fn down_script(&self) -> Option<&str> {
+        script(&self.down)
+    }
+
+    pub fn ready_script(&self) -> Option<&str> {
+        script(&self.ready)
+    }
 }
 
 impl Default for IncusConfig {
@@ -516,9 +552,33 @@ mod tests {
                 ports: vec![8000, 8001],
                 hosts: vec!["*.memfault.test".into()],
                 url: Some("http://app.memfault.test:8000".into()),
+                ..BrowseConfig::default()
             }
         );
+        assert_eq!(cfg.incus.browse.up_script(), None);
+        assert_eq!(cfg.incus.browse.down_script(), None);
+        assert_eq!(cfg.incus.browse.ready_script(), None);
+        assert_eq!(cfg.incus.browse.ready_timeout_secs, 300);
         assert_eq!(cfg.incus.golden, "sulla-golden");
+    }
+
+    #[test]
+    fn incus_browse_parses_app_lifecycle() {
+        let cfg: Config = toml::from_str(
+            "[incus.browse]\nports = [8000]\nup = \"docker compose up -d\"\ndown = \"docker compose down\"\nready = \"curl -fsS http://127.0.0.1:8000/health\"\nready_timeout_secs = 60",
+        )
+        .unwrap();
+        let b = &cfg.incus.browse;
+        assert_eq!(b.up_script(), Some("docker compose up -d"));
+        assert_eq!(b.down_script(), Some("docker compose down"));
+        assert_eq!(
+            b.ready_script(),
+            Some("curl -fsS http://127.0.0.1:8000/health")
+        );
+        assert_eq!(b.ready_timeout_secs, 60);
+        let cfg: Config = toml::from_str("[incus.browse]\nup = \"  \"").unwrap();
+        assert_eq!(cfg.incus.browse.up_script(), None);
+        assert_eq!(cfg.incus.browse.ready_timeout_secs, 300);
     }
 
     #[test]

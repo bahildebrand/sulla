@@ -294,6 +294,7 @@ pub struct App {
     starting: HashSet<String>,
     launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
+    browsing: HashSet<String>,
     republishing: HashMap<String, String>,
     term: (u16, u16),
     pub suspend: Option<Suspend>,
@@ -402,6 +403,7 @@ impl App {
             starting: HashSet::new(),
             launching: HashMap::new(),
             publishing: HashSet::new(),
+            browsing: HashSet::new(),
             republishing: HashMap::new(),
             term: (80, 24),
             suspend: None,
@@ -447,20 +449,51 @@ impl App {
         self.published_slots = Some(slots);
     }
 
-    pub(super) fn browse(&mut self, target: &str) {
+    pub(super) fn browse(&mut self, args: &str) {
+        let mut words = args.split_whitespace();
+        let (stop, target) = match words.next() {
+            Some("stop") => (true, words.next()),
+            w => (false, w),
+        };
         let target = match target {
-            "" => match self.viewing().or_else(|| self.selected().map(|b| b.id)) {
+            Some(t) => t.to_string(),
+            None => match self.viewing().or_else(|| self.selected().map(|b| b.id)) {
                 Some(id) => id,
                 None => return self.status = "browse: no bead selected".into(),
             },
-            t => t.to_string(),
         };
-        self.status = match browse::resolve(&target, &self.slots.snapshot())
-            .and_then(|slot| browse::launch(&self.cfg, &self.repo, slot))
-        {
-            Ok(m) => m,
-            Err(e) => format!("browse: {e:#}"),
+        let job = match browse::job(
+            &self.cfg,
+            &self.repo,
+            &target,
+            &self.slots.snapshot(),
+            stop,
+            Some(self.sandbox.as_ref()),
+        ) {
+            Ok(j) => j,
+            Err(e) => return self.status = format!("browse: {e:#}"),
         };
+        let label = job.label.clone();
+        if !self.browsing.insert(label.clone()) {
+            return self.status = format!("browse {label}: already in progress");
+        }
+        self.status = format!("browse {label}: checking the app…");
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let status = |msg: String| {
+                let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                    app.status = msg;
+                })));
+            };
+            let r = job.run(&mut |m| status(format!("browse {label}: {m}")));
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                app.browsing.remove(&label);
+                app.status = match r {
+                    Ok(m) => m,
+                    Err(e) => format!("browse {label}: {e}").replace('\n', " | "),
+                };
+            })));
+        });
     }
 
     pub fn columns(&self) -> [Vec<&Bead>; Column::ALL.len()] {

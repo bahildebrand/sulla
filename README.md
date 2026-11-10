@@ -43,7 +43,7 @@ Press `?` in the app for the full list.
 | Progress | `i` insert (type into agent), `Esc Esc` or `Ctrl-]` leave insert, `jk` `Ctrl-u/d` `gg` `G` or mouse wheel scroll (forwarded to the agent when it handles the mouse itself), `e` edit worktree, `E` shell |
 | Review | `jk` `Ctrl-d/u` scroll (counts like `5j` work), `]f` `[f` files, `c` comment (`10c` covers ten lines from the cursor), `C` edit comment, `x` delete comments, `S` send comments, `y`/`n` accept/reject hunk, `Y`/`N` accept/reject file, `m` merge (needs passing checks), `M` force merge, `P` publish as GitHub PR, with its unpublished stack parents in Review (`workflow = "pr"`), `w` release the worktree to work on the branch yourself (`w` again reclaims it), `t`/`T` check output/rerun, `s` send feedback, `V` ai review, `D` discard, `F` retry with note, `p`/`a` swap to agent view (`i` straight into insert, `r` or `Esc` swaps back with comments kept), `e` edit worktree, `E` shell (diff reloads on return from either) |
 | Config (`:config`) | `jk` `Ctrl-d/u` `gg` `G` or mouse wheel move, `Enter`/`za` fold a table or expand a multi-line value, `zM`/`zR` fold/unfold all, `]]` `[[` next/prev table, `d` hide defaults, `/` filter by key path, `y` show `key = value` in the status line, `r` reload the config files, `q`/`Esc` close |
-| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:reload` `:browse [bead\|slot]` |
+| Command | `:q` `:q!` `:new <title>` `:max <n>` `:pause` `:resume` `:refresh` `:kill <id>` `:setup [id]` `:chat [new]` `:health` `:config` `:reload` `:browse [bead\|slot]` (starts the app with `[incus.browse] up` first) `:browse stop [bead\|slot]` |
 
 ## Config
 
@@ -120,6 +120,10 @@ agent = "host"            # where Claude runs: "host" (Bash goes to the containe
 ports = []                # container ports forwarded to the slot's host loopback IP
 hosts = []                # host patterns the slot's browser resolves to that IP
 # url = "http://app.example.test:8000" # page `sulla browse` opens, {ip} is substituted
+# up = "docker compose up -d"   # starts the app in the bead's worktree inside its slot
+# down = "docker compose down"  # stops it, for `:browse stop`
+# ready = "curl -fsS http://127.0.0.1:8000/health" # exits 0 once the app serves, default: first port answers
+ready_timeout_secs = 300  # how long to wait for `ready` after `up`
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
@@ -334,9 +338,13 @@ to other host ports, so sulla gives each slot its own loopback IP instead and ke
 
 ```toml
 [incus.browse]
-ports = [8000, 8001, 8002]
-hosts = ["*.memfault.test"]
-url = "http://app.memfault.test:8000"
+ports = [8000, 8001]
+hosts = ["*.example.test"]
+url = "http://app.example.test:8000"
+up = "docker compose up -d"
+down = "docker compose down"
+ready = "curl -fsS http://127.0.0.1:8000/health"
+ready_timeout_secs = 300
 ```
 
 - Slot `N` gets `127.0.100.<N+1>` (slot 0 is `127.0.100.1`). Before every bead sulla adds an
@@ -349,6 +357,25 @@ url = "http://app.memfault.test:8000"
 - `sulla browse <slot|bead>` (or `:browse [bead|slot]` in the TUI, defaulting to the selected
   bead) opens `url` (default `http://<ip>:<first port>`) for the slot. Without `hosts` the URL
   names the slot's IP directly, so it opens in your default browser through `xdg-open`.
+- With `up` set, sulla starts the app on demand before opening the browser. It first runs the
+  readiness check; if the app is not ready it runs `up`, then retries the check every second
+  until it passes or `ready_timeout_secs` (default 300) runs out, and only then opens the browser.
+  `up`, `down` and `ready` are shell snippets run with `bash -c` in the bead's worktree inside its
+  slot container, as your user, after `[incus] init`, with `SULLA_BEAD` and `SULLA_SLOT` set, the
+  same way agents and checks run. `up` may return once the app runs in the background
+  (`docker compose up -d`) or keep running in the foreground (`npm run dev`): sulla starts it
+  under `setsid nohup` and never waits for it to exit, though a non-zero exit fails the browse.
+- `ready` exits 0 once the app serves. Without it, the app is ready when the first of `ports`
+  accepts a connection on the slot's loopback IP from the host and keeps it open (the proxy
+  device accepts and then drops connections while nothing listens in the container).
+- Without `up`, `sulla browse` only opens the browser, as if the app were already running.
+- The output of every `up`, `down` and `ready` run is appended to `.sulla/logs/<bead>.app.log`.
+  When `up` fails or the app is not ready in time, the last 5 lines of that log are shown in the
+  status line (or on stderr for `sulla browse`) and no browser opens. In the TUI all of this runs
+  in the background, with progress (`starting app…`, `waiting for app (12s)`) in the status line.
+- `:browse stop [bead|slot]` (or `sulla browse --stop <slot|bead>`) runs `down` in the same way.
+- Starting or stopping the app needs the bead to hold a slot. A bead without one (it finished or
+  was killed) has to be resumed with `A` first.
 - With `hosts`, the browser has to resolve those names to the slot's IP, which needs Chrome's
   `--host-resolver-rules` (Firefox has no per-host equivalent). sulla uses your default browser
   when it is Chromium-based, else the first of `google-chrome`, `chromium`, `chromium-browser` on

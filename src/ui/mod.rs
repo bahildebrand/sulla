@@ -370,7 +370,7 @@ const HELP: &[(&str, &str)] = &[
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :reload :browse [bead|slot])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config :reload :browse [bead|slot] :browse stop [bead|slot])",
     ),
     (
         ":config",
@@ -379,6 +379,14 @@ const HELP: &[(&str, &str)] = &[
     (
         ":reload",
         "reread both config files now (also automatic when either changes on disk)",
+    ),
+    (
+        ":browse [bead|slot]",
+        "start the app with [incus.browse] up if it is not ready, then open it in a browser",
+    ),
+    (
+        ":browse stop [bead|slot]",
+        "stop the app with [incus.browse] down (output in .sulla/logs/<bead>.app.log)",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),

@@ -1703,3 +1703,57 @@ fn editing_the_config_file_reloads_automatically() {
     assert_eq!(h.app.cfg.max_agents, 7);
     assert_eq!(h.app.status, "config reloaded: 1 changed (max_agents 2→7)");
 }
+
+#[test]
+fn browse_runs_the_app_lifecycle_off_the_ui_thread() {
+    let mut h = Harness::new("browse", &[("t-1", Some(State::Running))]);
+    h.app.cfg.sandbox = crate::config::SandboxKind::Incus;
+    h.app.cfg.incus.browse = crate::config::BrowseConfig {
+        ports: vec![8000],
+        up: Some("echo booting".into()),
+        ready: Some("echo not yet; false".into()),
+        ready_timeout_secs: 1,
+        ..Default::default()
+    };
+    h.app.browse("t-1");
+    assert_eq!(
+        h.app.status,
+        "browse: t-1 has no slot, press A to resume it"
+    );
+    assert_eq!(h.app.slots.acquire("t-1", 2), Some(0));
+    std::fs::create_dir_all(h.app.git.worktree_path("t-1")).unwrap();
+    let called = Instant::now();
+    h.app.browse("t-1");
+    assert!(called.elapsed() < Duration::from_millis(500));
+    assert_eq!(h.app.status, "browse t-1: checking the app…");
+    h.app.browse("t-1");
+    assert_eq!(h.app.status, "browse t-1: already in progress");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen = Vec::new();
+    while h.app.browsing.contains("t-1") {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let ev = h.rx.recv_timeout(wait).expect("browse did not finish");
+        if matches!(ev, Event::Finished(_)) {
+            h.app.dispatch(ev);
+            seen.push(h.app.status.clone());
+        }
+    }
+    assert!(
+        seen.contains(&"browse t-1: starting app…".to_string()),
+        "{seen:?}"
+    );
+    let last = seen.last().unwrap();
+    assert!(
+        last.starts_with("browse t-1: app was not ready within 1s"),
+        "{last}"
+    );
+    assert!(last.contains(" | booting"), "{last}");
+    assert!(last.contains(" | not yet"), "{last}");
+    assert!(!last.contains("--- "), "{last}");
+    assert!(h.dir.join(".sulla/logs/t-1.app.log").exists());
+    h.app.browse("stop t-1");
+    assert_eq!(
+        h.app.status,
+        "browse: browse stop needs [incus.browse] down"
+    );
+}

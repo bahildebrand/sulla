@@ -51,6 +51,10 @@ impl std::fmt::Display for RebaseConflict {
 
 impl std::error::Error for RebaseConflict {}
 
+pub fn worktree_dir(repo: &Path, id: &str) -> PathBuf {
+    repo.join(".sulla").join("worktrees").join(id)
+}
+
 pub fn toplevel(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(
         run(path, &["rev-parse", "--show-toplevel"])?.trim(),
@@ -113,7 +117,7 @@ impl Git {
     }
 
     pub fn worktree_path(&self, id: &str) -> PathBuf {
-        self.repo.join(".sulla").join("worktrees").join(id)
+        worktree_dir(&self.repo, id)
     }
 
     pub fn ensure_ignored(&self) -> Result<()> {

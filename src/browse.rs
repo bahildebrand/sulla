@@ -7,9 +7,12 @@ use std::process::{Command, Stdio};
 use color_eyre::{Result, eyre::eyre};
 use serde::{Deserialize, Serialize};
 
+mod lifecycle;
+
 use crate::agent;
 use crate::config::{BrowseConfig, Config, SandboxKind};
-use crate::sandbox;
+use crate::sandbox::{self, Sandbox};
+use lifecycle::Plan;
 
 const BROWSERS: [&str; 3] = ["google-chrome", "chromium", "chromium-browser"];
 const CHROMIUM: [&str; 6] = ["chrome", "chromium", "brave", "edge", "vivaldi", "opera"];
@@ -141,14 +144,19 @@ fn spawn(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-pub fn launch(cfg: &Config, repo: &Path, slot: usize) -> Result<String> {
+pub fn supported(cfg: &Config) -> Result<()> {
     if cfg.sandbox != SandboxKind::Incus {
         return Err(eyre!("browse needs sandbox = \"incus\""));
     }
-    let browse = &cfg.incus.browse;
-    if browse.ports.is_empty() {
+    if cfg.incus.browse.ports.is_empty() {
         return Err(eyre!("browse needs [incus.browse] ports"));
     }
+    Ok(())
+}
+
+pub fn launch(cfg: &Config, repo: &Path, slot: usize) -> Result<String> {
+    supported(cfg)?;
+    let browse = &cfg.incus.browse;
     let ip = loopback(slot).ok_or_else(|| eyre!("slot {slot} has no loopback address"))?;
     let target = url(browse, &ip).unwrap_or_else(|| ip.clone());
     let browser = pick(
@@ -216,20 +224,98 @@ fn read_slots(repo: &Path) -> BTreeMap<String, usize> {
         .unwrap_or_default()
 }
 
-pub fn resolve(target: &str, slots: &BTreeMap<String, usize>) -> Result<usize> {
-    if let Ok(n) = target.parse() {
-        return Ok(n);
+pub fn resolve(target: &str, slots: &BTreeMap<String, usize>) -> Result<(Option<String>, usize)> {
+    if let Ok(n) = target.parse::<usize>() {
+        let bead = slots
+            .iter()
+            .filter(|(_, s)| **s == n)
+            .map(|(id, _)| agent::reviewed_bead(id).unwrap_or(id).to_string())
+            .next();
+        return Ok((bead, n));
     }
     slots
         .get(target)
         .or_else(|| slots.get(&agent::review_id(target)))
-        .copied()
-        .ok_or_else(|| eyre!("{target} has no slot, is sulla running it?"))
+        .map(|s| (Some(target.to_string()), *s))
+        .ok_or_else(|| eyre!("{target} has no slot, press A to resume it"))
 }
 
-pub fn run(cfg: &Config, repo: &Path, target: &str) -> Result<()> {
-    let slot = resolve(target, &read_slots(repo))?;
-    println!("{}", launch(cfg, repo, slot)?);
+pub struct Job {
+    pub label: String,
+    pub slot: usize,
+    stop: bool,
+    plan: Option<Plan>,
+    cfg: Config,
+    repo: PathBuf,
+}
+
+pub fn needs_sandbox(cfg: &Config, stop: bool) -> bool {
+    stop || cfg.incus.browse.up_script().is_some()
+}
+
+pub fn job(
+    cfg: &Config,
+    repo: &Path,
+    target: &str,
+    slots: &BTreeMap<String, usize>,
+    stop: bool,
+    sandbox: Option<&dyn Sandbox>,
+) -> Result<Job> {
+    supported(cfg)?;
+    let (bead, slot) = resolve(target, slots)?;
+    let browse = &cfg.incus.browse;
+    if stop && browse.down_script().is_none() {
+        return Err(eyre!("browse stop needs [incus.browse] down"));
+    }
+    let plan = if needs_sandbox(cfg, stop) {
+        let bead = bead
+            .clone()
+            .ok_or_else(|| eyre!("slot {slot} has no bead, press A on one to resume it"))?;
+        let sandbox = sandbox.ok_or_else(|| eyre!("browse needs the incus sandbox"))?;
+        Some(lifecycle::plan(browse, repo, &bead, slot, sandbox)?)
+    } else {
+        None
+    };
+    Ok(Job {
+        label: bead.unwrap_or_else(|| format!("slot {slot}")),
+        slot,
+        stop,
+        plan,
+        cfg: cfg.clone(),
+        repo: repo.to_path_buf(),
+    })
+}
+
+impl Job {
+    pub fn run(&self, report: &mut dyn FnMut(String)) -> Result<String> {
+        match (&self.plan, self.stop) {
+            (Some(plan), true) => {
+                plan.stop(report)?;
+                Ok(format!("stopped the app for slot {}", self.slot))
+            }
+            (plan, _) => {
+                if let Some(plan) = plan {
+                    plan.ensure_up(report)?;
+                }
+                launch(&self.cfg, &self.repo, self.slot)
+            }
+        }
+    }
+}
+
+pub fn run(cfg: &Config, repo: &Path, target: &str, stop: bool) -> Result<()> {
+    supported(cfg)?;
+    let slots = read_slots(repo);
+    resolve(target, &slots)?;
+    let sandbox = needs_sandbox(cfg, stop)
+        .then(|| sandbox::build(cfg, repo))
+        .transpose()?;
+    let job = job(cfg, repo, target, &slots, stop, sandbox.as_deref())?;
+    let label = job.label.clone();
+    let msg = job
+        .run(&mut |m| eprintln!("browse {label}: {m}"))
+        .map_err(|e| eyre!("browse {label}: {e}"))?;
+    println!("{msg}");
     Ok(())
 }
 
@@ -298,6 +384,7 @@ mod tests {
             ports: vec![8000, 8001, 8002],
             hosts: vec!["*.memfault.test".into()],
             url: Some("http://app.memfault.test:8000".into()),
+            ..BrowseConfig::default()
         }
     }
 
@@ -330,6 +417,7 @@ mod tests {
             ports: vec![3000],
             hosts: vec!["a.test".into(), "*.b.test".into()],
             url: None,
+            ..BrowseConfig::default()
         };
         let args = browser_args(Path::new("/p"), &cfg, "127.0.100.1");
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
@@ -456,12 +544,81 @@ mod tests {
 
     #[test]
     fn resolve_takes_slot_number_or_bead_or_its_reviewer() {
-        let slots = BTreeMap::from([("a-1".to_string(), 0), ("b-2~review".to_string(), 2)]);
-        assert_eq!(resolve("3", &slots).unwrap(), 3);
-        assert_eq!(resolve("a-1", &slots).unwrap(), 0);
-        assert_eq!(resolve("b-2", &slots).unwrap(), 2);
+        let slots = BTreeMap::from([
+            ("a-1".to_string(), 0),
+            ("a-1~review".to_string(), 0),
+            ("b-2~review".to_string(), 2),
+        ]);
+        let some = |b: &str, s| (Some(b.to_string()), s);
+        assert_eq!(resolve("3", &slots).unwrap(), (None, 3));
+        assert_eq!(resolve("0", &slots).unwrap(), some("a-1", 0));
+        assert_eq!(resolve("2", &slots).unwrap(), some("b-2", 2));
+        assert_eq!(resolve("a-1", &slots).unwrap(), some("a-1", 0));
+        assert_eq!(resolve("b-2", &slots).unwrap(), some("b-2", 2));
         let err = resolve("c-3", &slots).unwrap_err().to_string();
-        assert!(err.contains("c-3 has no slot"), "{err}");
+        assert_eq!(err, "c-3 has no slot, press A to resume it");
+    }
+
+    fn incus(browse: BrowseConfig) -> Config {
+        let mut cfg = Config {
+            sandbox: SandboxKind::Incus,
+            ..Config::default()
+        };
+        cfg.incus.browse = browse;
+        cfg
+    }
+
+    #[test]
+    fn job_without_up_opens_the_slot_as_before() {
+        let repo = Path::new("/r");
+        let slots = BTreeMap::from([("a-1".to_string(), 0)]);
+        let cfg = incus(memfault());
+        let j = job(&cfg, repo, "a-1", &slots, false, None).unwrap();
+        assert!(j.plan.is_none());
+        assert_eq!((j.label.as_str(), j.slot), ("a-1", 0));
+        let j = job(&cfg, repo, "5", &slots, false, None).unwrap();
+        assert!(j.plan.is_none());
+        assert_eq!((j.label.as_str(), j.slot), ("slot 5", 5));
+        assert!(!needs_sandbox(&cfg, false));
+        let err = job(&cfg, repo, "b-2", &slots, false, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(err, "b-2 has no slot, press A to resume it");
+        let err = job(&cfg, repo, "a-1", &slots, true, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("needs [incus.browse] down"), "{err}");
+        let mut worktree = cfg.clone();
+        worktree.sandbox = SandboxKind::Worktree;
+        let err = job(&worktree, repo, "a-1", &slots, false, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("sandbox = \"incus\""), "{err}");
+    }
+
+    #[test]
+    fn job_with_up_plans_for_the_bead_holding_the_slot() {
+        let repo = Path::new("/r");
+        let slots = BTreeMap::from([("a-1~review".to_string(), 1)]);
+        let cfg = incus(BrowseConfig {
+            up: Some("make up".into()),
+            down: Some("make down".into()),
+            ..memfault()
+        });
+        assert!(needs_sandbox(&cfg, false));
+        let sb = sandbox::Worktree;
+        let j = job(&cfg, repo, "1", &slots, false, Some(&sb)).unwrap();
+        assert!(j.plan.is_some());
+        assert_eq!((j.label.as_str(), j.slot), ("a-1", 1));
+        assert!(job(&cfg, repo, "a-1", &slots, true, Some(&sb)).is_ok());
+        let err = job(&cfg, repo, "4", &slots, false, Some(&sb))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("slot 4 has no bead"), "{err}");
     }
 
     #[test]

@@ -64,10 +64,17 @@ enum Cmd {
     Init,
     #[command(about = "Run the `[hooks] setup` command again in a bead's worktree")]
     Setup { bead: String },
-    #[command(about = "Open the app a slot serves in a browser")]
+    #[command(
+        about = "Open the app a slot serves in a browser, starting it first with `[incus.browse] up`"
+    )]
     Browse {
         #[arg(help = "Slot number, or a bead the running sulla holds a slot for")]
         target: String,
+        #[arg(
+            long,
+            help = "Stop the app with `[incus.browse] down` instead of opening it"
+        )]
+        stop: bool,
     },
     #[command(about = "List each slot with its container, host address and beads")]
     Status,
@@ -126,7 +133,7 @@ fn main() -> Result<()> {
     let cfg = layers.config().wrap_err("loading config")?;
     match &args.cmd {
         Some(Cmd::Setup { bead }) => return setup::cli(&repo, &cfg, bead),
-        Some(Cmd::Browse { target }) => return browse::run(&cfg, &repo, target),
+        Some(Cmd::Browse { target, stop }) => return browse::run(&cfg, &repo, target, *stop),
         Some(Cmd::Status) => return browse::status(&cfg, &repo),
         _ => {}
     }
