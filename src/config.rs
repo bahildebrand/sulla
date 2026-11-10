@@ -139,16 +139,27 @@ pub enum NotifyMethod {
 #[serde(rename_all = "lowercase")]
 pub enum Trigger {
     Review,
-    Stalled,
     Waiting,
+    Dead,
+    Stalled,
     Budget,
     Pr,
+    Chat,
+}
+
+fn triggers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Trigger>, D::Error> {
+    let mut on = Vec::<Trigger>::deserialize(d)?;
+    if on.contains(&Trigger::Stalled) && !on.contains(&Trigger::Dead) {
+        on.push(Trigger::Dead);
+    }
+    Ok(on)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotifyConfig {
     pub methods: Vec<NotifyMethod>,
+    #[serde(deserialize_with = "triggers")]
     pub on: Vec<Trigger>,
     pub cooldown_secs: u64,
     pub notify_send: String,
@@ -161,8 +172,8 @@ impl Default for NotifyConfig {
             methods: vec![NotifyMethod::Bell],
             on: vec![
                 Trigger::Review,
-                Trigger::Stalled,
                 Trigger::Waiting,
+                Trigger::Dead,
                 Trigger::Budget,
                 Trigger::Pr,
             ],
@@ -501,6 +512,25 @@ mod tests {
         );
         assert_eq!(cfg.notify.on, [Trigger::Review]);
         assert_eq!(cfg.notify.tmux_option, "@sulla");
+    }
+
+    #[test]
+    fn notify_defaults_to_dead_but_not_stalled_or_chat() {
+        let on = NotifyConfig::default().on;
+        assert!(on.contains(&Trigger::Dead));
+        assert!(!on.contains(&Trigger::Stalled));
+        assert!(!on.contains(&Trigger::Chat));
+        let cfg: Config = toml::from_str("[notify]\non = [\"dead\", \"chat\"]").unwrap();
+        assert_eq!(cfg.notify.on, [Trigger::Dead, Trigger::Chat]);
+    }
+
+    #[test]
+    fn old_stalled_trigger_means_dead_and_stalled() {
+        let cfg: Config = toml::from_str("[notify]\non = [\"review\", \"stalled\"]").unwrap();
+        assert_eq!(
+            cfg.notify.on,
+            [Trigger::Review, Trigger::Stalled, Trigger::Dead]
+        );
     }
 
     #[test]

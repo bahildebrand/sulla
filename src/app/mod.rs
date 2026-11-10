@@ -267,6 +267,8 @@ pub struct App {
     pub pr_watch: pr::Watch,
     pr_refresh: Option<Sender<()>>,
     pub stalls: HashMap<String, Stall>,
+    waits: HashMap<String, Instant>,
+    review_notified: HashSet<String>,
     stall_checked: Option<Instant>,
     budget_runs: HashMap<String, budget::Run>,
     budget_checked: Option<Instant>,
@@ -347,6 +349,8 @@ impl App {
             pr_watch,
             pr_refresh,
             stalls: HashMap::new(),
+            waits: HashMap::new(),
+            review_notified: HashSet::new(),
             stall_checked: None,
             budget_runs: HashMap::new(),
             budget_checked: None,
@@ -743,6 +747,9 @@ impl App {
     fn edit_local(&mut self, id: &str, f: impl FnOnce(&mut Bead)) {
         if let Some(b) = self.all.iter_mut().find(|b| b.id == id) {
             f(b);
+            if b.state() != Some(State::Review) {
+                self.review_notified.remove(id);
+            }
         }
     }
 
@@ -784,17 +791,11 @@ impl App {
 
     fn on_bell(&mut self, id: &str) {
         if id == CHAT_ID {
-            return self.notify(Trigger::Waiting, CHAT_ID, "conversation");
+            return self.notify(Trigger::Chat, CHAT_ID, "conversation");
         }
-        let reviewer = agent::reviewed_bead(id);
-        let Some(b) = self.bead(reviewer.unwrap_or(id)) else {
-            return;
-        };
-        if reviewer.is_none() && b.state() == Some(State::Review) {
-            return;
+        if agent::reviewed_bead(id).is_none() && self.awaiting_input(id) {
+            self.waits.insert(id.to_string(), Instant::now());
         }
-        let (bid, title) = (b.id.clone(), b.title.clone());
-        self.notify(Trigger::Waiting, &bid, &title);
     }
 
     fn dispatch(&mut self, ev: Event) {
@@ -863,11 +864,14 @@ impl App {
                 });
                 self.notifier.retain(|id, t| {
                     id == CHAT_ID
-                        || all.iter().any(|b| {
-                            b.id == id
-                                && b.status != "closed"
-                                && (t != Trigger::Review || b.state() == Some(State::Review))
-                        })
+                        || all
+                            .iter()
+                            .any(|b| b.id == id && b.status != "closed" && flag_holds(t, b))
+                });
+                self.review_notified.retain(|id| {
+                    all.iter().any(|b| {
+                        b.id == *id && b.status != "closed" && b.state() == Some(State::Review)
+                    })
                 });
                 let before = self.pr_watch.beads.len();
                 self.pr_watch
@@ -954,6 +958,16 @@ impl App {
         self.sandbox.shutdown();
         self.notifier.shutdown();
         self.beads.shutdown();
+    }
+}
+
+fn flag_holds(t: Trigger, b: &Bead) -> bool {
+    match t {
+        Trigger::Review => b.state() == Some(State::Review),
+        Trigger::Waiting | Trigger::Dead | Trigger::Stalled => {
+            matches!(b.state(), Some(State::Running | State::Reviewing))
+        }
+        Trigger::Budget | Trigger::Pr | Trigger::Chat => true,
     }
 }
 

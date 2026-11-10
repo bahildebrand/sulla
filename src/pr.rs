@@ -162,6 +162,8 @@ pub struct PrComment {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub approval: bool,
+    #[serde(default)]
+    pub bot: bool,
 }
 
 impl PrComment {
@@ -193,12 +195,24 @@ pub struct PrStatus {
     pub state: PrState,
     pub comments: Vec<PrComment>,
     pub checks: Checks,
+    pub head: Option<String>,
+    pub viewer: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Author {
     #[serde(default)]
     login: String,
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    is_bot: bool,
+}
+
+impl Author {
+    fn bot(&self) -> bool {
+        self.is_bot || self.kind == "Bot" || self.login.ends_with("[bot]")
+    }
 }
 
 #[derive(Deserialize)]
@@ -235,6 +249,7 @@ struct RawView {
     reviews: Vec<RawItem>,
     #[serde(default)]
     status_check_rollup: Option<Vec<RawCheck>>,
+    head_ref_oid: Option<String>,
 }
 
 fn comment(r: RawItem) -> Option<PrComment> {
@@ -245,6 +260,7 @@ fn comment(r: RawItem) -> Option<PrComment> {
         ("", _) => return None,
         (b, _) => b.to_string(),
     };
+    let bot = r.author.as_ref().is_some_and(Author::bot);
     Some(PrComment {
         id: match r.id {
             serde_json::Value::String(s) => s,
@@ -260,6 +276,7 @@ fn comment(r: RawItem) -> Option<PrComment> {
         line: r.line.or(r.original_line),
         created_at: r.created_at,
         approval,
+        bot,
     })
 }
 
@@ -327,10 +344,21 @@ fn parse_view(json: &str, inline: Vec<PrComment>) -> Result<PrStatus> {
         state,
         comments,
         checks: checks(v.status_check_rollup.as_deref().unwrap_or(&[])),
+        head: v.head_ref_oid.filter(|h| !h.is_empty()),
+        viewer: None,
     })
 }
 
-pub fn status(repo: &Path, number: u64) -> Result<PrStatus> {
+pub fn viewer(repo: &Path) -> Result<String> {
+    let login = gh(repo, &["api", "user", "--jq", ".login"])?;
+    let login = login.trim();
+    if login.is_empty() {
+        bail!("gh api user returned no login");
+    }
+    Ok(login.to_string())
+}
+
+pub fn status(repo: &Path, number: u64, viewer: Option<&str>) -> Result<PrStatus> {
     let n = number.to_string();
     let view = gh(
         repo,
@@ -339,7 +367,7 @@ pub fn status(repo: &Path, number: u64) -> Result<PrStatus> {
             "view",
             &n,
             "--json",
-            "state,comments,reviews,statusCheckRollup",
+            "state,comments,reviews,statusCheckRollup,headRefOid",
         ],
     )?;
     let inline = gh(
@@ -350,7 +378,9 @@ pub fn status(repo: &Path, number: u64) -> Result<PrStatus> {
             &format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments"),
         ],
     )?;
-    parse_view(&view, parse_inline(&inline)?)
+    let mut s = parse_view(&view, parse_inline(&inline)?)?;
+    s.viewer = viewer.map(String::from);
+    Ok(s)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +397,8 @@ pub struct Seen {
     pub revising: Option<Feedback>,
     #[serde(default)]
     pub addressed: Vec<String>,
+    #[serde(default)]
+    pub failed_head: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,11 +424,18 @@ pub struct Activity {
     pub comments: Vec<PrComment>,
     pub failing: Option<Vec<String>>,
     pub closed: bool,
+    pub feedback: bool,
+    pub approved: bool,
+    pub checks_failed: bool,
 }
 
 impl Activity {
     pub fn is_empty(&self) -> bool {
         self.comments.is_empty() && self.failing.is_none() && !self.closed
+    }
+
+    pub fn actionable(&self) -> bool {
+        self.closed || self.feedback || self.approved || self.checks_failed
     }
 }
 
@@ -415,12 +454,22 @@ impl Seen {
             _ => None,
         };
         self.checks = s.checks.clone();
+        let head = s.head.clone().unwrap_or_default();
+        let checks_failed =
+            matches!(s.checks, Checks::Failing(_)) && self.failed_head.as_ref() != Some(&head);
+        if checks_failed {
+            self.failed_head = Some(head);
+        }
         let closed = s.state == PrState::Closed && !self.closed;
         self.closed = s.state == PrState::Closed;
+        let human = |c: &&PrComment| !c.bot && s.viewer.as_deref() != Some(c.author.as_str());
         Activity {
+            feedback: fresh.iter().filter(human).any(|c| !c.approval),
+            approved: fresh.iter().filter(human).any(|c| c.approval),
             comments: fresh,
             failing,
             closed,
+            checks_failed,
         }
     }
 
@@ -782,6 +831,7 @@ mod tests {
             line: None,
             created_at: None,
             approval: false,
+            bot: false,
         });
         more.checks = Checks::Pending;
         let a = seen.update(&more);
@@ -810,6 +860,7 @@ mod tests {
             line: at.map(|(_, l)| l),
             created_at: None,
             approval: false,
+            bot: false,
         }
     }
 
@@ -870,7 +921,7 @@ mod tests {
         let a = Activity {
             comments: vec![comment("rc1", "alice", "fix", Some(("a.rs", 1)))],
             failing: Some(vec!["test".into()]),
-            closed: false,
+            ..Default::default()
         };
         assert!(seen.queue(&a));
         assert!(!seen.queue(&Activity {
@@ -899,6 +950,46 @@ mod tests {
             body.replace('\n', "\\n").replace('`', "")
         );
         assert!(parse_view(&marked, Vec::new()).unwrap().comments.is_empty());
+    }
+
+    #[test]
+    fn marks_bot_authors_and_ignores_them_and_the_viewer_for_notifying() {
+        let view = r#"{"state":"OPEN","headRefOid":"h1","comments":[
+            {"id":"IC_1","author":{"login":"renovate[bot]"},"body":"bump"},
+            {"id":"IC_2","author":{"login":"me"},"body":"note to self"}
+        ]}"#;
+        let inline = r#"[{"id": 3, "user": {"login": "copilot", "type": "Bot"}, "body": "nit", "path": "a.rs", "line": 1}]"#;
+        let mut s = parse_view(view, parse_inline(inline).unwrap()).unwrap();
+        assert_eq!(s.head.as_deref(), Some("h1"));
+        let bots: Vec<bool> = s.comments.iter().map(|c| c.bot).collect();
+        assert_eq!(bots, [true, false, true]);
+        s.viewer = Some("me".into());
+        let mut seen = Seen::default();
+        let a = seen.update(&s);
+        assert_eq!(a.comments.len(), 3);
+        assert!(!a.actionable());
+        s.comments
+            .push(comment("IC_4", "alice", "please fix", None));
+        let a = seen.update(&s);
+        assert!(a.feedback && a.actionable());
+    }
+
+    #[test]
+    fn checks_fail_once_per_head() {
+        let mut seen = Seen::default();
+        let mut s = parse_view(r#"{"state":"OPEN","headRefOid":"h1"}"#, Vec::new()).unwrap();
+        let mut poll = |checks: Checks, head: &str| {
+            s.checks = checks;
+            s.head = Some(head.into());
+            seen.update(&s).checks_failed
+        };
+        let failing = |n: &str| Checks::Failing(vec![n.into()]);
+        assert!(poll(failing("test"), "h1"));
+        assert!(!poll(failing("lint"), "h1"));
+        assert!(!poll(Checks::Pending, "h1"));
+        assert!(!poll(failing("test"), "h1"));
+        assert!(!poll(Checks::Passing, "h2"));
+        assert!(poll(failing("test"), "h2"));
     }
 
     #[test]

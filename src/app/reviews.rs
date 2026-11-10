@@ -21,8 +21,18 @@ impl App {
         }
     }
 
-    fn notify_review(&mut self, id: &str) {
-        if let Some(title) = self.bead(id).map(|b| b.title.clone()) {
+    pub(super) fn notify_review(&mut self, id: &str) {
+        if self.reviewing(id) || self.is_starting(&agent::review_id(id)) {
+            return;
+        }
+        let Some(title) = self
+            .bead(id)
+            .filter(|b| b.status != "closed" && b.state() == Some(State::Review))
+            .map(|b| b.title.clone())
+        else {
+            return;
+        };
+        if self.review_notified.insert(id.to_string()) {
             self.notify(Trigger::Review, id, &title);
         }
     }

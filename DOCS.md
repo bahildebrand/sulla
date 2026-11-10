@@ -327,7 +327,7 @@ re-submits as `resubmitted <bead> with Graphite`. With `tool = "gh"` none of thi
 
 With `workflow = "pr"`, a background thread polls every Awaiting PR bead's PR, and every released
 bead's (`sulla:released`) PR, every
-`[pr] poll_secs` (default 120) with `gh pr view <n> --json state,comments,reviews,statusCheckRollup`
+`[pr] poll_secs` (default 120) with `gh pr view <n> --json state,comments,reviews,statusCheckRollup,headRefOid`
 plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments.
 
 - **Merged**: the bead is closed with reason `merged via PR #<n>`, its agent and reviewer stop,
@@ -338,18 +338,25 @@ plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for inline review comments
   revise, released) are cleared and the bead is closed, but the branch is left alone and not
   untracked from Graphite: the status line says
   `PR #<n> merged, closed <bead>; <branch> is checked out in <path>, delete it yourself`.
+  A merge does not notify.
 - **Closed without merging**: a `pr` notification fires and a status message is shown. The bead
   stays in Awaiting PR.
 - **New comments, reviews or failing checks**: new items are appended to the bead's notes (which
   the agent prompt includes) as `PR #<n> review activity:` and `PR #<n> checks failing: <names>`,
-  and a `pr` notification fires. Reviews with an empty body count only when they approve or
-  request changes. For a released bead nothing is queued for `U`, since the branch is yours.
+  and a `pr` notification fires when someone other than you comments or reviews, or approves the
+  PR (`approved, ready to merge` in the status line). Comments by bots (logins ending in `[bot]`,
+  or user type `Bot`) and by the authenticated `gh` user (`gh api user`) are noted and counted but
+  do not notify. Failing checks notify once per head commit, when the overall result turns
+  failing; a rerun failing on the same commit and checks recovering do not. Reviews with an empty
+  body count only when they approve or request changes. For a released bead nothing is queued for
+  `U`, since the branch is yours.
 - **Released without a PR**: a bead released from Review before it was published has no
   `pr:<number>` label. Each poll looks up `gh pr list --head <branch> --state open`, and once you
   open a PR yourself (for example with `gt submit`), sulla adds `pr:<number>`, the bead moves to
   Awaiting PR and its PR is watched from then on.
 
-Seen comment and review ids, the last checks result, the closed flag and unaddressed feedback are
+Seen comment and review ids, the last checks result, the head commit whose failing checks were
+notified, the closed flag and unaddressed feedback are
 kept per bead in `.sulla/pr-watch.json`, so restarts do not refire. Cards show `✉<n>` for the
 number of PR comments seen, `↻<n>` for unaddressed feedback (`↻<n>, U to revise` while the bead
 waits on its PR), `⟳ci`, `✓ci` or `✗ci` for the checks result and `closed` when the PR was closed.
@@ -358,7 +365,8 @@ Publishing triggers an immediate poll.
 ### Revising from PR feedback
 
 New comments and reviews (approvals excluded) and newly failing checks on an open PR are queued
-as unaddressed feedback. Sulla never revises on its own: it notifies (the `pr` trigger), appends
+as unaddressed feedback. Sulla never revises on its own: it notifies (the `pr` trigger, except for
+comments by bots or by the `gh` user, and failing checks only once per head commit), appends
 the feedback to the bead notes and shows `↻<n>, U to revise` on the card. `U` on the board or in
 the bead's review moves it to `sulla:revise`. Revise beads are scheduled like pending work, so
 they wait for a free slot under `max_agents`, ordered by priority, and evict parked Review agents

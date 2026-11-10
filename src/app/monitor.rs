@@ -15,6 +15,8 @@ use super::{App, Mode, View};
 
 const STALL_POLL: Duration = Duration::from_secs(1);
 const RATE_SCAN_EVERY: Duration = Duration::from_secs(1);
+pub(super) const WAIT_CONFIRM: Duration = Duration::from_secs(20);
+const WAIT_SLACK: Duration = Duration::from_secs(5);
 
 impl App {
     pub(super) fn check_stalls(&mut self) {
@@ -51,8 +53,9 @@ impl App {
         let prev = std::mem::replace(&mut self.stalls, next);
         for id in prev.keys().filter(|id| !self.stalls.contains_key(*id)) {
             let bid = agent::reviewed_bead(id).unwrap_or(id);
-            self.notifier
-                .retain(|i, t| i != bid || matches!(t, Trigger::Review | Trigger::Budget));
+            self.notifier.retain(|i, t| {
+                i != bid || matches!(t, Trigger::Review | Trigger::Budget | Trigger::Pr)
+            });
         }
         let fresh: Vec<(String, Stall)> = self
             .stalls
@@ -61,16 +64,52 @@ impl App {
             .map(|(id, s)| (id.clone(), *s))
             .collect();
         for (id, s) in fresh {
-            let bid = agent::reviewed_bead(&id).unwrap_or(&id);
-            let Some((bid, title)) = self.bead(bid).map(|b| (b.id.clone(), b.title.clone())) else {
-                continue;
-            };
-            let trigger = match s {
-                Stall::Waiting => Trigger::Waiting,
-                Stall::Stalled | Stall::Dead => Trigger::Stalled,
-            };
             tracing::info!("agent {id} {s:?}");
+            let trigger = match s {
+                Stall::Waiting => {
+                    self.waits.entry(id).or_insert(now);
+                    continue;
+                }
+                Stall::Stalled => Trigger::Stalled,
+                Stall::Dead => Trigger::Dead,
+            };
+            self.notify_agent(trigger, &id);
+        }
+        self.confirm_waits(now);
+    }
+
+    fn notify_agent(&mut self, trigger: Trigger, id: &str) {
+        let bid = agent::reviewed_bead(id).unwrap_or(id);
+        if let Some((bid, title)) = self.bead(bid).map(|b| (b.id.clone(), b.title.clone())) {
             self.notify(trigger, &bid, &title);
+        }
+    }
+
+    pub(super) fn awaiting_input(&self, id: &str) -> bool {
+        let Some(a) = self.agents.get(id).filter(|a| a.alive) else {
+            return false;
+        };
+        let (bid, want) = match agent::reviewed_bead(id) {
+            Some(b) => (b, State::Reviewing),
+            None => (id, State::Running),
+        };
+        self.bead(bid)
+            .is_some_and(|b| b.status != "closed" && b.state() == Some(want))
+            && (want == State::Running || a.prompting(&self.cfg.stall))
+    }
+
+    pub(super) fn confirm_waits(&mut self, now: Instant) {
+        for (id, since) in std::mem::take(&mut self.waits) {
+            if !self.awaiting_input(&id) {
+                continue;
+            }
+            if now.saturating_duration_since(since) < WAIT_CONFIRM {
+                self.waits.insert(id, since);
+                continue;
+            }
+            if self.agents[&id].idle(now) + WAIT_SLACK >= WAIT_CONFIRM {
+                self.notify_agent(Trigger::Waiting, &id);
+            }
         }
     }
 

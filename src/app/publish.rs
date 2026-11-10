@@ -852,12 +852,17 @@ impl App {
         if activity.failing.is_some() {
             what.push("checks failing".into());
         }
+        if activity.approved {
+            what.push("approved, ready to merge".into());
+        }
         if queued {
             what.push("U to revise".into());
         }
         let what = what.join(", ");
         self.status = format!("PR #{number} for {id}: {what}");
-        self.notify(Trigger::Pr, id, &format!("{title}: PR #{number} {what}"));
+        if activity.actionable() {
+            self.notify(Trigger::Pr, id, &format!("{title}: PR #{number} {what}"));
+        }
     }
 
     fn pr_merged(&mut self, id: &str, number: u64) {

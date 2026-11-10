@@ -647,6 +647,13 @@ impl Agent {
         now.saturating_duration_since(self.activity.lock().unwrap().last_progress)
     }
 
+    pub fn prompting(&self, cfg: &StallConfig) -> bool {
+        shows_prompt(
+            &self.parser.lock().unwrap().screen().contents(),
+            &cfg.prompts,
+        )
+    }
+
     pub fn exited(&mut self) {
         self.alive = false;
         self.exited.get_or_insert_with(Instant::now);

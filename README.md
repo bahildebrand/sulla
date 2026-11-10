@@ -137,8 +137,8 @@ keep_minutes = 30         # a bead you browsed is evicted last for this long, 0 
 
 [notify]
 methods = ["bell"]        # any of "bell", "desktop" (notify-send), "tmux"
-on = ["review", "stalled", "waiting", "budget", "pr"]
-cooldown_secs = 60        # min gap between repeat notifications for one bead
+on = ["review", "waiting", "dead", "budget", "pr"] # also "stalled" and "chat", off by default
+cooldown_secs = 60        # within this, only a more actionable notification for one bead fires
 notify_send = "notify-send"
 tmux_option = "@sulla"    # tmux user option set while beads need attention
 
@@ -173,10 +173,32 @@ Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
 
 ## Notifications
 
-Sulla notifies when a bead moves to Ready for Review, an agent stalls, an agent goes over its
-budget, an agent rings the terminal bell (waiting on input), or a watched PR gets new comments,
-failing checks or is closed without merging (`pr`). Opening the bead's progress or review view clears its flag.
-Notifications are skipped for the bead you are currently viewing.
+Sulla notifies only when you have to act. Everything else stays visible on the cards and the
+status line. Triggers, set with `[notify] on`:
+
+- `review`: a bead lands in Ready for Review waiting on you, once per arrival. Not while an auto AI
+  review is about to start or running. A revised PR bead reaching `revised, Enter to review` counts.
+- `waiting`: a running agent rang the bell, or one of the `[stall] prompts` strings is in the bottom
+  rows of its screen, and 20 seconds later the bead is still running and the agent is alive and
+  has made no screen progress. Finishing a bead (`sulla=review`) or resuming output cancels it, so a
+  bead that finishes gives one `review` notification. Bells from AI reviewers are ignored; an AI
+  reviewer only notifies `waiting` when a `[stall] prompts` string is on its screen.
+- `dead`: the bead is in progress but its agent exited (for over 30 seconds) or failed to start.
+- `stalled` (off by default): the agent's screen has not meaningfully changed for
+  `[stall] minutes`. Long builds and tests trip it. Before `dead` existed `stalled` covered both, so
+  `"stalled"` in `on` still turns on `dead` too.
+- `budget`: an agent went over its budget and was held.
+- `pr`: a watched PR has new comments or reviews from someone other than you (including changes
+  requested), was approved (`ready to merge`), was closed without merging, or its checks turned
+  failing, once per head commit. Comments by bots (logins ending in `[bot]`, or GitHub user type
+  `Bot`) and by the `gh` user are still noted on the bead and counted on the card but do not
+  notify. Checks recovering and a merged PR do not notify.
+- `chat` (off by default): the conversation agent rang the bell.
+
+When several notifications for one bead happen within `cooldown_secs`, only one that is more
+actionable than the bead's current flag fires (`dead` > `budget` > `waiting` > `stalled` >
+`review` > `pr`), and the flag keeps the most actionable one. Opening the bead's progress or review
+view clears its flag. Notifications are skipped for the bead you are currently viewing.
 
 - `bell` rings the terminal bell in the terminal running sulla.
 - `desktop` runs `notify-send -a sulla <summary> <title>`.
@@ -188,9 +210,9 @@ waiting on input: it rang the bell, or one of the `[stall] prompts` strings is i
 of its screen, and it has been quiet for a few seconds. A card shows `⧗` when the agent's screen
 text has not meaningfully changed for `[stall] minutes`. Spinners, elapsed timers and counters are
 ignored, so an agent stuck spinning on a hung request is still caught. A card shows a bold `✗` when
-the bead is in progress but its agent exited (for over 30 seconds) or failed to start. These fire
-notifications (`waiting` for the first, `stalled` for the others), and the flag clears once the
-agent makes progress again.
+the bead is in progress but its agent exited (for over 30 seconds) or failed to start. These map to
+the `waiting`, `stalled` and `dead` triggers, and the flag clears once the agent makes progress
+again or the bead leaves progress.
 
 Bell-based waiting detection relies on the agent ringing the bell. For Claude Code, run
 `claude config set --global preferredNotifChannel terminal_bell`.

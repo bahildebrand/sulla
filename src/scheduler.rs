@@ -315,9 +315,16 @@ pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Interval, tx: Sender<Even
     let (refresh_tx, refresh_rx): (Sender<()>, Receiver<()>) = channel();
     let repo = git.repo.clone();
     std::thread::spawn(move || {
+        let mut viewer = None;
         loop {
             match beads.list_all() {
                 Ok(all) => {
+                    let watched = watched_prs(&all);
+                    if viewer.is_none() && !watched.is_empty() {
+                        viewer = pr::viewer(&repo)
+                            .inspect_err(|e| tracing::warn!("gh viewer login: {e:#}"))
+                            .ok();
+                    }
                     for id in unlinked_releases(&all) {
                         let number = match pr::find(&repo, &git.branch(&id)) {
                             Ok(Some(found)) => found.number,
@@ -332,8 +339,9 @@ pub fn spawn_pr_watcher(beads: Beads, git: Git, every: Interval, tx: Sender<Even
                             return;
                         }
                     }
-                    for (id, number) in watched_prs(&all) {
-                        let r = pr::status(&repo, number).map_err(|e| e.to_string());
+                    for (id, number) in watched {
+                        let r =
+                            pr::status(&repo, number, viewer.as_deref()).map_err(|e| e.to_string());
                         if tx.send(Event::Pr(id, number, r)).is_err() {
                             return;
                         }

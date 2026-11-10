@@ -9,7 +9,9 @@ pub struct Notifier {
     cfg: NotifyConfig,
     tmux: bool,
     flagged: BTreeMap<String, Trigger>,
-    last: HashMap<String, (Trigger, Instant)>,
+    last: HashMap<String, Instant>,
+    #[cfg(test)]
+    pub fired: Vec<(Trigger, String)>,
 }
 
 impl Notifier {
@@ -19,6 +21,8 @@ impl Notifier {
             cfg,
             flagged: BTreeMap::new(),
             last: HashMap::new(),
+            #[cfg(test)]
+            fired: Vec::new(),
         };
         n.sync_tmux();
         n
@@ -39,6 +43,8 @@ impl Notifier {
         }
         let (summary, body) = message(trigger, id, title);
         tracing::info!("notify: {summary}");
+        #[cfg(test)]
+        self.fired.push((trigger, id.to_string()));
         for m in &self.cfg.methods {
             match m {
                 NotifyMethod::Bell => {
@@ -62,18 +68,22 @@ impl Notifier {
             return false;
         }
         let cooldown = Duration::from_secs(self.cfg.cooldown_secs);
-        if let Some((t, at)) = self.last.get(id)
-            && now.duration_since(*at) < cooldown
-            && (*t == trigger || trigger == Trigger::Waiting)
-        {
+        let flag = self.flagged.get(id).copied();
+        let recent = self
+            .last
+            .get(id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < cooldown);
+        if recent && flag.is_some_and(|f| rank(f) >= rank(trigger)) {
             return false;
         }
-        self.last.insert(id.to_string(), (trigger, now));
-        self.flagged.insert(id.to_string(), trigger);
+        self.last.insert(id.to_string(), now);
+        let keep = flag.filter(|f| rank(*f) > rank(trigger)).unwrap_or(trigger);
+        self.flagged.insert(id.to_string(), keep);
         true
     }
 
     pub fn clear(&mut self, id: &str) {
+        self.last.remove(id);
         if self.flagged.remove(id).is_some() {
             self.sync_tmux();
         }
@@ -113,11 +123,23 @@ fn uses_tmux(cfg: &NotifyConfig) -> bool {
     cfg.methods.contains(&NotifyMethod::Tmux) && std::env::var_os("TMUX").is_some()
 }
 
+fn rank(trigger: Trigger) -> u8 {
+    match trigger {
+        Trigger::Dead => 6,
+        Trigger::Budget => 5,
+        Trigger::Waiting | Trigger::Chat => 4,
+        Trigger::Stalled => 3,
+        Trigger::Review => 2,
+        Trigger::Pr => 1,
+    }
+}
+
 fn message(trigger: Trigger, id: &str, title: &str) -> (String, String) {
     let what = match trigger {
         Trigger::Review => "ready for review",
+        Trigger::Dead => "agent died",
         Trigger::Stalled => "stalled",
-        Trigger::Waiting => "waiting for input",
+        Trigger::Waiting | Trigger::Chat => "waiting for input",
         Trigger::Budget => "over budget, held",
         Trigger::Pr => "has PR activity",
     };
@@ -157,16 +179,45 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_dedupes_and_waiting_yields_to_others() {
+    fn cooldown_keeps_the_most_actionable_notification() {
+        let mut n = notifier(NotifyConfig::default().on);
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        assert!(n.should_fire(Trigger::Pr, "a", t0));
+        assert!(!n.should_fire(Trigger::Pr, "a", at(5)));
+        assert!(n.should_fire(Trigger::Review, "a", at(6)));
+        assert!(!n.should_fire(Trigger::Pr, "a", at(7)));
+        assert!(n.should_fire(Trigger::Waiting, "a", at(8)));
+        assert!(!n.should_fire(Trigger::Review, "a", at(9)));
+        assert!(n.should_fire(Trigger::Budget, "a", at(10)));
+        assert!(n.should_fire(Trigger::Dead, "a", at(11)));
+        assert!(!n.should_fire(Trigger::Waiting, "a", at(12)));
+        assert_eq!(n.flagged["a"], Trigger::Dead);
+        assert!(n.should_fire(Trigger::Review, "a", at(80)));
+        assert_eq!(n.flagged["a"], Trigger::Dead);
+        assert!(n.should_fire(Trigger::Waiting, "b", t0));
+        assert_eq!(n.tmux_value().as_deref(), Some("sulla:2"));
+    }
+
+    #[test]
+    fn a_resolved_flag_no_longer_suppresses_lesser_triggers() {
         let mut n = notifier(NotifyConfig::default().on);
         let t0 = Instant::now();
         assert!(n.should_fire(Trigger::Waiting, "a", t0));
-        assert!(!n.should_fire(Trigger::Waiting, "a", t0 + Duration::from_secs(5)));
-        assert!(n.should_fire(Trigger::Review, "a", t0 + Duration::from_secs(6)));
-        assert!(!n.should_fire(Trigger::Waiting, "a", t0 + Duration::from_secs(7)));
-        assert!(!n.should_fire(Trigger::Review, "a", t0 + Duration::from_secs(8)));
-        assert!(n.should_fire(Trigger::Review, "a", t0 + Duration::from_secs(70)));
-        assert!(n.should_fire(Trigger::Waiting, "b", t0));
+        n.retain(|_, t| t != Trigger::Waiting);
+        assert!(n.should_fire(Trigger::Review, "a", t0 + Duration::from_secs(2)));
+        assert_eq!(n.flagged["a"], Trigger::Review);
+        n.clear("a");
+        assert!(n.should_fire(Trigger::Review, "a", t0 + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn defaults_fire_dead_but_not_stalled_or_chat() {
+        let mut n = notifier(NotifyConfig::default().on);
+        let t0 = Instant::now();
+        assert!(n.should_fire(Trigger::Dead, "a", t0));
+        assert!(!n.should_fire(Trigger::Stalled, "b", t0));
+        assert!(!n.should_fire(Trigger::Chat, "c", t0));
     }
 
     #[test]
