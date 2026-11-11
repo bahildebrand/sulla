@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::Utc;
 use color_eyre::{Result, eyre::eyre};
 
@@ -5,9 +7,12 @@ use crate::agent::{self, Launch};
 use crate::beads::{Bead, Column, State};
 use crate::config::Trigger;
 use crate::sandbox::Outcome;
+use crate::scheduler::fmt_duration;
 use crate::ui::review::{self, AiReview, Comment, Diff, Verdict};
 
 use super::{App, View};
+
+const REVIEW_STARTUP: Duration = Duration::from_secs(10);
 
 impl App {
     pub(super) fn start_review(&mut self, id: &str) {
@@ -144,15 +149,21 @@ impl App {
         let repo = self.repo.clone();
         let system_prompt = self.cfg.system_prompt.clone();
         let app_note = agent::app_note(&self.cfg);
-        let session = rid.clone();
+        let id = rid.clone();
+        let session = agent::review_session(&repo, &bead.id);
+        self.review_sessions
+            .entry(bead.id.clone())
+            .or_default()
+            .push(session.clone());
+        self.watch_usage();
         let build = move || {
             let prompt = agent::with_app(
                 agent::review_prompt(&b, &git.branch(&b.id), &git.upstream(&b.id, &base)),
                 app_note.as_deref(),
             );
             let launch = Launch {
-                session: agent::session_id(&repo, &session),
-                id: session,
+                session,
+                id,
                 bead: true,
                 worktree,
                 resume: false,
@@ -170,6 +181,54 @@ impl App {
             }
             done(app, r);
         });
+    }
+
+    pub(super) fn reviewer_exited(&mut self, rid: &str) {
+        let Some(bead) = agent::reviewed_bead(rid).map(String::from) else {
+            return;
+        };
+        let Some(a) = self.agents.get(rid) else {
+            return;
+        };
+        let (code, life) = (a.exit_code(), a.lifetime());
+        let failed = code.is_some_and(|c| c != 0) || life < REVIEW_STARTUP;
+        if !failed || !self.reviewing(&bead) {
+            return;
+        }
+        let generation = a.generation;
+        let mut why = match code {
+            Some(c) => format!("reviewer exited with code {c} after {}", fmt_duration(life)),
+            None => format!("reviewer exited after {}", fmt_duration(life)),
+        };
+        if let Some(line) = a.last_line() {
+            why = format!("{why}: {line}");
+        }
+        let (id, rid) = (bead.clone(), rid.to_string());
+        self.bd(
+            move |beads| beads.show(&id).map(|b| b.state()),
+            move |app, r| {
+                let same = app
+                    .agents
+                    .get(&rid)
+                    .is_some_and(|a| a.generation == generation && !a.alive);
+                let finished = r.is_ok_and(|s| s != Some(State::Reviewing));
+                if same && !finished && app.reviewing(&bead) {
+                    app.review_failed(&bead, &rid, &why);
+                }
+            },
+        );
+    }
+
+    fn review_failed(&mut self, id: &str, rid: &str, why: &str) {
+        tracing::warn!("ai review of {id} failed: {why}");
+        self.remove_agent(rid, Outcome::Exited);
+        self.leave_progress(rid);
+        self.auto_rounds.remove(id);
+        self.edit_local(id, |b| b.set_state_label(Some(State::Review)));
+        let bead = id.to_string();
+        self.bd_run(move |beads| beads.set_state(&bead, State::Review));
+        self.notify_review(id);
+        self.status = format!("ai review of {id} failed: {why}, left in review");
     }
 
     pub(super) fn collect_ai_review(&mut self, id: &str, notify: bool) {

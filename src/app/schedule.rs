@@ -29,12 +29,16 @@ impl App {
         for rid in stale {
             tracing::info!("stopping reviewer {rid}");
             self.remove_agent(&rid, Outcome::Killed);
-            if matches!(&self.view, View::Progress(v) if *v == rid) {
-                if matches!(self.mode, Mode::Insert) {
-                    self.mode = Mode::Normal;
-                }
-                self.view = View::Board;
+            self.leave_progress(&rid);
+        }
+    }
+
+    pub(super) fn leave_progress(&mut self, id: &str) {
+        if matches!(&self.view, View::Progress(v) if v == id) {
+            if matches!(self.mode, Mode::Insert) {
+                self.mode = Mode::Normal;
             }
+            self.view = View::Board;
         }
     }
 

@@ -255,6 +255,13 @@ impl App {
                 let sessions = [b.id.clone(), agent::review_id(&b.id)]
                     .iter()
                     .map(|id| agent::session_id(&self.repo, id))
+                    .chain(
+                        self.review_sessions
+                            .get(&b.id)
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    )
                     .collect();
                 let kind = agent::selection(b, self.cfg.agent).0;
                 (b.id.clone(), kind, sessions)

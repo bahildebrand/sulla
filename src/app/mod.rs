@@ -240,6 +240,7 @@ pub struct App {
     repo: PathBuf,
     chat_session: Option<String>,
     chat_sessions: Vec<String>,
+    review_sessions: HashMap<String, Vec<String>>,
     beads: Beads,
     git: Git,
     backends: HashMap<AgentKind, Box<dyn Backend>>,
@@ -373,6 +374,7 @@ impl App {
             repo,
             chat_session: None,
             chat_sessions: Vec::new(),
+            review_sessions: HashMap::new(),
             beads,
             git,
             backends,
@@ -895,6 +897,7 @@ impl App {
                     {
                         self.mode = Mode::Normal;
                     }
+                    self.reviewer_exited(&id);
                 }
             }
             Event::Snapshot(Ok(s)) => {
@@ -959,6 +962,8 @@ impl App {
                 });
                 self.auto_rounds
                     .retain(|id, _| all.iter().any(|b| b.id == *id && b.status != "closed"));
+                self.review_sessions
+                    .retain(|id, _| all.iter().any(|b| b.id == *id));
                 let entered = self.entered_review();
                 let ids: Vec<String> = entered.iter().map(|(id, _)| id.clone()).collect();
                 let republished = self.republish_resolved(&ids);

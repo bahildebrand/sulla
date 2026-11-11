@@ -15,11 +15,13 @@ use crate::sandbox::Prepare;
 use crate::scheduler::Idle;
 
 type Finished = Arc<Mutex<Vec<(usize, String, Outcome)>>>;
+type Sessions = Arc<Mutex<Vec<(String, String)>>>;
 
 struct Gated {
     gate: Arc<Mutex<()>>,
     prepared: Arc<Mutex<Vec<String>>>,
     finished: Finished,
+    sessions: Sessions,
 }
 
 impl Sandbox for Gated {
@@ -40,9 +42,13 @@ impl Sandbox for Gated {
         &self,
         _slot: usize,
         _kind: AgentKind,
-        _launch: &Launch,
+        launch: &Launch,
         cmd: CommandBuilder,
     ) -> Result<CommandBuilder> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .push((launch.id.clone(), launch.session.clone()));
         Ok(cmd)
     }
 
@@ -68,6 +74,8 @@ struct Harness {
     gate: Arc<Mutex<()>>,
     prepared: Arc<Mutex<Vec<String>>>,
     finished: Finished,
+    sessions: Sessions,
+    skipped: Vec<Event>,
 }
 
 impl Harness {
@@ -115,10 +123,12 @@ impl Harness {
         let gate = Arc::new(Mutex::new(()));
         let prepared = Arc::new(Mutex::new(Vec::new()));
         let finished = Finished::default();
+        let sessions = Sessions::default();
         app.sandbox = Box::new(Gated {
             gate: gate.clone(),
             prepared: prepared.clone(),
             finished: finished.clone(),
+            sessions: sessions.clone(),
         });
         app.all = beads
             .iter()
@@ -140,6 +150,8 @@ impl Harness {
             gate,
             prepared,
             finished,
+            sessions,
+            skipped: Vec::new(),
         }
     }
 
@@ -161,6 +173,8 @@ impl Harness {
             let ev = self.rx.recv_timeout(wait).expect("launch did not finish");
             if matches!(ev, Event::Finished(_)) {
                 self.app.dispatch(ev);
+            } else {
+                self.skipped.push(ev);
             }
         }
     }
@@ -193,6 +207,37 @@ impl Harness {
 
     fn finished(&self) -> Vec<(usize, String, Outcome)> {
         self.finished.lock().unwrap().clone()
+    }
+
+    fn sessions(&self, id: &str) -> Vec<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, s)| s.clone())
+            .collect()
+    }
+
+    fn dispatch_exit(&mut self, id: &str) {
+        let exited = |ev: &Event| matches!(ev, Event::AgentExited(i, _) if i == id);
+        if let Some(at) = self.skipped.iter().position(exited) {
+            let ev = self.skipped.remove(at);
+            self.app.dispatch(ev);
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let ev = self.rx.recv_timeout(wait).expect("agent did not exit");
+            if exited(&ev) {
+                self.app.dispatch(ev);
+                return;
+            }
+            if matches!(ev, Event::Finished(_)) {
+                self.app.dispatch(ev);
+            }
+        }
     }
 }
 
@@ -334,6 +379,60 @@ fn review_launch_marks_reviewing_when_it_starts() {
     h.pump();
     assert_eq!(*done.lock().unwrap(), Some(true));
     assert!(h.app.agents.contains_key(&rid));
+    assert_eq!(h.state("t-1"), Some(State::Reviewing));
+}
+
+#[test]
+fn each_review_round_gets_a_fresh_session() {
+    let mut h = Harness::new("review-again", &[("t-1", Some(State::Review))]);
+    h.app.git.ensure_worktree("t-1", "main").unwrap();
+    let rid = agent::review_id("t-1");
+    h.app.start_review("t-1");
+    h.pump();
+    assert!(h.app.agents.contains_key(&rid));
+    assert_eq!(h.state("t-1"), Some(State::Reviewing));
+    h.app
+        .edit_local("t-1", |b| b.set_state_label(Some(State::Review)));
+    h.app.reconcile();
+    assert!(!h.app.agents.contains_key(&rid));
+    h.app.start_review("t-1");
+    h.pump();
+    assert!(h.app.agents.contains_key(&rid));
+    assert_eq!(h.state("t-1"), Some(State::Reviewing));
+    let sessions = h.sessions(&rid);
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert_ne!(sessions[0], sessions[1]);
+    assert_eq!(h.app.review_sessions["t-1"], sessions);
+}
+
+#[test]
+fn reviewer_that_dies_at_startup_returns_the_bead_to_review() {
+    let mut h = Harness::new("review-dies", &[("t-1", Some(State::Review))]);
+    h.app.git.ensure_worktree("t-1", "main").unwrap();
+    let rid = agent::review_id("t-1");
+    h.app.start_review("t-1");
+    h.pump();
+    assert_eq!(h.state("t-1"), Some(State::Reviewing));
+    assert!(h.app.slots.get(&rid).is_some());
+    h.dispatch_exit(&rid);
+    while h.state("t-1") != Some(State::Review) {
+        let ev = h.rx.recv_timeout(Duration::from_secs(20)).unwrap();
+        if matches!(ev, Event::Finished(_)) {
+            h.app.dispatch(ev);
+        }
+    }
+    let status = h.app.status.clone();
+    h.pump();
+    assert!(!h.app.agents.contains_key(&rid));
+    assert_eq!(h.app.slots.get(&rid), None);
+    assert_eq!(h.app.free_slots(), 2);
+    assert!(
+        status.starts_with("ai review of t-1 failed: reviewer exited with code 0 after "),
+        "{status}"
+    );
+    assert!(status.ends_with(", left in review"), "{status}");
+    h.app.start_review("t-1");
+    h.pump();
     assert_eq!(h.state("t-1"), Some(State::Reviewing));
 }
 

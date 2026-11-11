@@ -28,6 +28,8 @@ const PROMPT_QUIET: Duration = Duration::from_secs(3);
 const BELL_GRACE: Duration = Duration::from_secs(2);
 const PROMPT_ROWS: usize = 15;
 const EXIT_GRACE: Duration = Duration::from_secs(30);
+const REAP_TRIES: u32 = 10;
+const REAP_POLL: Duration = Duration::from_millis(5);
 const POLICY_LOADING: &str = "Managed account policy is still loading";
 const PROMPT_RETRY_DELAY: Duration = Duration::from_secs(2);
 const PROMPT_ACCEPTED: Duration = Duration::from_secs(45);
@@ -217,12 +219,21 @@ pub fn chat_prompt(base: &str, prefix: &str, max_agents: usize) -> String {
     )
 }
 
-pub fn chat_session(repo: &std::path::Path) -> String {
-    let nonce = std::time::SystemTime::now()
+fn nonce() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    session_id(repo, &format!("{CHAT_ID}{nonce}"))
+    format!("{now}.{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+pub fn chat_session(repo: &std::path::Path) -> String {
+    session_id(repo, &format!("{CHAT_ID}{}", nonce()))
+}
+
+pub fn review_session(repo: &std::path::Path, bead_id: &str) -> String {
+    session_id(repo, &format!("{}{}", review_id(bead_id), nonce()))
 }
 
 pub fn session_id(repo: &std::path::Path, bead_id: &str) -> String {
@@ -530,7 +541,9 @@ static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
 pub struct Agent {
     pub parser: Arc<Mutex<vt100::Parser<Bell>>>,
     pub alive: bool,
+    started: Instant,
     exited: Option<Instant>,
+    code: Option<u32>,
     activity: Arc<Mutex<Activity>>,
     pub generation: u64,
     retry: Option<PromptRetry>,
@@ -633,7 +646,9 @@ impl Agent {
         Ok(Self {
             parser,
             alive: true,
+            started: now,
             exited: None,
+            code: None,
             activity,
             generation,
             retry: None,
@@ -656,7 +671,31 @@ impl Agent {
 
     pub fn exited(&mut self) {
         self.alive = false;
+        if self.exited.is_none() {
+            self.code = self.reap();
+        }
         self.exited.get_or_insert_with(Instant::now);
+    }
+
+    fn reap(&mut self) -> Option<u32> {
+        for _ in 0..REAP_TRIES {
+            match self.child.try_wait() {
+                Ok(Some(s)) => return Some(s.exit_code()),
+                Ok(None) => std::thread::sleep(REAP_POLL),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    pub fn exit_code(&self) -> Option<u32> {
+        self.code
+    }
+
+    pub fn lifetime(&self) -> Duration {
+        self.exited
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started)
     }
 
     pub fn stall(&self, now: Instant, cfg: &StallConfig) -> Option<Stall> {
@@ -1065,6 +1104,31 @@ mod tests {
         assert_eq!(text.matches("session started").count(), 2);
         assert!(text.contains("first") && text.contains("second"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review_sessions_are_fresh_each_round() {
+        let repo = std::path::Path::new("/r");
+        let a = review_session(repo, "x-1");
+        let b = review_session(repo, "x-1");
+        assert_ne!(a, b);
+        assert_ne!(a, session_id(repo, &review_id("x-1")));
+        assert_eq!(a.len(), 36);
+    }
+
+    #[test]
+    fn exit_code_and_lifetime_are_recorded_on_exit() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let mut a = Agent::spawn(cmd, "x-1", 10, 40, None, tx).unwrap();
+        assert_eq!(exit_generation(&rx), a.generation);
+        assert_eq!(a.exit_code(), None);
+        a.exited();
+        assert_eq!(a.exit_code(), Some(3));
+        let life = a.lifetime();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(a.lifetime(), life);
     }
 
     #[test]
