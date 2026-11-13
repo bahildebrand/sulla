@@ -936,11 +936,8 @@ mod tests {
         );
         let ready = answer_once("200 OK", r#"{"items":[],"has_more":false}"#);
         assert_eq!(ready.readiness(), Readiness::Ready);
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
         let down = Http {
-            base: format!("http://127.0.0.1:{port}"),
+            base: "http://127.0.0.1:0".into(),
             ..answer_once("200 OK", "{}")
         };
         assert!(matches!(down.show("a"), Err(Fail::Down(_))));
