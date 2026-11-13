@@ -7,6 +7,7 @@ use ratatui::layout::{Flex, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::{self, Stall};
 use crate::app::App;
@@ -60,21 +61,24 @@ fn check_badge(app: &App, b: &Bead) -> Span<'static> {
     app.checks.get(&b.id).map_or(Span::raw(""), Check::badge)
 }
 
+fn pr_phase(app: &App, b: &Bead) -> Option<Span<'static>> {
+    b.label("pr")?;
+    app.pr_watch.beads.get(&b.id)?;
+    let (text, color) = match b.state()? {
+        State::Revise => ("revise queued", theme::PINK),
+        State::Running => ("revising", theme::YELLOW),
+        State::Reviewing => ("ai reviewing", theme::SKY),
+        State::Review => ("revised, Enter to review", theme::GREEN),
+        _ => return None,
+    };
+    Some(Span::styled(text, Style::new().fg(color).bold()))
+}
+
 fn pr_badges(app: &App, b: &Bead) -> Vec<Span<'static>> {
     let Some(seen) = app.pr_watch.beads.get(&b.id) else {
         return Vec::new();
     };
     let mut spans = Vec::new();
-    let phase = match b.state() {
-        Some(State::Revise) => Some(("revise queued ", theme::PINK)),
-        Some(State::Running) => Some(("revising ", theme::YELLOW)),
-        Some(State::Reviewing) => Some(("ai reviewing ", theme::SKY)),
-        Some(State::Review) => Some(("revised, Enter to review ", theme::GREEN)),
-        _ => None,
-    };
-    if let Some((text, color)) = phase {
-        spans.push(Span::styled(text, Style::new().fg(color).bold()));
-    }
     if !seen.comments.is_empty() {
         spans.push(Span::styled(
             format!("✉{} ", seen.comments.len()),
@@ -163,7 +167,7 @@ fn count(app: &App, shown: usize, total: usize) -> String {
     }
 }
 
-fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
+fn headline(app: &App, b: &Bead, base: Style, rel: Relation, width: usize) -> Line<'static> {
     let (glyph, base) = match rel {
         Relation::Ancestor => ("▲", base.fg(theme::YELLOW)),
         Relation::Descendant => ("▼", base.fg(theme::PINK)),
@@ -185,16 +189,32 @@ fn headline(app: &App, b: &Bead, base: Style, rel: Relation) -> Line<'static> {
         spans.push(Span::styled(format!("#{n} "), Style::new().fg(theme::SKY)));
         spans.extend(pr_badges(app, b));
     }
-    spans.extend(highlighted(
-        &b.title,
-        &app.filter.highlights(&b.title),
-        base,
-    ));
-    spans.push(Span::styled(
-        format!(" {}", b.id),
-        Style::new().fg(theme::MUTED),
-    ));
+    let id = Span::styled(format!(" {}", b.id), Style::new().fg(theme::MUTED));
+    let used: usize = spans.iter().map(Span::width).sum::<usize>() + id.width();
+    let (title, cut) = fit(&b.title, width.saturating_sub(used));
+    spans.extend(highlighted(title, &app.filter.highlights(&b.title), base));
+    if cut {
+        spans.push(Span::styled("…", base));
+    }
+    spans.push(id);
     Line::from(spans)
+}
+
+fn fit(text: &str, room: usize) -> (&str, bool) {
+    if text.width() <= room {
+        return (text, false);
+    }
+    let budget = room.saturating_sub(1);
+    let mut used = 0;
+    let mut end = 0;
+    for (i, c) in text.char_indices() {
+        used += c.width().unwrap_or(0);
+        if used > budget {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    (&text[..end], room > 0)
 }
 
 fn highlighted(text: &str, marks: &[bool], base: Style) -> Vec<Span<'static>> {
@@ -236,6 +256,9 @@ fn app_span(app: &App, b: &Bead) -> Option<Span<'static>> {
 
 fn activity(app: &App, b: &Bead, now: DateTime<Utc>, with_app: bool) -> Line<'static> {
     let mut spans = vec![Span::raw("    ")];
+    if let Some(p) = pr_phase(app, b) {
+        spans.extend([p, Span::raw(" ")]);
+    }
     if let Some(t) = b.state_since() {
         spans.push(Span::styled(
             elapsed((now - t).num_seconds()),
@@ -326,15 +349,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let totals = app.all_columns().map(|c| c.len());
     let chain = app.selected_chain();
     let now = Utc::now();
-    let areas = Layout::horizontal([Constraint::Fill(1); Column::ALL.len()]).split(area);
-    for (i, (beads, col)) in cols.iter().zip(Column::ALL).enumerate() {
+    let shown = app.visible_columns();
+    let rects = Layout::horizontal(vec![Constraint::Fill(1); shown.len()]).split(area);
+    for (&i, &rect) in shown.iter().zip(rects.iter()) {
+        let (beads, col) = (&cols[i], Column::ALL[i]);
         let active = i == app.col;
         let accent = theme::column_accent(col);
+        let width = rect.width.saturating_sub(3) as usize;
         let items: Vec<ListItem> = beads
             .iter()
             .map(|b| {
                 ListItem::new(vec![
-                    headline(app, b, Style::new(), relation(chain.as_ref(), b)),
+                    headline(app, b, Style::new(), relation(chain.as_ref(), b), width),
                     activity(app, b, now, true),
                 ])
             })
@@ -349,16 +375,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ));
         let mut state =
             ListState::default().with_selected((!beads.is_empty()).then_some(app.rows[i]));
-        f.render_stateful_widget(
-            cards(items, accent, active).block(block),
-            areas[i],
-            &mut state,
-        );
+        f.render_stateful_widget(cards(items, accent, active).block(block), rect, &mut state);
         if beads.is_empty() {
-            empty_hint(f, areas[i], app, col);
+            empty_hint(f, rect, app, col);
         }
         let hint = Style::new().fg(if active { accent } else { theme::MUTED });
-        scroll_hints(f, areas[i], &heights, state.offset(), hint, true);
+        scroll_hints(f, rect, &heights, state.offset(), hint, true);
     }
 }
 
@@ -413,7 +435,13 @@ fn scroll_hints(
 }
 
 fn card(app: &App, b: &Bead, width: usize, rel: Relation) -> ListItem<'static> {
-    let mut lines = vec![headline(app, b, Style::new().bold(), rel)];
+    let mut lines = vec![headline(
+        app,
+        b,
+        Style::new().bold(),
+        rel,
+        width.saturating_sub(1),
+    )];
     let mut meta: Vec<Span<'static>> = vec![b.issue_type.clone().into(), b.status.clone().into()];
     let labels: Vec<&str> = b.labels.iter().map(String::as_str).collect();
     if !labels.is_empty() {
@@ -515,7 +543,8 @@ fn render_zoomed(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let mut nav: Vec<Span> = Vec::new();
-    for (j, c) in Column::ALL.iter().enumerate() {
+    for j in app.visible_columns() {
+        let c = &Column::ALL[j];
         let n = count(app, cols[j].len(), totals[j]);
         let accent = theme::column_accent(*c);
         nav.push(if j == i {

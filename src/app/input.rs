@@ -386,10 +386,8 @@ impl App {
         let len = self.columns()[self.col].len();
         let row = &mut self.rows[self.col];
         match k.code {
-            KeyCode::Char('h') | KeyCode::Left => self.col = self.col.saturating_sub(1),
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.col = (self.col + 1).min(Column::ALL.len() - 1)
-            }
+            KeyCode::Char('h') | KeyCode::Left => self.step_column(false),
+            KeyCode::Char('l') | KeyCode::Right => self.step_column(true),
             KeyCode::Char('j') | KeyCode::Down => *row = (*row + 1).min(len.saturating_sub(1)),
             KeyCode::Char('k') | KeyCode::Up => *row = row.saturating_sub(1),
             KeyCode::Char('g') if pending == Some('g') => *row = 0,

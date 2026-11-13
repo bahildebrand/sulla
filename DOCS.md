@@ -376,7 +376,7 @@ the bead's review moves it to `sulla:revise`. Revise beads are scheduled like pe
 they wait for a free slot under `max_agents`, ordered by priority, and evict parked Review agents
 (including `revised` beads waiting for `P`) like pending work does. Through the whole revision the card stays in Awaiting PR
 and shows `revise queued`, `revising` (`Enter` opens the agent), `ai reviewing` when an AI review
-runs on it, and `revised, Enter to review` once it is waiting on you: `Enter` opens the review and
+runs on it, and `revised, Enter to review` once it is waiting on you (on the card's second line): `Enter` opens the review and
 `P` there publishes it (`P` on the board pauses scheduling instead).
 
 When a Revise bead is picked, sulla:
@@ -540,8 +540,13 @@ everything is there.
   after sulla's own writes, and at least once a minute. Each `bd` call takes the embedded
   database lock, so polling it constantly slowed down every other `bd` command. A Dolt SQL server
   is read every time, over `bd serve` (see [Beads database](#beads-database)).
-- Cards show time in state, the worktree diff stat (`+adds -dels Nf`) and the last line of agent
-  output.
+- The columns are Backlog, Pending, In Progress, Ready for Review, Awaiting PR and Done. With
+  `workflow = "local"` (the default) Awaiting PR is hidden while no bead is in it, and `h`/`l` and
+  the zoom header skip it.
+- A card's first line shows its markers and badges, priority, `#<pr>`, the title and the bead id.
+  A title too long for the column is cut with `…` so the id stays visible. The second line shows
+  the PR phase (`revise queued`, `revising`, `ai reviewing`, `revised, Enter to review`), time in
+  state, the worktree diff stat (`+adds -dels Nf`) and the last line of agent output.
 - The card meta line shows dependencies by id: `stacked on <parent>` for a stacked bead (that
   parent is not repeated under `blocked by`), `blocked by <ids>` for other unmet blockers,
   `blocks <ids>` for open beads waiting on it, and `stacked: <ids>` (or `<n> stacked` past two)

@@ -90,3 +90,114 @@ fn every_view_renders_at_any_terminal_size() {
         }
     }
 }
+
+fn rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buf.area.height)
+        .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+        .collect()
+}
+
+fn column_of(c: Column) -> usize {
+    Column::ALL.iter().position(|x| *x == c).unwrap()
+}
+
+#[test]
+fn local_workflow_hides_an_empty_awaiting_pr_column() {
+    let mut h = Harness::new("hide-awaiting-pr", &[("w-1", Some(State::Review))]);
+    assert_eq!(h.app.cfg.workflow, Workflow::Local);
+    let top = rows(&screen(&h.app, 120, 40)).concat();
+    assert!(!top.contains("Awaiting PR"));
+    for c in Column::ALL.iter().filter(|c| **c != Column::AwaitingPr) {
+        assert!(top.contains(c.title()), "{} missing", c.title());
+    }
+    assert_eq!(h.app.visible_columns().len(), 5);
+
+    h.app.all[0].labels.push("pr:7".into());
+    assert!(
+        rows(&screen(&h.app, 120, 40))
+            .concat()
+            .contains("Awaiting PR")
+    );
+    assert_eq!(h.app.visible_columns().len(), 6);
+
+    h.app.all[0].labels.retain(|l| l != "pr:7");
+    h.app.cfg.workflow = Workflow::Pr;
+    assert!(
+        rows(&screen(&h.app, 120, 40))
+            .concat()
+            .contains("Awaiting PR")
+    );
+}
+
+#[test]
+fn column_navigation_skips_the_hidden_awaiting_pr_column() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = Harness::new("nav-awaiting-pr", &[("n-1", Some(State::Review))]);
+    let key = |h: &mut Harness, c: char| {
+        h.app
+            .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    };
+    h.app.col = column_of(Column::Review);
+    key(&mut h, 'l');
+    assert_eq!(h.app.col, column_of(Column::Done));
+    key(&mut h, 'l');
+    assert_eq!(h.app.col, column_of(Column::Done));
+    key(&mut h, 'h');
+    assert_eq!(h.app.col, column_of(Column::Review));
+    h.app.col = 0;
+    key(&mut h, 'h');
+    assert_eq!(h.app.col, 0);
+
+    h.app.col = column_of(Column::AwaitingPr);
+    h.app.clamp();
+    assert_eq!(h.app.col, column_of(Column::Review));
+
+    h.app.zoom = true;
+    let nav = rows(&screen(&h.app, 120, 40)).concat();
+    assert!(nav.contains("Ready for Review"));
+    assert!(!nav.contains(crate::ui::theme::column_icon(Column::AwaitingPr)));
+}
+
+#[test]
+fn long_titles_end_in_an_ellipsis_and_keep_the_bead_id() {
+    let mut h = Harness::new("long-title", &[("lt-1", None)]);
+    h.app.all[0].title = "a very long title that cannot possibly fit in one column".into();
+    for zoom in [false, true] {
+        h.app.zoom = zoom;
+        h.app.col = column_of(Column::InProgress);
+        let screen = rows(&screen(&h.app, 120, 40));
+        let line = screen
+            .iter()
+            .find(|l| l.contains("a very"))
+            .expect("card headline");
+        if zoom {
+            assert!(line.contains(&h.app.all[0].title));
+        } else {
+            assert!(line.contains("…"), "{line}");
+            assert!(line.contains("… lt-1"), "{line}");
+            assert!(!line.contains("one column"), "{line}");
+        }
+        assert!(line.contains("lt-1"), "{line}");
+    }
+}
+
+#[test]
+fn pr_phase_text_moves_to_the_activity_line() {
+    let mut h = Harness::new("pr-phase", &[("pp-1", Some(State::Review))]);
+    h.app.all[0].labels.push("pr:7".into());
+    h.app
+        .pr_watch
+        .beads
+        .insert("pp-1".into(), crate::pr::Seen::default());
+    let screen = rows(&screen(&h.app, 200, 40));
+    let head = screen
+        .iter()
+        .position(|l| l.contains("pp-1"))
+        .expect("headline");
+    assert!(!screen[head].contains("revised"), "{}", screen[head]);
+    assert!(
+        screen[head + 1].contains("revised, Enter to review"),
+        "{}",
+        screen[head + 1]
+    );
+}

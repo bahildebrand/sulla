@@ -651,6 +651,29 @@ impl App {
         cols
     }
 
+    pub fn visible_columns(&self) -> Vec<usize> {
+        let totals = self.all_columns().map(|c| c.len());
+        (0..Column::ALL.len())
+            .filter(|&i| {
+                Column::ALL[i] != Column::AwaitingPr
+                    || self.cfg.workflow == Workflow::Pr
+                    || totals[i] > 0
+            })
+            .collect()
+    }
+
+    pub(super) fn step_column(&mut self, forward: bool) {
+        let shown = self.visible_columns();
+        let next = if forward {
+            shown.iter().find(|&&i| i > self.col)
+        } else {
+            shown.iter().rev().find(|&&i| i < self.col)
+        };
+        if let Some(&i) = next {
+            self.col = i;
+        }
+    }
+
     pub fn is_filtered(&self) -> bool {
         self.filter.is_active() || self.chain_filter.is_some()
     }
@@ -1056,6 +1079,13 @@ impl App {
         let lens = self.columns().map(|c| c.len());
         for (row, len) in self.rows.iter_mut().zip(lens) {
             *row = (*row).min(len.saturating_sub(1));
+        }
+        let shown = self.visible_columns();
+        if !shown.contains(&self.col) {
+            let before = shown.iter().rev().find(|&&i| i < self.col);
+            if let Some(&i) = before.or(shown.first()) {
+                self.col = i;
+            }
         }
     }
 
