@@ -278,3 +278,51 @@ fn hung_bd_call_times_out_into_an_error_status() {
         h.app.status
     );
 }
+
+#[test]
+fn failed_launch_returns_the_bead_to_pending() {
+    let mut h = Harness::new("launch-fail", &[("t-1", Some(State::Running))]);
+    h.app
+        .edit_local("t-1", |b| b.assignee = Some(crate::beads::ACTOR.into()));
+    let blocker = h.app.git.worktree_path("t-1");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "").unwrap();
+    let bead = h.bead("t-1");
+    h.app
+        .launch_agent(&bead, false, None, |app, r| app.started("t-1".into(), r));
+    h.pump();
+    let b = h.bead("t-1");
+    assert!(h.app.agents.is_empty());
+    assert!(h.app.failed.contains("t-1"));
+    assert_eq!(b.status, "open");
+    assert_eq!(b.assignee, None);
+    assert!(
+        !b.labels.iter().any(|l| l == "sulla:running"),
+        "{:?}",
+        b.labels
+    );
+}
+
+#[test]
+fn claimed_bead_without_a_label_is_reset_when_orphaned() {
+    let mut h = Harness::new("claimed-orphan", &[("t-1", None)]);
+    h.app
+        .edit_local("t-1", |b| b.assignee = Some(crate::beads::ACTOR.into()));
+    h.app.reconcile();
+    let b = h.bead("t-1");
+    assert_eq!(b.status, "open");
+    assert_eq!(b.state(), None);
+}
+
+#[test]
+fn claimed_bead_without_a_label_resumes_into_its_worktree() {
+    let mut h = Harness::new("claimed-resume", &[("t-1", None)]);
+    h.app
+        .edit_local("t-1", |b| b.assignee = Some(crate::beads::ACTOR.into()));
+    h.app.git.ensure_worktree("t-1", "main").unwrap();
+    h.app.reconcile();
+    assert!(h.app.is_starting("t-1"));
+    assert_eq!(h.state("t-1"), Some(State::Running));
+    h.pump();
+    assert!(h.app.agents.contains_key("t-1"));
+}

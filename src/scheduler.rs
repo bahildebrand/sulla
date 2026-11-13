@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent;
 use crate::app::Event;
-use crate::beads::{Bead, Beads, State};
+use crate::beads::{ACTOR, Bead, Beads, State};
 use crate::conflicts::{Conflict, Scanner};
 use crate::git::{DiffStat, Git};
 use crate::pr;
@@ -583,9 +583,14 @@ pub fn orphans<'a>(all: &'a [Bead], known: &HashSet<String>) -> Vec<&'a Bead> {
         .filter(|b| match b.state() {
             Some(State::Running | State::Review) => !known.contains(&b.id),
             Some(State::Reviewing) => !known.contains(&agent::review_id(&b.id)),
+            None => claimed_unlabeled(b) && !known.contains(&b.id),
             _ => false,
         })
         .collect()
+}
+
+pub fn claimed_unlabeled(b: &Bead) -> bool {
+    b.state().is_none() && b.status == "in_progress" && b.assignee.as_deref() == Some(ACTOR)
 }
 
 pub fn evict_order(
@@ -655,6 +660,7 @@ mod tests {
             priority: pri,
             issue_type: "task".into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
+            assignee: None,
             description: String::new(),
             notes: String::new(),
             created_at: Some(created.parse().unwrap()),
@@ -1010,6 +1016,28 @@ mod tests {
             .map(|b| b.id.as_str())
             .collect();
         assert_eq!(ids, ["run", "rev", "idle"]);
+    }
+
+    #[test]
+    fn claimed_bead_without_a_state_label_is_orphaned() {
+        let claimed = |id: &str, assignee: &str| {
+            let mut b = bead(id, 1, "2026-01-01T00:00:00Z", &[]);
+            b.status = "in_progress".into();
+            b.assignee = Some(assignee.into());
+            b
+        };
+        let all = vec![
+            claimed("lost", ACTOR),
+            claimed("live", ACTOR),
+            claimed("human", "someone"),
+            bead("open", 1, "2026-01-01T00:00:00Z", &[]),
+        ];
+        let known = HashSet::from(["live".to_string()]);
+        let ids: Vec<_> = orphans(&all, &known)
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+        assert_eq!(ids, ["lost"]);
     }
 
     #[test]

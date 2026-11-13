@@ -83,7 +83,7 @@ impl App {
             .filter(|b| !self.failed.contains(&b.id))
             .cloned()
             .collect();
-        orphans.sort_by_key(|b| b.state() != Some(State::Running));
+        orphans.sort_by_key(|b| !matches!(b.state(), Some(State::Running) | None));
         for b in orphans {
             let state = b.state();
             if state == Some(State::Reviewing) {
@@ -108,6 +108,11 @@ impl App {
                 }
                 tracing::info!("resuming orphaned agent {}", b.id);
                 let id = b.id.clone();
+                if state.is_none() {
+                    let id = id.clone();
+                    self.edit_local(&id, |b| b.set_state_label(Some(State::Running)));
+                    self.bd_run(move |beads| beads.set_state(&id, State::Running));
+                }
                 self.start_agent(b, true, None, move |app, r| {
                     if app.report(r).is_none() {
                         app.failed.insert(id);
@@ -355,7 +360,18 @@ impl App {
             self.status = format!("started {id}");
         } else {
             self.failed.insert(id.clone());
-            self.bd_run(move |beads| beads.unclaim(&id));
+            self.edit_local(&id, |b| {
+                if b.state() == Some(State::Running) {
+                    b.set_state_label(None);
+                }
+                b.status = "open".into();
+                b.assignee = None;
+            });
+            self.bd_run(move |beads| {
+                let cleared = beads.remove_label(&id, &State::Running.label());
+                beads.unclaim(&id)?;
+                cleared
+            });
         }
     }
 

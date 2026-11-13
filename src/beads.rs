@@ -32,6 +32,8 @@ pub struct Bead {
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub notes: String,
@@ -170,6 +172,10 @@ impl State {
             State::Released => "released",
         }
     }
+
+    pub fn label(self) -> String {
+        format!("{STATE_DIM}:{}", self.as_str())
+    }
 }
 
 impl Bead {
@@ -203,7 +209,7 @@ impl Bead {
     pub fn set_state_label(&mut self, state: Option<State>) {
         self.labels.retain(|l| !l.starts_with("sulla:"));
         if let Some(s) = state {
-            self.labels.push(format!("{STATE_DIM}:{}", s.as_str()));
+            self.labels.push(s.label());
         }
     }
 
