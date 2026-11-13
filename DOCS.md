@@ -8,7 +8,8 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 `sulla:review`, `sulla:held`, `sulla:pr`, `sulla:revise`, `sulla:released`.
 
 - **Backlog** beads are never auto scheduled. The `n` popup creates beads in Backlog or Pending,
-  `B` moves a bead to Backlog, `s` releases it to Pending, `S` releases the whole Backlog.
+  `B` moves a bead to Backlog, `s` releases it to Pending, `S` releases the whole Backlog after a
+  `y`/`n` prompt with the count.
 - **Pending** beads are claimed in priority order until `max_agents` agents are in progress. Only
   beads whose dependencies are closed start. Blocked beads show `⊘`. `A` on a blocked bead without
   a worktree only releases it to Pending, unless it can be stacked.
@@ -218,7 +219,7 @@ Review.
 
 Your inline comments, hunk rejections, file selection and cursor positions belong to the bead,
 not to the open diff. Leaving the review with `q`/`Esc` keeps them, and reopening the bead's review
-restores them on the fresh diff (rejections only where the hunk is unchanged). `R`, and returning
+restores them on the fresh diff (rejections only where the hunk is unchanged). `gr`, and returning
 from `e`/`E`, reload the diff the same way. `S` sends the comments and clears them. `s` sends a
 typed note; with comments pending it sends them first, exactly as `S` would, followed by the note,
 and the status line says `feedback and <n> inline comment(s) sent to <bead>`. The stored state is
@@ -457,7 +458,7 @@ On a file header, or with `N`/`Y`, the whole file is toggled. Rejected hunks are
 are marked `±` (partly) or `✗` (fully). On merge, pending changes are committed, rejected hunks are
 reverse-applied (binary files restored from the fork point) and committed as
 `Drop changes rejected in review of <bead>`, then the merge runs. If a rejected hunk no longer
-applies, the merge stops and `R` reloads the diff, keeping unchanged rejections. Checks do not
+applies, the merge stops and `gr` reloads the diff, keeping unchanged rejections. Checks do not
 rerun on the trimmed result.
 
 ### Checks

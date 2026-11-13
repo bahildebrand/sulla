@@ -117,7 +117,7 @@ impl App {
         match self.parked_review.take() {
             Some(d) if d.id == id => {
                 self.view = View::Review(d);
-                self.status = format!("back to review of {id} (R reloads diff)");
+                self.status = format!("back to review of {id} (gr reloads diff)");
                 true
             }
             _ => false,

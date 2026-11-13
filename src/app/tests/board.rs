@@ -201,3 +201,36 @@ fn pr_phase_text_moves_to_the_activity_line() {
         screen[head + 1]
     );
 }
+
+#[test]
+fn board_release_backlog_asks_first() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = Harness::new(
+        "release-backlog",
+        &[
+            ("b-1", Some(State::Backlog)),
+            ("b-2", Some(State::Backlog)),
+            ("p-1", None),
+        ],
+    );
+    let key = |h: &mut Harness, c: char| {
+        h.app
+            .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    };
+    key(&mut h, 'S');
+    let Mode::Confirm { msg, .. } = &h.app.mode else {
+        panic!("no confirmation");
+    };
+    assert_eq!(msg, "release 2 backlog bead(s)? y/n");
+    key(&mut h, 'n');
+    assert!(matches!(h.app.mode, Mode::Normal));
+    assert_eq!(h.app.status, "cancelled");
+    assert_eq!(h.state("b-1"), Some(State::Backlog));
+    assert_eq!(h.state("b-2"), Some(State::Backlog));
+    key(&mut h, 'S');
+    key(&mut h, 'y');
+    assert_eq!(h.app.status, "released 2 backlog bead(s) to pending");
+    assert_eq!(h.state("b-1"), None);
+    assert_eq!(h.state("b-2"), None);
+    assert_eq!(h.state("p-1"), None);
+}

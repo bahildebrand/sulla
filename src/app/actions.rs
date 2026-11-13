@@ -94,6 +94,7 @@ impl App {
             Action::Discard(id) => self.discard(&id),
             Action::Delete(id) => self.delete(&id),
             Action::Release(id) => self.release_worktree(&id),
+            Action::ReleaseBacklog => self.release_backlog(),
             Action::RestartApp(target) => self.start_browse(&target, browse::Kind::Restart),
         }
     }
@@ -147,13 +148,28 @@ impl App {
         }
     }
 
-    pub(super) fn release_backlog(&mut self) {
-        let backlog: Vec<Bead> = self
-            .all
+    fn backlog(&self) -> Vec<Bead> {
+        self.all
             .iter()
             .filter(|b| b.status != "closed" && b.state() == Some(State::Backlog))
             .cloned()
-            .collect();
+            .collect()
+    }
+
+    pub(super) fn confirm_release_backlog(&mut self) {
+        match self.backlog().len() {
+            0 => self.status = "backlog is empty".into(),
+            n => {
+                self.mode = Mode::Confirm {
+                    msg: format!("release {n} backlog bead(s)? y/n"),
+                    action: Action::ReleaseBacklog,
+                }
+            }
+        }
+    }
+
+    pub(super) fn release_backlog(&mut self) {
+        let backlog = self.backlog();
         if backlog.is_empty() {
             self.status = "backlog is empty".into();
             return;

@@ -469,11 +469,20 @@ const HELP: &[(&str, &str)] = &[
     ("D", "discard worktree + branch, hold bead"),
     ("dd", "delete bead permanently (also worktree + branch)"),
     ("F", "retry from scratch with a note for the agent"),
-    ("s", "release held or backlog bead to pending"),
-    ("S", "release every backlog bead to pending"),
+    (
+        "s",
+        "release held or backlog bead to pending (review: send feedback)",
+    ),
+    (
+        "S",
+        "release every backlog bead to pending, asks first (review: send comments)",
+    ),
     ("B", "move bead to backlog (not auto scheduled)"),
-    ("P", "pause / resume auto scheduling of new beads"),
-    ("R", "mark ready for review"),
+    (
+        "P",
+        "pause / resume auto scheduling of new beads (review: publish PR)",
+    ),
+    ("R", "mark ready for review (review: gr reloads the diff)"),
     ("V", "start ai reviewer on a bead in review"),
     (
         "A",
@@ -531,7 +540,10 @@ const HELP: &[(&str, &str)] = &[
     ("c / x", "comment on line / delete its comments"),
     ("<n>c", "comment on n lines from the cursor (10c)"),
     ("C", "edit comment on line (yours or unsent ai)"),
-    ("S", "send all comments to agent (incl. unsent ai)"),
+    (
+        "S",
+        "send all comments to agent (incl. unsent ai), not the board's release backlog",
+    ),
     ("y / n", "accept / reject hunk (whole file on header)"),
     ("Y / N", "accept / reject whole file"),
     (
@@ -541,7 +553,7 @@ const HELP: &[(&str, &str)] = &[
     ("M", "force merge despite failing, stale or running checks"),
     (
         "P",
-        "publish: push branch and open a GitHub PR (workflow = \"pr\")",
+        "publish: push branch and open a GitHub PR (workflow = \"pr\"), not the board's pause",
     ),
     ("o", "open the bead's GitHub PR in the default browser"),
     ("U", "revise an Awaiting PR bead from its new PR feedback"),
@@ -551,14 +563,17 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
-    ("s", "send feedback to agent, with any pending comments"),
+    (
+        "s",
+        "send feedback to agent, with any pending comments, not the board's release",
+    ),
     ("D", "discard worktree + branch, hold bead"),
     ("F", "retry from scratch with a note for the agent"),
     ("p / a", "swap to agent view (keeps comments, r to return)"),
     ("i", "swap to agent view in insert mode"),
     (
-        "R",
-        "reload diff, keeping comments and unchanged rejections",
+        "gr",
+        "reload diff, keeping comments and unchanged rejections (R does nothing here)",
     ),
     ("e", "open $EDITOR in bead worktree, reloads diff after"),
     (

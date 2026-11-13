@@ -211,6 +211,7 @@ pub enum Action {
     Discard(String),
     Delete(String),
     Release(String),
+    ReleaseBacklog,
     RestartApp(String),
     Quit,
 }

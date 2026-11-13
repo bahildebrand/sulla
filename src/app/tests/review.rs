@@ -219,7 +219,8 @@ fn review_reload_keeps_comments() {
     let mut h = reviewable("review-reload");
     comment_and_reject(&mut h);
     let cursor = open_diff(&h).files[1].cursor;
-    press(&mut h, KeyCode::Char('R'));
+    press(&mut h, KeyCode::Char('g'));
+    press(&mut h, KeyCode::Char('r'));
     let d = open_diff(&h);
     assert_eq!(d.comments.len(), 1);
     assert_eq!(d.rejected_hunks(), 1);
@@ -245,6 +246,25 @@ fn review_x_deletes_one_comment_per_press() {
     assert_eq!(h.app.status, "deleted comment 1/1 on this line");
     press(&mut h, KeyCode::Char('x'));
     assert_eq!(h.app.status, "no comments here");
+}
+
+#[test]
+fn review_capital_r_does_not_reload() {
+    use crossterm::event::KeyCode;
+    let mut h = reviewable("review-no-capital-r");
+    h.app.status.clear();
+    let wt = h.app.git.ensure_worktree("t-1", "main").unwrap();
+    std::fs::write(wt.join("b.txt"), "new\n").unwrap();
+    git_in(&wt, &["add", "b.txt"]);
+    git_in(&wt, &["commit", "-qm", "add c"]);
+    let files = open_diff(&h).files.len();
+    press(&mut h, KeyCode::Char('R'));
+    assert_eq!(open_diff(&h).files.len(), files);
+    assert_eq!(h.app.status, "");
+    assert_eq!(h.state("t-1"), Some(State::Review));
+    press(&mut h, KeyCode::Char('g'));
+    press(&mut h, KeyCode::Char('r'));
+    assert!(open_diff(&h).files.len() > files);
 }
 
 #[test]
