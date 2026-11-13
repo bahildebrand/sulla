@@ -33,6 +33,37 @@ impl App {
         }
     }
 
+    fn reap_closed(&mut self) {
+        let closed: Vec<String> = self
+            .agents
+            .keys()
+            .filter(|id| *id != CHAT_ID && agent::reviewed_bead(id).is_none())
+            .filter(|id| self.bead(id).is_some_and(|b| b.status == "closed"))
+            .cloned()
+            .collect();
+        let mut kept = Vec::new();
+        for id in closed {
+            tracing::info!("bead {id} was closed outside sulla, stopping its agent");
+            self.stop_check(&id);
+            self.remove_agent(&id, Outcome::Killed);
+            self.leave_progress(&id);
+            let dirty = self.git.dirty(&id).is_ok_and(|s| !s.trim().is_empty());
+            if dirty || self.git.unmerged_branch(&id, &self.base) {
+                tracing::warn!(
+                    "closed bead {id} left unmerged work in {}",
+                    self.git.branch(&id)
+                );
+                kept.push(id);
+            }
+        }
+        if !kept.is_empty() {
+            self.status = format!(
+                "{} closed outside sulla, agent stopped; unmerged work kept in branch and worktree",
+                kept.join(", ")
+            );
+        }
+    }
+
     pub(super) fn leave_progress(&mut self, id: &str) {
         if matches!(&self.view, View::Progress(v) if v == id) {
             if matches!(self.mode, Mode::Insert) {
@@ -45,6 +76,7 @@ impl App {
     pub(super) fn reconcile(&mut self) {
         self.reap_reviewers();
         self.sweep_stacks();
+        self.reap_closed();
         let known: HashSet<String> = self.busy().cloned().collect();
         let mut orphans: Vec<Bead> = scheduler::orphans(&self.all, &known)
             .into_iter()

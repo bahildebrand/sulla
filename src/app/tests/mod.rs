@@ -16,6 +16,7 @@ use crate::scheduler::Idle;
 
 mod board;
 mod browsing;
+mod closed;
 mod config;
 mod config_editing;
 mod evict;
