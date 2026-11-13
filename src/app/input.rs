@@ -14,6 +14,41 @@ use super::{App, InputKind, Mode, NewBeadForm, View};
 
 const MAX_COUNT: usize = 99_999;
 
+#[derive(Clone, Copy)]
+pub(super) enum Cmd {
+    Quit,
+    ForceQuit,
+    New,
+    Max,
+    Pause,
+    Resume,
+    Refresh,
+    Kill,
+    Setup,
+    Chat,
+    Health,
+    Config,
+    Reload,
+    Browse,
+}
+
+pub(super) const COMMANDS: &[(&[&str], Cmd)] = &[
+    (&["q", "quit"], Cmd::Quit),
+    (&["q!", "quit!"], Cmd::ForceQuit),
+    (&["new", "n"], Cmd::New),
+    (&["max"], Cmd::Max),
+    (&["pause"], Cmd::Pause),
+    (&["resume"], Cmd::Resume),
+    (&["refresh", "r"], Cmd::Refresh),
+    (&["kill"], Cmd::Kill),
+    (&["setup"], Cmd::Setup),
+    (&["chat"], Cmd::Chat),
+    (&["health"], Cmd::Health),
+    (&["config"], Cmd::Config),
+    (&["reload"], Cmd::Reload),
+    (&["browse"], Cmd::Browse),
+];
+
 impl App {
     pub(super) fn on_paste(&mut self, text: &str) {
         match &mut self.mode {
@@ -80,7 +115,7 @@ impl App {
                     self.status = "cancelled".into();
                 }
             }
-            Mode::Help { scroll } => self.help_key(k, scroll),
+            Mode::Help { scroll, config } => self.help_key(k, scroll, config),
             Mode::Health => {
                 if k.code == KeyCode::Char('r') {
                     self.open_health();
@@ -327,11 +362,15 @@ impl App {
     pub(super) fn command(&mut self, cmd: &str) {
         let (name, rest) = cmd.split_once(' ').unwrap_or((cmd, ""));
         let rest = rest.trim();
-        match name {
-            "q" | "quit" => self.request_quit(),
-            "q!" | "quit!" => self.quit = true,
-            "new" | "n" if !rest.is_empty() => self.create_bead(rest, "", "", 2, false, &[]),
-            "max" => match rest.parse() {
+        let Some(&(_, c)) = COMMANDS.iter().find(|(names, _)| names.contains(&name)) else {
+            return self.status = format!("unknown command: {cmd}");
+        };
+        match c {
+            Cmd::Quit => self.request_quit(),
+            Cmd::ForceQuit => self.quit = true,
+            Cmd::New if !rest.is_empty() => self.create_bead(rest, "", "", 2, false, &[]),
+            Cmd::New => self.status = "usage: :new <title>".into(),
+            Cmd::Max => match rest.parse() {
                 Ok(n) => {
                     self.cfg.max_agents = n;
                     self.status = format!("max agents = {n}");
@@ -339,24 +378,24 @@ impl App {
                 }
                 Err(_) => self.status = format!("max agents = {}", self.cfg.max_agents),
             },
-            "pause" => self.set_paused(true),
-            "resume" => self.set_paused(false),
-            "refresh" | "r" => {
+            Cmd::Pause => self.set_paused(true),
+            Cmd::Resume => self.set_paused(false),
+            Cmd::Refresh => {
                 self.failed.clear();
                 self.mutated();
             }
-            "kill" if !rest.is_empty() => self.confirm_kill(rest.to_string()),
-            "setup" if !rest.is_empty() => self.rerun_setup(rest),
-            "setup" => match self.selected() {
+            Cmd::Kill if !rest.is_empty() => self.confirm_kill(rest.to_string()),
+            Cmd::Kill => self.status = "usage: :kill <id>".into(),
+            Cmd::Setup if !rest.is_empty() => self.rerun_setup(rest),
+            Cmd::Setup => match self.selected() {
                 Some(b) => self.rerun_setup(&b.id),
                 None => self.status = "no bead selected, use :setup <id>".into(),
             },
-            "chat" => self.open_chat(rest == "new"),
-            "health" => self.open_health(),
-            "config" => self.config_command(rest),
-            "reload" => self.reload_config(),
-            "browse" => self.browse(rest),
-            _ => self.status = format!("unknown command: {cmd}"),
+            Cmd::Chat => self.open_chat(rest == "new"),
+            Cmd::Health => self.open_health(),
+            Cmd::Config => self.config_command(rest),
+            Cmd::Reload => self.reload_config(),
+            Cmd::Browse => self.browse(rest),
         }
     }
 
@@ -365,7 +404,7 @@ impl App {
         let count = self.count.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
-            KeyCode::Char('?') => return self.mode = Mode::Help { scroll: 0 },
+            KeyCode::Char('?') => return self.open_help(None),
             KeyCode::Char(':') => {
                 return self.mode = Mode::Input {
                     kind: InputKind::Command,
@@ -426,7 +465,20 @@ impl App {
         }
     }
 
-    fn help_key(&mut self, k: KeyEvent, mut scroll: u16) {
+    fn open_help(&mut self, config: Option<Box<ConfigView>>) {
+        let section = match (&config, &self.view) {
+            (Some(_), _) => "Config",
+            (None, View::Board) => "Board",
+            (None, View::Progress(_)) => "Progress",
+            (None, View::Review(_)) => "Review",
+        };
+        self.mode = Mode::Help {
+            scroll: crate::ui::help_scroll_to(self.term, section),
+            config,
+        };
+    }
+
+    fn help_key(&mut self, k: KeyEvent, mut scroll: u16, config: Option<Box<ConfigView>>) {
         let pending = self.pending.take();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let half = self.term.1 / 2;
@@ -439,10 +491,16 @@ impl App {
             KeyCode::Char('g') if pending == Some('g') => scroll = 0,
             KeyCode::Char('g') => self.pending = Some('g'),
             KeyCode::Char('G') => scroll = max,
-            _ => return,
+            _ => {
+                if let Some(v) = config {
+                    self.mode = Mode::Config(v);
+                }
+                return;
+            }
         }
         self.mode = Mode::Help {
             scroll: scroll.min(max),
+            config,
         };
     }
 
@@ -530,6 +588,7 @@ impl App {
                 self.refresh_config_view(&mut v);
             }
             KeyCode::Char('/') => v.typing = true,
+            KeyCode::Char('?') => return self.open_help(Some(v)),
             KeyCode::Char('y') => {
                 if let Some(s) = v.yank() {
                     self.status = s.clone();

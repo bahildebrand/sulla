@@ -50,7 +50,10 @@ fn every_view_renders_at_any_terminal_size() {
         vec![
             Mode::Normal,
             Mode::Insert,
-            Mode::Help { scroll: 3 },
+            Mode::Help {
+                scroll: 3,
+                config: None,
+            },
             Mode::Health,
             Mode::Config(Box::new(
                 crate::ui::config::ConfigView::new(&h.app.layers, &h.app.cfg, &h.app.reload)

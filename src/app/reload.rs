@@ -34,8 +34,12 @@ impl App {
             }
         }
         let mut mode = std::mem::replace(&mut self.mode, Mode::Normal);
-        if let Mode::Config(v) = &mut mode {
-            self.refresh_config_view(v);
+        match &mut mode {
+            Mode::Config(v)
+            | Mode::Help {
+                config: Some(v), ..
+            } => self.refresh_config_view(v),
+            _ => {}
         }
         self.mode = mode;
     }

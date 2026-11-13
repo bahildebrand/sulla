@@ -230,6 +230,7 @@ pub enum Mode {
     },
     Help {
         scroll: u16,
+        config: Option<Box<ConfigView>>,
     },
     Health,
     Config(Box<ConfigView>),

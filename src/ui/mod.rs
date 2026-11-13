@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     status_line(f, status, app);
-    if let Mode::Help { scroll } = app.mode {
+    if let Mode::Help { scroll, .. } = app.mode {
         help(f, scroll);
     }
     if matches!(app.mode, Mode::Health) {
@@ -109,6 +109,14 @@ fn status_spans(status: &str) -> Vec<Span<'static>> {
             ),
         ],
         None => vec![Span::styled(format!(" {status}"), text)],
+    }
+}
+
+fn idle_hints(view: &View) -> &'static [(&'static str, &'static str)] {
+    match view {
+        View::Board => &[("?", "help"), (":", "command"), ("/", "filter")],
+        View::Progress(_) => &[("?", "help"), (":", "command"), ("i", "insert")],
+        View::Review(_) => &[("?", "help"), (":", "command"), ("c", "comment")],
     }
 }
 
@@ -181,6 +189,7 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 ("/", "filter"),
                 ("y", "yank"),
                 ("r", "reload"),
+                ("?", "help"),
                 ("q", "close"),
             ]),
         ]
@@ -199,7 +208,9 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                 ));
             }
             let chime = app.chime();
-            if chime.is_none() || app.fresh_error() {
+            if chime.is_none() && app.status.is_empty() {
+                spans.extend(hints(idle_hints(&app.view)));
+            } else if chime.is_none() || app.fresh_error() {
                 spans.extend(status_spans(&app.status));
             }
             if let Some(c) = chime {
@@ -402,16 +413,19 @@ fn meter(running: usize, max: usize) -> Vec<Span<'static>> {
     spans
 }
 
-const HELP: &[(&str, &str)] = &[
+pub(crate) const HELP: &[(&str, &str)] = &[
     ("Global", ""),
-    ("?", "help (j k / Ctrl-d Ctrl-u / gg G scroll)"),
+    (
+        "?",
+        "help, opened at the current view's section (j k / Ctrl-d Ctrl-u / gg G scroll)",
+    ),
     (
         "! / :health",
         "health of bd, agent, kache, incus and why nothing starts",
     ),
     (
         ":",
-        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config [edit [global]] :reload :browse [bead|slot] :browse stop [bead|slot])",
+        "command (:q :q! :new <title> :max <n> :pause :resume :refresh :kill <id> :setup [id] :chat [new] :health :config [edit [global]] :reload :browse [bead|slot] :browse stop [bead|slot] :browse restart [bead|slot])",
     ),
     (
         ":config",
@@ -432,6 +446,10 @@ const HELP: &[(&str, &str)] = &[
     (
         ":browse stop [bead|slot]",
         "stop the app with [incus.browse] down (output in .sulla/logs/<bead>.app.log)",
+    ),
+    (
+        ":browse restart [bead|slot]",
+        "stop the app with [incus.browse] down, start it with up again, then open it",
     ),
     ("Board", ""),
     ("h j k l / gg G", "move"),
@@ -532,6 +550,8 @@ const HELP: &[(&str, &str)] = &[
     ("d", "hide / show keys that have their default value"),
     ("/", "filter by key path, Enter keeps it, Esc clears it"),
     ("y", "show the dotted key and value in the status line"),
+    ("r", "reload both config files"),
+    ("?", "help at this section, closing it returns here"),
     ("q / Esc", "close (Esc clears the filter first)"),
     ("Review", ""),
     ("j k / Ctrl-d Ctrl-u / gg G", "move line cursor"),
@@ -589,14 +609,22 @@ fn help_width(screen: u16) -> u16 {
 }
 
 fn help_lines(width: u16) -> Vec<Line<'static>> {
+    help_layout(width).0
+}
+
+type HelpLayout = (Vec<Line<'static>>, Vec<(&'static str, u16)>);
+
+fn help_layout(width: u16) -> HelpLayout {
     let inner = help_width(width).saturating_sub(6) as usize;
     let desc_w = inner.saturating_sub(HELP_KEY_WIDTH).max(16);
     let mut lines = Vec::new();
+    let mut sections = Vec::new();
     for (k, d) in HELP {
         if d.is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::raw(""));
             }
+            sections.push((*k, lines.len() as u16));
             lines.push(theme::rule(k, theme::MAUVE, inner));
             continue;
         }
@@ -623,12 +651,23 @@ fn help_lines(width: u16) -> Vec<Line<'static>> {
             ]));
         }
     }
-    lines
+    (lines, sections)
+}
+
+pub fn help_scroll_to(term: (u16, u16), section: &str) -> u16 {
+    let (_, sections) = help_layout(term.0);
+    let row = sections
+        .iter()
+        .find(|(name, _)| *name == section)
+        .map_or(0, |(_, row)| *row);
+    row.min(help_max_scroll(term))
 }
 
 pub fn help_max_scroll((width, height): (u16, u16)) -> u16 {
-    let rows = help_lines(width).len() as u16;
-    rows.saturating_sub(height.saturating_sub(5))
+    let (lines, sections) = help_layout(width);
+    let end = (lines.len() as u16).saturating_sub(height.saturating_sub(5));
+    let last = sections.last().map_or(0, |(_, row)| *row);
+    end.max(last)
 }
 
 fn screen(f: &Frame) -> Rect {

@@ -20,6 +20,7 @@ mod closed;
 mod config;
 mod config_editing;
 mod evict;
+mod help;
 mod launch;
 mod merge;
 mod notify;
