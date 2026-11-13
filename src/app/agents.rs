@@ -102,7 +102,7 @@ impl App {
     }
 
     pub(super) fn open_chat(&mut self, fresh: bool) {
-        self.parked_review = None;
+        self.unpark_review();
         if fresh {
             if let Some(mut a) = self.agents.remove(CHAT_ID) {
                 a.kill();

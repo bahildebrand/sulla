@@ -620,6 +620,22 @@ impl Diff {
         }
     }
 
+    pub fn carry(&mut self, old: &Diff) {
+        self.carry_rejections(old);
+        self.comments = old.comments.clone();
+        for f in &mut self.files {
+            if let Some(o) = old.files.iter().find(|o| o.name == f.name) {
+                f.cursor = o.cursor.min(f.lines.len().saturating_sub(1));
+            }
+        }
+        let name = old.files.get(old.sel).map(|f| f.name.as_str());
+        self.sel = self
+            .files
+            .iter()
+            .position(|f| Some(f.name.as_str()) == name)
+            .unwrap_or(old.sel.min(self.files.len().saturating_sub(1)));
+    }
+
     pub fn adds_dels(&self) -> (usize, usize) {
         self.files
             .iter()
@@ -1119,6 +1135,27 @@ mod tests {
         let mut fresh = Diff::parse("x", &edited);
         fresh.carry_rejections(&d);
         assert!(fresh.files[0].rejected.is_empty());
+    }
+
+    #[test]
+    fn carry_keeps_comments_rejections_and_position_by_file_name() {
+        let mut d = Diff::parse("x", TWO_HUNKS);
+        d.set_cursor(8);
+        d.mark_hunk(false);
+        d.prev_file();
+        d.set_cursor(10);
+        assert!(d.add_comment("why", 1));
+        let mut fresh = Diff::parse("x", TWO_HUNKS).with_commits("commit a\n\nmsg\n");
+        fresh.carry(&d);
+        assert_eq!(fresh.comments, d.comments);
+        assert_eq!(fresh.sel, 1);
+        assert_eq!(fresh.files[1].name, "a.rs");
+        assert_eq!(fresh.files[1].cursor, 10);
+        assert_eq!(fresh.files[1].rejected, BTreeSet::from([8]));
+        let mut shrunk = Diff::parse("x", "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-b\n+B\n");
+        shrunk.carry(&fresh);
+        assert_eq!(shrunk.sel, 0);
+        assert_eq!(shrunk.comments, d.comments);
     }
 
     #[test]

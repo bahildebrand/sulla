@@ -299,7 +299,7 @@ impl App {
             return;
         }
         match kind {
-            InputKind::Feedback(id) => self.feedback(&id, &text),
+            InputKind::Feedback(id) => self.send_note(&id, &text),
             InputKind::Retry(id) => self.retry(&id, &text),
             InputKind::Command => self.command(&text),
             InputKind::Search(_) => self.set_filter(&text),
@@ -577,7 +577,7 @@ impl App {
 
     fn board_bead_key(&mut self, k: KeyEvent) {
         let Some(b) = self.selected() else { return };
-        self.parked_review = None;
+        self.unpark_review();
         match k.code {
             KeyCode::Enter => match Column::ALL[self.col] {
                 Column::AwaitingPr
@@ -673,7 +673,7 @@ impl App {
                 self.count = Some((count.unwrap_or(0) * 10 + digit).min(MAX_COUNT));
             }
             KeyCode::Esc if count.is_some() => {}
-            KeyCode::Char('q') | KeyCode::Esc => self.view = View::Board,
+            KeyCode::Char('q') | KeyCode::Esc => self.leave_review(),
             KeyCode::Char('j') | KeyCode::Down => d.move_cursor(n as isize),
             KeyCode::Char('k') | KeyCode::Up => d.move_cursor(-(n as isize)),
             KeyCode::Char('d') if ctrl => d.move_cursor(half),
@@ -709,7 +709,9 @@ impl App {
                 self.status = format!("deleted {n} comment(s)");
             }
             KeyCode::Char('S') => match d.feedback() {
-                Some(text) => self.feedback(&id, &text),
+                Some(text) => {
+                    self.feedback(&id, &text);
+                }
                 None => self.status = "no comments to send".into(),
             },
             KeyCode::Char('m') => self.request_merge(id, false),
@@ -735,7 +737,7 @@ impl App {
             KeyCode::Char('V') => self.start_review(&id),
             KeyCode::Char('p') | KeyCode::Char('a') => self.swap_to_agent(false),
             KeyCode::Char('i') => self.swap_to_agent(true),
-            KeyCode::Char('R') => self.reload_review(id),
+            KeyCode::Char('R') => self.open_review(id),
             KeyCode::Char('e') => self.request_edit(&id),
             KeyCode::Char('E') => self.request_shell(&id),
             KeyCode::Char(c @ ('y' | 'n' | 'Y' | 'N')) => {

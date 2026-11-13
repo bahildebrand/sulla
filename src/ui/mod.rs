@@ -551,12 +551,15 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("t / T", "show pre-merge check output / rerun checks"),
     ("V", "start ai reviewer, its comments show inline"),
-    ("s", "send feedback to agent"),
+    ("s", "send feedback to agent, with any pending comments"),
     ("D", "discard worktree + branch, hold bead"),
     ("F", "retry from scratch with a note for the agent"),
     ("p / a", "swap to agent view (keeps comments, r to return)"),
     ("i", "swap to agent view in insert mode"),
-    ("R", "reload diff"),
+    (
+        "R",
+        "reload diff, keeping comments and unchanged rejections",
+    ),
     ("e", "open $EDITOR in bead worktree, reloads diff after"),
     (
         "E",

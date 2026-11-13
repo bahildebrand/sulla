@@ -29,6 +29,7 @@ mod review;
 
 type Finished = Arc<Mutex<Vec<(usize, String, Outcome)>>>;
 type Sessions = Arc<Mutex<Vec<(String, String)>>>;
+type Prompts = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
 struct Gated {
     gate: Arc<Mutex<()>>,
@@ -36,6 +37,7 @@ struct Gated {
     finished: Finished,
     sessions: Sessions,
     root: PathBuf,
+    prompts: Prompts,
 }
 
 impl Sandbox for Gated {
@@ -63,6 +65,10 @@ impl Sandbox for Gated {
             .lock()
             .unwrap()
             .push((launch.id.clone(), launch.session.clone()));
+        self.prompts
+            .lock()
+            .unwrap()
+            .push((launch.id.clone(), launch.prompt.clone()));
         Ok(cmd)
     }
 
@@ -93,6 +99,7 @@ struct Harness {
     prepared: Arc<Mutex<Vec<String>>>,
     finished: Finished,
     sessions: Sessions,
+    prompts: Prompts,
     skipped: Vec<Event>,
 }
 
@@ -142,12 +149,14 @@ impl Harness {
         let prepared = Arc::new(Mutex::new(Vec::new()));
         let finished = Finished::default();
         let sessions = Sessions::default();
+        let prompts = Prompts::default();
         app.sandbox = Box::new(Gated {
             gate: gate.clone(),
             prepared: prepared.clone(),
             finished: finished.clone(),
             sessions: sessions.clone(),
             root: dir.join(".sulla").join("agent-home"),
+            prompts: prompts.clone(),
         });
         app.all = beads
             .iter()
@@ -170,6 +179,7 @@ impl Harness {
             prepared,
             finished,
             sessions,
+            prompts,
             skipped: Vec::new(),
         }
     }
@@ -241,6 +251,16 @@ impl Harness {
             .iter()
             .filter(|(i, _)| i == id)
             .map(|(_, s)| s.clone())
+            .collect()
+    }
+
+    fn prompts(&self, id: &str) -> Vec<Option<String>> {
+        self.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, p)| p.clone())
             .collect()
     }
 

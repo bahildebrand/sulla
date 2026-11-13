@@ -347,18 +347,6 @@ impl App {
             .find(|d| d.id == id)
     }
 
-    pub(super) fn reload_review(&mut self, id: String) {
-        let r = self.load_diff(&id);
-        let Some(mut d) = self.report(r) else { return };
-        if let View::Review(old) = &self.view
-            && old.id == id
-        {
-            d.carry_rejections(old);
-        }
-        self.view = View::Review(d);
-        self.inject_ai(&id);
-    }
-
     fn load_diff(&self, id: &str) -> Result<Diff> {
         let done = self.bead(id).and_then(|b| b.column(Utc::now(), i64::MAX)) == Some(Column::Done);
         let text = if done {
@@ -376,9 +364,35 @@ impl App {
 
     pub(super) fn open_review(&mut self, id: String) {
         let r = self.load_diff(&id);
-        if let Some(d) = self.report(r) {
-            self.view = View::Review(d);
-            self.inject_ai(&id);
+        let Some(mut d) = self.report(r) else { return };
+        let shown = match &self.view {
+            View::Review(old) if old.id == id => Some(old),
+            _ => None,
+        };
+        if let Some(old) = shown.or(self.saved_reviews.get(&id)) {
+            d.carry(old);
+        }
+        self.saved_reviews.remove(&id);
+        self.view = View::Review(d);
+        self.inject_ai(&id);
+    }
+
+    pub(super) fn leave_review(&mut self) {
+        if let View::Review(d) = std::mem::replace(&mut self.view, View::Board) {
+            self.saved_reviews.insert(d.id.clone(), d);
+        }
+    }
+
+    pub(super) fn unpark_review(&mut self) {
+        if let Some(d) = self.parked_review.take() {
+            self.saved_reviews.insert(d.id.clone(), d);
+        }
+    }
+
+    pub(super) fn forget_review(&mut self, id: &str) {
+        self.saved_reviews.remove(id);
+        if self.parked_review.as_ref().is_some_and(|d| d.id == id) {
+            self.parked_review = None;
         }
     }
 }

@@ -396,9 +396,7 @@ impl App {
         if self.report(r).is_none() {
             return self.mutated();
         }
-        if self.parked_review.as_ref().is_some_and(|d| d.id == id) {
-            self.parked_review = None;
-        }
+        self.forget_review(id);
         if self.viewing().as_deref() == Some(id) {
             if matches!(self.mode, Mode::Insert) {
                 self.mode = Mode::Normal;
@@ -470,7 +468,7 @@ impl App {
         let r = self.reclaim_stack(id);
         self.status.push_str(&r.summary());
         if matches!(&self.view, View::Review(d) if d.id == id) {
-            self.reload_review(id.to_string());
+            self.open_review(id.to_string());
         }
         self.mutated();
     }
@@ -800,9 +798,7 @@ impl App {
             if self.cfg.pr.backup_sessions {
                 self.backup_session(&bead);
             }
-            if self.parked_review.as_ref().is_some_and(|d| d.id == id) {
-                self.parked_review = None;
-            }
+            self.forget_review(id);
             if self.viewing().as_deref() == Some(id) {
                 if matches!(self.mode, Mode::Insert) {
                     self.mode = Mode::Normal;
@@ -952,8 +948,8 @@ impl App {
             tracing::warn!("pr watch: {e:#}");
         }
         self.notifier.clear(id);
+        self.forget_review(id);
         if self.viewing().as_deref() == Some(id) {
-            self.parked_review = None;
             self.view = View::Board;
         }
         if !children.is_empty() {

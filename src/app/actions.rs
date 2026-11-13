@@ -242,6 +242,7 @@ impl App {
         self.stop_check(id);
         self.remove_agent(id, Outcome::Discarded);
         let children = self.git.children(id);
+        self.forget_review(id);
         self.untrack(id);
         let r = self.git.discard(id);
         if self.report(r).is_some() {
@@ -276,6 +277,7 @@ impl App {
         self.remove_agent(id, Outcome::Discarded);
         self.failed.remove(id);
         let children = self.git.children(id);
+        self.forget_review(id);
         self.untrack(id);
         let r = self.git.discard(id);
         if self.report(r).is_some() {
@@ -317,6 +319,7 @@ impl App {
         self.failed.remove(id);
         let entry = format!("Retry after discarded attempt: {note}");
         let children = self.git.children(id);
+        self.forget_review(id);
         self.untrack(id);
         let r = self.git.remove(id);
         if self.report(r).is_some() {
@@ -339,15 +342,34 @@ impl App {
         self.mutated();
     }
 
-    pub(super) fn feedback(&mut self, id: &str, text: &str) {
+    pub(super) fn feedback(&mut self, id: &str, text: &str) -> bool {
         if !self.deliver(id, text) {
-            return;
+            return false;
         }
         self.ai_reviews.remove(id);
         self.auto_rounds.remove(id);
         self.status = format!("feedback sent to {id}");
-        self.parked_review = None;
+        self.unpark_review();
+        self.leave_review();
+        if let Some(d) = self.saved_reviews.get_mut(id) {
+            d.comments.clear();
+        }
         self.view = View::Progress(id.to_string());
+        true
+    }
+
+    pub(super) fn send_note(&mut self, id: &str, note: &str) {
+        let pending = match &self.view {
+            View::Review(d) if d.id == id => d.feedback().map(|json| (json, d.comments.len())),
+            _ => None,
+        };
+        let Some((json, n)) = pending else {
+            self.feedback(id, note);
+            return;
+        };
+        if self.feedback(id, &format!("{json}\n\n{note}")) {
+            self.status = format!("feedback and {n} inline comment(s) sent to {id}");
+        }
     }
 
     pub(super) fn request_edit(&mut self, id: &str) {

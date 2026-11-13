@@ -421,6 +421,7 @@ impl App {
 
     fn merged(&mut self, id: &str, already: bool, c: Closed) {
         self.merging.remove(id);
+        self.forget_review(id);
         self.status = match (already, c.closed) {
             (true, Ok(())) => format!("{id} was already merged, closed bead"),
             (true, Err(e)) => format!("{id} was already merged but bd close failed: {e}"),

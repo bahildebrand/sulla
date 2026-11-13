@@ -211,6 +211,14 @@ evicting another parked agent if no slot is free (`:browse` then starts and open
 app). When every slot holds a working agent, the status line says so and the bead stays in
 Review.
 
+Your inline comments, hunk rejections, file selection and cursor positions belong to the bead,
+not to the open diff. Leaving the review with `q`/`Esc` keeps them, and reopening the bead's review
+restores them on the fresh diff (rejections only where the hunk is unchanged). `R`, and returning
+from `e`/`E`, reload the diff the same way. `S` sends the comments and clears them. `s` sends a
+typed note; with comments pending it sends them first, exactly as `S` would, followed by the note,
+and the status line says `feedback and <n> inline comment(s) sent to <bead>`. The stored state is
+dropped when the bead is merged, discarded, deleted, retried, released, or published as a PR.
+
 ### AI review
 
 `V` starts a reviewer agent in the bead's worktree with a fresh session. The bead is labeled

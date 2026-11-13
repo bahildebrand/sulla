@@ -130,14 +130,8 @@ impl App {
             Err(e) => self.status = format!("{name} failed: {e}"),
         }
         self.config_edited();
-        let View::Review(d) = &mut self.view else {
-            return;
-        };
-        let (id, sel, comments) = (d.id.clone(), d.sel, std::mem::take(&mut d.comments));
-        self.reload_review(id);
-        if let View::Review(d) = &mut self.view {
-            d.comments = comments;
-            d.sel = sel.min(d.files.len().saturating_sub(1));
+        if let View::Review(d) = &self.view {
+            self.open_review(d.id.clone());
         }
     }
 

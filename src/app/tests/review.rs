@@ -152,3 +152,101 @@ fn auto_review_skips_released_beads_and_counts_nothing_when_it_cannot_start() {
     assert!(!h.app.auto_rounds.contains_key("b"));
     assert_eq!(h.state("b"), Some(State::Review));
 }
+
+fn reviewable(name: &str) -> Harness {
+    let mut h = Harness::new(name, &[("t-1", Some(State::Review))]);
+    let wt = h.app.git.ensure_worktree("t-1", "main").unwrap();
+    std::fs::write(wt.join("a.txt"), "a\nb\n").unwrap();
+    git_in(&wt, &["commit", "-qam", "add b"]);
+    h.app.open_review("t-1".into());
+    h
+}
+
+fn press(h: &mut Harness, code: crossterm::event::KeyCode) {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    h.app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+fn type_text(h: &mut Harness, text: &str) {
+    use crossterm::event::KeyCode;
+    for c in text.chars() {
+        press(h, KeyCode::Char(c));
+    }
+    press(h, KeyCode::Enter);
+}
+
+fn comment_and_reject(h: &mut Harness) {
+    use crossterm::event::KeyCode;
+    press(h, KeyCode::Tab);
+    press(h, KeyCode::Char('G'));
+    press(h, KeyCode::Char('c'));
+    type_text(h, "rename b");
+    press(h, KeyCode::Char('n'));
+    let d = open_diff(h);
+    assert_eq!(d.comments.len(), 1, "{}", h.app.status);
+    assert_eq!(d.rejected_hunks(), 1);
+}
+
+fn open_diff(h: &Harness) -> &crate::ui::review::Diff {
+    match &h.app.view {
+        View::Review(d) => d,
+        _ => panic!("review not open"),
+    }
+}
+
+#[test]
+fn review_comments_survive_leaving_and_reopening() {
+    use crossterm::event::KeyCode;
+    let mut h = reviewable("review-reopen");
+    comment_and_reject(&mut h);
+    press(&mut h, KeyCode::Char('q'));
+    assert!(matches!(h.app.view, View::Board));
+    h.app.open_review("t-1".into());
+    let d = open_diff(&h);
+    assert_eq!(d.comments.len(), 1);
+    assert_eq!(d.comments[0].text, "rename b");
+    assert_eq!(d.rejected_hunks(), 1);
+    assert_eq!(d.files[d.sel].name, "a.txt");
+    press(&mut h, KeyCode::Esc);
+    assert!(h.app.saved_reviews.contains_key("t-1"));
+    h.app.discard("t-1");
+    assert!(h.app.saved_reviews.is_empty());
+}
+
+#[test]
+fn review_reload_keeps_comments() {
+    use crossterm::event::KeyCode;
+    let mut h = reviewable("review-reload");
+    comment_and_reject(&mut h);
+    let cursor = open_diff(&h).files[1].cursor;
+    press(&mut h, KeyCode::Char('R'));
+    let d = open_diff(&h);
+    assert_eq!(d.comments.len(), 1);
+    assert_eq!(d.rejected_hunks(), 1);
+    assert_eq!(d.sel, 1);
+    assert_eq!(d.files[1].cursor, cursor);
+}
+
+#[test]
+fn review_note_carries_pending_inline_comments() {
+    use crossterm::event::KeyCode;
+    let mut h = reviewable("review-note");
+    comment_and_reject(&mut h);
+    let json = open_diff(&h).feedback().unwrap();
+    press(&mut h, KeyCode::Char('s'));
+    type_text(&mut h, "also add tests");
+    assert!(matches!(&h.app.view, View::Progress(id) if id == "t-1"));
+    assert_eq!(h.app.status, "feedback and 1 inline comment(s) sent to t-1");
+    h.pump();
+    let prompts = h.prompts("t-1");
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    let prompt = prompts[0].clone().unwrap();
+    assert!(
+        prompt.contains(&format!("{json}\n\nalso add tests")),
+        "{prompt}"
+    );
+    h.app.open_review("t-1".into());
+    let d = open_diff(&h);
+    assert!(d.comments.is_empty());
+    assert_eq!(d.rejected_hunks(), 1);
+}
