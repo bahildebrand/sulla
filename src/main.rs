@@ -13,6 +13,7 @@ mod guard;
 mod health;
 mod init;
 mod lock;
+mod logs;
 mod notify;
 mod pr;
 mod presets;
@@ -117,8 +118,8 @@ fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .map(|d| d.data_local_dir().to_path_buf())
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&dir)?;
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::never(dir, "sulla.log"));
+    let file = logs::Rotating::open(dir.join("sulla.log"), logs::ROTATE_BYTES)?;
+    let (writer, guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::fmt()
         .with_writer(writer)
         .with_ansi(false)
@@ -162,10 +163,13 @@ fn main() -> Result<()> {
         _ => {}
     }
     let _lock = lock::acquire(&repo)?;
-    beads::Beads::new(&repo)
+    let listed_at = std::time::SystemTime::now();
+    let all = beads::Beads::new(&repo)
         .list_all()
         .wrap_err("bd is not usable here, run `bd init` in the repo")?;
     let _guard = init_logging()?;
+    let (log_dir, retention) = (logs::dir(&repo), cfg.done_retention_days);
+    std::thread::spawn(move || logs::prune(&log_dir, &all, retention, listed_at));
 
     let (tx, rx) = channel();
     let mut app = App::new(cfg, layers, repo, tx.clone())?;

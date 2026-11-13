@@ -3,6 +3,7 @@ use color_eyre::eyre::bail;
 use crate::agent::{self, CHAT_ID};
 use crate::beads::{Bead, State};
 use crate::browse;
+use crate::logs;
 use crate::sandbox::{self, Outcome};
 
 use super::merge::Restacked;
@@ -286,6 +287,7 @@ impl App {
             self.bead_sessions.remove(id);
             self.clamp();
             self.status = format!("deleted {id}");
+            logs::remove_bead(&logs::dir(&self.repo), id);
             let id = id.to_string();
             self.bd_run(move |b| b.delete(&id));
         }

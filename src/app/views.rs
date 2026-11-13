@@ -9,6 +9,7 @@ use crate::beads::Beads;
 use crate::config::{AgentKind, PrTool, SandboxKind, Workflow};
 use crate::graphite;
 use crate::health::{self, Probe};
+use crate::logs;
 use crate::pr;
 use crate::timeline;
 use crate::ui::config::ConfigView;
@@ -66,13 +67,13 @@ impl App {
     }
 
     pub(super) fn agent_log(&self, id: &str) -> PathBuf {
-        agent::log_path(&self.repo.join(".sulla").join("logs"), id)
+        agent::log_path(&logs::dir(&self.repo), id)
     }
 
     pub(super) fn show_log(&mut self, id: String) {
         let (r, c) = self.pty_size();
         let render = |path: PathBuf| {
-            std::fs::read(path)
+            logs::read_tail(&path, logs::TAIL_BYTES)
                 .ok()
                 .map(|b| agent::render_log(&b, r, c))
         };

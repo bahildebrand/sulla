@@ -175,7 +175,8 @@ setup = "npm ci"          # run once in each new worktree before its agent start
 perf = "This is a performance change. Measure before and after and report the numbers."
 ```
 
-Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more).
+Logs go to `~/.local/share/sulla/sulla.log` (`SULLA_LOG=debug` for more), rotated to `sulla.log.1` at
+10MB.
 
 ## Notifications
 

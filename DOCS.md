@@ -190,7 +190,12 @@ When recent agent output shows a 429, rate limit or quota error, sulla stops lau
   Copilot reports AI credits (`cr`), Claude USD when available. The status bar shows usage since
   startup.
 - Raw PTY output goes to `.sulla/logs/<bead>.log` (reviewers to `<bead>~review.log`) and survives
-  crashes, merges and restarts. `l` in the inspect popup shows the last 5000 lines.
+  crashes, merges and restarts. `l` in the inspect popup reads the last 1MB of the log and shows
+  up to its last 5000 lines.
+- `dd` deletes the bead's logs along with it. On startup sulla deletes, in the background, the logs
+  of beads closed more than `done_retention_days` ago and logs whose bead no longer exists.
+- sulla's own log (`sulla.log` in the platform data dir, level from `SULLA_LOG`) rotates to
+  `sulla.log.1` at 10MB, keeping one previous file.
 
 ## Review
 
