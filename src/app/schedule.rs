@@ -266,6 +266,7 @@ impl App {
             .keys()
             .chain(&self.starting)
             .chain(self.launching.keys())
+            .chain(&self.merging)
     }
 
     pub fn is_starting(&self, id: &str) -> bool {

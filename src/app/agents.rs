@@ -170,7 +170,7 @@ impl App {
     }
 
     pub(super) fn deliver(&mut self, id: &str, text: &str) -> bool {
-        if self.refuse_released(id) {
+        if self.refuse_released(id) || self.busy_merging(id) {
             return false;
         }
         let alive = self.agents.get(id).is_some_and(|a| a.alive);
@@ -229,7 +229,7 @@ impl App {
             self.status = format!("{id} is under ai review, X to stop it");
             return;
         }
-        if self.refuse_released(id) {
+        if self.refuse_released(id) || self.busy_merging(id) {
             return;
         }
         self.remove_agent(id, Outcome::Exited);

@@ -63,7 +63,7 @@ impl App {
     }
 
     fn begin_review(&mut self, id: &str, auto: Option<(u32, u32)>) -> bool {
-        if self.refuse_released(id) {
+        if self.refuse_released(id) || self.busy_merging(id) {
             return false;
         }
         let Some(b) = self.bead(id).cloned() else {

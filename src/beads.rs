@@ -268,6 +268,8 @@ pub struct Beads {
     timeout: std::time::Duration,
     #[cfg(test)]
     closes: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    #[cfg(test)]
+    unblocked: bool,
 }
 
 impl Beads {
@@ -279,6 +281,8 @@ impl Beads {
             timeout: proc::BD,
             #[cfg(test)]
             closes: None,
+            #[cfg(test)]
+            unblocked: false,
         }
     }
 
@@ -292,6 +296,11 @@ impl Beads {
     #[cfg(test)]
     pub fn record_closes(&mut self) -> Arc<std::sync::Mutex<Vec<String>>> {
         self.closes.get_or_insert_default().clone()
+    }
+
+    #[cfg(test)]
+    pub fn assume_unblocked(&mut self) {
+        self.unblocked = true;
     }
 
     pub fn server_mode(&self) -> bool {
@@ -682,6 +691,10 @@ impl Beads {
     }
 
     pub fn open_blockers(&self, id: &str) -> Result<Vec<String>> {
+        #[cfg(test)]
+        if self.unblocked {
+            return Ok(Vec::new());
+        }
         Ok(self
             .show(id)?
             .open_blockers()

@@ -41,6 +41,14 @@ impl App {
                 "Quitting waits for {launching} agent launch(es) in progress."
             ));
         }
+        if !self.merging.is_empty() {
+            let mut ids: Vec<&str> = self.merging.iter().map(String::as_str).collect();
+            ids.sort_unstable();
+            msg.push(format!(
+                "Merging {} stops after its current step, m finishes it next launch.",
+                ids.join(", ")
+            ));
+        }
         if msg.is_empty() {
             self.quit = true;
         } else {
@@ -200,6 +208,10 @@ impl App {
         busy
     }
 
+    pub(super) fn in_flight(&mut self, id: &str) -> bool {
+        self.busy_merging(id) || self.busy_publishing(id)
+    }
+
     pub(super) fn branch_in_use(&mut self, id: &str) -> bool {
         let Some(path) = self.git.checked_out(id) else {
             return false;
@@ -213,7 +225,7 @@ impl App {
     }
 
     pub(super) fn confirm_discard(&mut self, id: String) {
-        if self.busy_publishing(&id) || self.branch_in_use(&id) {
+        if self.in_flight(&id) || self.branch_in_use(&id) {
             return;
         }
         self.mode = Mode::Confirm {
@@ -244,7 +256,7 @@ impl App {
     }
 
     pub(super) fn confirm_delete(&mut self, id: String) {
-        if self.busy_publishing(&id) || self.branch_in_use(&id) {
+        if self.in_flight(&id) || self.branch_in_use(&id) {
             return;
         }
         self.mode = Mode::Confirm {
@@ -285,7 +297,7 @@ impl App {
     pub(super) fn request_retry(&mut self, id: String) {
         if agent::reviewed_bead(&id).is_some()
             || id == CHAT_ID
-            || self.busy_publishing(&id)
+            || self.in_flight(&id)
             || self.branch_in_use(&id)
         {
             return;

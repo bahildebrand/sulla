@@ -332,7 +332,7 @@ impl App {
     }
 
     fn releasable(&mut self, id: &str) -> bool {
-        if self.refuse_released(id) || self.busy_publishing(id) {
+        if self.refuse_released(id) || self.in_flight(id) {
             return false;
         }
         let open = self.bead(id).is_some_and(|b| {
@@ -533,7 +533,7 @@ impl App {
             self.status = format!("every change in {id} is rejected, D discards it");
             return;
         }
-        if self.busy_publishing(&id) {
+        if self.in_flight(&id) {
             return;
         }
         self.status = format!("checking blockers of {id}...");

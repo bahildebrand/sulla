@@ -15,6 +15,7 @@ mod views;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -61,6 +62,7 @@ pub enum Event {
 
 pub type Callback = Box<dyn FnOnce(&mut App) + Send>;
 type BdJob = Box<dyn FnOnce(&Beads) -> Callback + Send>;
+type GitJob = Box<dyn FnOnce() -> Callback + Send>;
 
 fn backends(cfg: &Config) -> HashMap<AgentKind, Box<dyn Backend>> {
     let mut backends: HashMap<AgentKind, Box<dyn Backend>> = HashMap::new();
@@ -89,6 +91,18 @@ fn spawn_bd_worker(beads: Beads, tx: Sender<Event>) -> Sender<BdJob> {
         }
     });
     jobs
+}
+
+fn spawn_git_worker(tx: Sender<Event>) -> (Sender<GitJob>, JoinHandle<()>) {
+    let (jobs, rx) = channel::<GitJob>();
+    let worker = std::thread::spawn(move || {
+        for job in rx {
+            if tx.send(Event::Finished(job())).is_err() {
+                return;
+            }
+        }
+    });
+    (jobs, worker)
 }
 
 pub enum Suspend {
@@ -315,6 +329,11 @@ pub struct App {
     bd_jobs: Sender<BdJob>,
     bd_pending: usize,
     background_pending: usize,
+    git_jobs: Sender<GitJob>,
+    git_worker: Option<JoinHandle<()>>,
+    git_pending: usize,
+    merging: HashSet<String>,
+    sweeping: bool,
     starting: HashSet<String>,
     launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
@@ -355,6 +374,7 @@ impl App {
         });
         let pr_watch = pr::Watch::load(repo.join(".sulla").join("pr-watch.json"));
         let bd_jobs = spawn_bd_worker(beads.clone(), tx.clone());
+        let (git_jobs, git_worker) = spawn_git_worker(tx.clone());
         let usage_watch = usage::spawn(poll_every.clone(), tx.clone());
         let backends = backends(&cfg);
         let config_watch = ConfigWatch::new(layers.paths());
@@ -438,6 +458,11 @@ impl App {
             bd_jobs,
             bd_pending: 0,
             background_pending: 0,
+            git_jobs,
+            git_worker: Some(git_worker),
+            git_pending: 0,
+            merging: HashSet::new(),
+            sweeping: false,
             starting: HashSet::new(),
             launching: HashMap::new(),
             publishing: HashSet::new(),
@@ -798,6 +823,25 @@ impl App {
         });
     }
 
+    fn git_job<T: Send + 'static>(
+        &mut self,
+        job: impl FnOnce() -> T + Send + 'static,
+        done: impl FnOnce(&mut App, T) + Send + 'static,
+    ) {
+        let job: GitJob = Box::new(move || {
+            let r = job();
+            Box::new(move |app: &mut App| {
+                app.git_pending -= 1;
+                done(app, r);
+            })
+        });
+        self.git_pending += 1;
+        if let Err(e) = self.git_jobs.send(job) {
+            tracing::warn!("git worker stopped, running its job inline");
+            (e.0)()(self);
+        }
+    }
+
     fn bd_run(&mut self, job: impl FnOnce(&Beads) -> Result<()> + Send + 'static) {
         self.bd(job, |app, r| {
             app.report(r);
@@ -1097,6 +1141,12 @@ impl App {
             if l.job.join().is_err() {
                 tracing::warn!("launch of {id} panicked during shutdown");
             }
+        }
+        self.git_jobs = channel().0;
+        if let Some(w) = self.git_worker.take()
+            && w.join().is_err()
+        {
+            tracing::warn!("git worker panicked during shutdown");
         }
         for c in self.checks.values_mut() {
             c.stop();

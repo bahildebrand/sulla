@@ -188,6 +188,7 @@ impl Harness {
             || !self.app.starting.is_empty()
             || self.app.bd_pending > 0
             || self.app.background_pending > 0
+            || self.app.git_pending > 0
         {
             let wait = deadline.saturating_duration_since(Instant::now());
             let ev = self.rx.recv_timeout(wait).expect("launch did not finish");
