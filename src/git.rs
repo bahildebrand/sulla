@@ -159,11 +159,16 @@ impl Git {
         .is_ok()
     }
 
+    fn prune(&self) -> Result<()> {
+        run(&self.repo, &["worktree", "prune"]).map(drop)
+    }
+
     pub fn ensure_worktree(&self, id: &str, base: &str) -> Result<PathBuf> {
         let path = self.worktree_path(id);
         if path.join(".git").exists() {
             return Ok(path);
         }
+        self.prune()?;
         let br = self.branch(id);
         let p = path.to_string_lossy();
         if self.branch_exists(&br) {
@@ -891,6 +896,7 @@ impl Git {
         self.forget(id)?;
         let br = self.branch(id);
         if self.branch_exists(&br) {
+            self.prune()?;
             run(&self.repo, &["branch", "-D", &br])?;
         }
         Ok(())
@@ -940,6 +946,19 @@ mod tests {
             .collect();
         ids.sort();
         assert_eq!(ids, ["n-1"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_deleted_worktree_is_pruned_before_reuse() {
+        let (dir, g) = scratch("prune");
+        let wt = g.ensure_worktree("p-1", "main").unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+        assert_eq!(g.ensure_worktree("p-1", "main").unwrap(), wt);
+        assert!(wt.join(".git").exists());
+        std::fs::remove_dir_all(&wt).unwrap();
+        g.remove("p-1").unwrap();
+        assert!(!g.has_branch("p-1"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
