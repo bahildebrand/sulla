@@ -268,6 +268,8 @@ impl App {
         let r = self.git.discard(id);
         if self.report(r).is_some() {
             self.all.retain(|b| b.id != id);
+            self.git.forget_sessions(id);
+            self.bead_sessions.remove(id);
             self.clamp();
             self.status = format!("deleted {id}");
             let id = id.to_string();

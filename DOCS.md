@@ -71,6 +71,10 @@ Board state lives in beads labels: `sulla:backlog`, `sulla:running`, `sulla:revi
 - On restart, running agents are resumed via their agent session. Review beads are resumed only
   into slots that no pending, stackable or revise work wants, so a restart never puts parked
   review agents ahead of ready work.
+- Every fresh run of a bead (its first launch, a release after Kill, Discard or a budget hold,
+  and Retry) starts a new agent session and appends its id to `sulla.<bead>.session` in the
+  repo's git config. Resuming always picks the last one, also after a restart. Delete removes
+  the entries.
 
 ### Workflow
 
@@ -182,7 +186,7 @@ When recent agent output shows a 429, rate limit or quota error, sulla stops lau
 ### Tokens and logs
 
 - Token usage comes from session files (`~/.copilot/session-state/<id>/events.jsonl` or
-  `~/.claude/projects/*/<id>.jsonl`), summed over a bead's implementer and reviewer sessions.
+  `~/.claude/projects/*/<id>.jsonl`), summed over all of a bead's implementer runs and reviewer sessions.
   Copilot reports AI credits (`cr`), Claude USD when available. The status bar shows usage since
   startup.
 - Raw PTY output goes to `.sulla/logs/<bead>.log` (reviewers to `<bead>~review.log`) and survives
@@ -411,15 +415,15 @@ Awaiting PR beads can wait days or weeks, and agent session files live outside t
 `.sulla/sessions/<bead>/` (git-ignored with the rest of `.sulla/`), replacing the previous backup.
 The backup is removed when the bead closes.
 
-Whenever a bead's agent is resumed with `workflow = "pr"` (revising, sending feedback, `A`, or a
+Whenever a bead's agent is resumed, under either workflow (revising, sending feedback, `A`, or a
 restart):
 
 - If the live session files exist, the session resumes as usual.
 - If they are missing but a backup exists, the backup is copied back to its original location and
   the session resumes.
-- If neither exists, sulla starts a fresh session with the original bead prompt, the PR URL, the
-  `git log base..HEAD` summary of the branch and the feedback being sent, and the status bar says
-  the session was rebuilt.
+- If neither exists, sulla starts a fresh session with the original bead prompt, the PR URL (when
+  the bead has one), the `git log base..HEAD` summary of the branch and the feedback being sent,
+  and the status bar says the session was rebuilt.
 
 With `sandbox = "incus"` and the default `[incus] agent = "host"`, Claude runs on the host (only
 its Bash commands go to the container), so its sessions are the host's `~/.claude` (or the host's
@@ -430,7 +434,8 @@ with the host `HOME`, and the default `[incus] mounts` share `~/.copilot` and `~
 host, so sessions are backed up and restored on the host. If `[incus] env` points `COPILOT_HOME`
 or `CLAUDE_CONFIG_DIR` elsewhere, that path is used instead. When the session directory is not
 under any mount, sulla cannot see it from the host and skips backup, restore and rebuild for that
-agent. With `workflow = "local"` none of this runs.
+agent. With `workflow = "local"` no backups are made, but resuming still checks for the live
+session and rebuilds a lost one.
 
 ### Rejecting hunks
 

@@ -232,6 +232,16 @@ pub fn chat_session(repo: &std::path::Path) -> String {
     session_id(repo, &format!("{CHAT_ID}{}", nonce()))
 }
 
+pub fn fresh_session(repo: &std::path::Path, bead_id: &str) -> String {
+    session_id(repo, &format!("{bead_id}#{}", nonce()))
+}
+
+pub fn current_session(repo: &std::path::Path, bead_id: &str, runs: &[String]) -> String {
+    runs.last()
+        .cloned()
+        .unwrap_or_else(|| session_id(repo, bead_id))
+}
+
 pub fn review_session(repo: &std::path::Path, bead_id: &str) -> String {
     session_id(repo, &format!("{}{}", review_id(bead_id), nonce()))
 }
@@ -1104,6 +1114,17 @@ mod tests {
         assert_eq!(text.matches("session started").count(), 2);
         assert!(text.contains("first") && text.contains("second"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bead_runs_get_fresh_sessions_and_resume_the_latest() {
+        let repo = std::path::Path::new("/r");
+        let a = fresh_session(repo, "x-1");
+        let b = fresh_session(repo, "x-1");
+        assert_ne!(a, b);
+        assert_ne!(a, session_id(repo, "x-1"));
+        assert_eq!(current_session(repo, "x-1", &[]), session_id(repo, "x-1"));
+        assert_eq!(current_session(repo, "x-1", &[a, b.clone()]), b);
     }
 
     #[test]

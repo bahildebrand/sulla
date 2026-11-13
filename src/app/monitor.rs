@@ -256,9 +256,9 @@ impl App {
                     .iter()
                     .map(|id| agent::session_id(&self.repo, id))
                     .chain(
-                        self.review_sessions
-                            .get(&b.id)
+                        [&self.bead_sessions, &self.review_sessions]
                             .into_iter()
+                            .filter_map(|m| m.get(&b.id))
                             .flatten()
                             .cloned(),
                     )

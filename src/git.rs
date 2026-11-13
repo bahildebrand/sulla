@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -87,6 +88,10 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 fn parent_key(id: &str) -> String {
     format!("sulla.{id}.parent")
+}
+
+fn session_key(id: &str) -> String {
+    format!("sulla.{id}.session")
 }
 
 impl Git {
@@ -276,6 +281,32 @@ impl Git {
                     .then(|| (id.to_string(), v.trim().to_string()))
             })
             .collect()
+    }
+
+    pub fn add_session(&self, id: &str, session: &str) -> Result<()> {
+        run(&self.repo, &["config", "--add", &session_key(id), session]).map(drop)
+    }
+
+    pub fn sessions(&self) -> HashMap<String, Vec<String>> {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        let Ok(text) = run(
+            &self.repo,
+            &["config", "--get-regexp", r"^sulla\..*\.session$"],
+        ) else {
+            return out;
+        };
+        for (id, session) in text.lines().filter_map(|l| {
+            let (k, v) = l.split_once(' ')?;
+            let id = k.strip_prefix("sulla.")?.strip_suffix(".session")?;
+            Some((id.to_string(), v.trim().to_string()))
+        }) {
+            out.entry(id).or_default().push(session);
+        }
+        out
+    }
+
+    pub fn forget_sessions(&self, id: &str) {
+        let _ = run(&self.repo, &["config", "--unset-all", &session_key(id)]);
     }
 
     pub fn children(&self, parent: &str) -> Vec<String> {
@@ -924,6 +955,22 @@ mod tests {
         let g = Git::new(dir.clone());
         g.ensure_ignored().unwrap();
         (dir, g)
+    }
+
+    #[test]
+    fn sessions_are_recorded_in_order_per_bead() {
+        let (dir, g) = scratch("sessions");
+        assert!(g.sessions().is_empty());
+        g.add_session("s-1", "a").unwrap();
+        g.add_session("s-2", "c").unwrap();
+        g.add_session("s-1", "b").unwrap();
+        let all = g.sessions();
+        assert_eq!(all["s-1"], ["a", "b"]);
+        assert_eq!(all["s-2"], ["c"]);
+        g.forget_sessions("s-1");
+        g.forget_sessions("s-1");
+        assert_eq!(g.sessions().keys().collect::<Vec<_>>(), ["s-2"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

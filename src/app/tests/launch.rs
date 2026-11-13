@@ -173,3 +173,74 @@ fn setup_runs_once_per_worktree_and_reports_failure() {
     );
     assert_eq!(std::fs::read_to_string(&runs).unwrap(), "t-1\nt-1\n");
 }
+
+#[test]
+fn fresh_launches_never_reuse_a_session() {
+    let mut h = Harness::new("fresh-sessions", &[("t-1", Some(State::Running))]);
+    let bead = h.bead("t-1");
+    for _ in 0..2 {
+        let (done, record) = recorder();
+        h.app.launch_agent(&bead, false, None, record);
+        h.pump();
+        assert_eq!(*done.lock().unwrap(), Some(true));
+        h.app.take_agent("t-1");
+    }
+    let s = h.sessions("t-1");
+    assert_eq!(s.len(), 2);
+    assert_ne!(s[0], s[1]);
+}
+
+fn launch_and_park(h: &mut Harness, id: &str, resume: bool) {
+    let bead = h.bead(id);
+    let (done, record) = recorder();
+    h.app.launch_agent(&bead, resume, None, record);
+    h.pump();
+    assert_eq!(*done.lock().unwrap(), Some(true));
+    h.app.take_agent(id);
+}
+
+fn touch_claude_session(h: &Harness, session: &str) {
+    let dir = h.session_root().join("projects").join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{session}.jsonl")), "{}\n").unwrap();
+}
+
+#[test]
+fn resume_uses_the_latest_recorded_session_after_a_restart() {
+    let mut h = Harness::new("resume-session", &[("t-1", Some(State::Running))]);
+    launch_and_park(&mut h, "t-1", false);
+    launch_and_park(&mut h, "t-1", false);
+    let started = h.sessions("t-1");
+    assert_eq!(h.app.bead_sessions["t-1"], started);
+    h.app.bead_sessions.clear();
+    h.app.bead_sessions = h.app.git.sessions();
+    assert_eq!(h.app.bead_sessions["t-1"], started);
+    touch_claude_session(&h, &started[1]);
+    launch_and_park(&mut h, "t-1", true);
+    assert_eq!(h.sessions("t-1")[2], started[1]);
+    assert_eq!(h.app.bead_sessions["t-1"], started);
+}
+
+#[test]
+fn lost_session_is_rebuilt_under_the_local_workflow() {
+    let mut h = Harness::new("lost-local", &[("t-1", Some(State::Running))]);
+    assert_eq!(h.app.cfg.workflow, Workflow::Local);
+    launch_and_park(&mut h, "t-1", false);
+    launch_and_park(&mut h, "t-1", true);
+    let s = h.sessions("t-1");
+    assert_eq!(s.len(), 2);
+    assert_ne!(s[0], s[1]);
+    assert_eq!(h.app.bead_sessions["t-1"], s);
+    let note = h.app.note.clone().unwrap_or_default();
+    assert!(note.contains("agent session was lost"), "{note}");
+}
+
+#[test]
+fn delete_forgets_recorded_sessions() {
+    let mut h = Harness::new("delete-sessions", &[("t-1", Some(State::Running))]);
+    launch_and_park(&mut h, "t-1", false);
+    assert!(h.app.git.sessions().contains_key("t-1"));
+    h.app.confirm(Action::Delete("t-1".into()));
+    assert!(!h.app.bead_sessions.contains_key("t-1"));
+    assert!(!h.app.git.sessions().contains_key("t-1"));
+}

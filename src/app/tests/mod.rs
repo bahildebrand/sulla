@@ -35,6 +35,7 @@ struct Gated {
     prepared: Arc<Mutex<Vec<String>>>,
     finished: Finished,
     sessions: Sessions,
+    root: PathBuf,
 }
 
 impl Sandbox for Gated {
@@ -74,6 +75,10 @@ impl Sandbox for Gated {
     }
 
     fn shutdown(&mut self) {}
+
+    fn session_root(&self, _kind: AgentKind, _host: &Path) -> Option<PathBuf> {
+        Some(self.root.clone())
+    }
 
     fn loopback(&self, slot: usize) -> Option<String> {
         browse::loopback(slot)
@@ -142,6 +147,7 @@ impl Harness {
             prepared: prepared.clone(),
             finished: finished.clone(),
             sessions: sessions.clone(),
+            root: dir.join(".sulla").join("agent-home"),
         });
         app.all = beads
             .iter()
@@ -220,6 +226,10 @@ impl Harness {
 
     fn finished(&self) -> Vec<(usize, String, Outcome)> {
         self.finished.lock().unwrap().clone()
+    }
+
+    fn session_root(&self) -> PathBuf {
+        self.dir.join(".sulla").join("agent-home")
     }
 
     fn sessions(&self, id: &str) -> Vec<String> {

@@ -50,6 +50,7 @@ struct Prelaunch {
     app_note: Option<String>,
     recover: Option<Recover>,
     setup: Option<Setup>,
+    runs: Vec<String>,
 }
 
 impl Prelaunch {
@@ -84,8 +85,13 @@ impl Prelaunch {
             (Some(a), Some(b)) => Some(format!("{a}; {b}")),
             (a, b) => a.or(b),
         };
+        let session = if resume {
+            self.current_session()
+        } else {
+            self.new_session()?
+        };
         let launch = Launch {
-            session: agent::session_id(&self.repo, id),
+            session,
             id: id.to_string(),
             bead: true,
             worktree,
@@ -94,6 +100,20 @@ impl Prelaunch {
             model: self.model.clone(),
         };
         Ok((launch, note))
+    }
+
+    fn current_session(&self) -> String {
+        agent::current_session(&self.repo, &self.bead.id, &self.runs)
+    }
+
+    fn new_session(&self) -> Result<String> {
+        let id = self.bead.id.as_str();
+        let session = agent::fresh_session(&self.repo, id);
+        let _git = WORKTREES.lock().unwrap_or_else(PoisonError::into_inner);
+        self.git
+            .add_session(id, &session)
+            .map_err(|e| eyre!("recording session of {id}: {e:#}"))?;
+        Ok(session)
     }
 
     fn run_setup(&self, s: Setup) -> Option<setup::Ran> {
@@ -131,7 +151,7 @@ impl Prelaunch {
         prompt: Option<String>,
     ) -> (bool, Option<String>, Option<String>) {
         let id = &self.bead.id;
-        let session = agent::session_id(&self.repo, id);
+        let session = self.current_session();
         let dest = sessions::backup_dir(&self.repo, id);
         match sessions::ensure(&r.root, r.kind, &session, &dest) {
             Ok(Resume::Live) => return (true, prompt, None),
@@ -265,7 +285,7 @@ impl App {
             return done(self, Err(eyre!("no free agent slot for {id}")));
         };
         let on_pr = self.cfg.workflow == Workflow::Pr;
-        let recover = (resume && on_pr)
+        let recover = resume
             .then(|| self.session_root(kind))
             .flatten()
             .map(|root| Recover {
@@ -295,6 +315,7 @@ impl App {
             app_note: agent::app_note(&self.cfg),
             recover,
             setup: self.setup_job(&id, Some(slot)),
+            runs: self.bead_sessions.get(&id).cloned().unwrap_or_default(),
         };
         self.launch(id, slot, kind, move || job.run(), done);
     }
@@ -346,6 +367,9 @@ impl App {
         let Some(l) = self.launching.remove(id) else {
             return;
         };
+        if let Ok((launch, _)) = &r {
+            self.record_session(id, &launch.session);
+        }
         let r = if l.stopped || self.launch_stopped(id, l.was) {
             Err(stopped(id))
         } else {
@@ -463,7 +487,7 @@ impl App {
         let Some(root) = self.session_root(kind) else {
             return;
         };
-        let session = agent::session_id(&self.repo, &bead.id);
+        let session = self.current_session(&bead.id);
         let dest = sessions::backup_dir(&self.repo, &bead.id);
         match sessions::backup(&root, kind, &session, &dest) {
             Ok(true) => tracing::info!("backed up session of {} to {}", bead.id, dest.display()),
@@ -473,6 +497,22 @@ impl App {
                 bead.id
             ),
             Err(e) => tracing::warn!("backing up session of {}: {e:#}", bead.id),
+        }
+    }
+
+    fn current_session(&self, id: &str) -> String {
+        let runs = self.bead_sessions.get(id).map_or(&[][..], Vec::as_slice);
+        agent::current_session(&self.repo, id, runs)
+    }
+
+    fn record_session(&mut self, id: &str, session: &str) {
+        if agent::reviewed_bead(id).is_some() {
+            return;
+        }
+        let runs = self.bead_sessions.entry(id.to_string()).or_default();
+        if runs.last().map(String::as_str) != Some(session) {
+            runs.push(session.to_string());
+            self.watch_usage();
         }
     }
 
