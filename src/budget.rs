@@ -76,6 +76,10 @@ fn parse_count(s: &str) -> Option<u64> {
     (n >= 0.0 && n.is_finite()).then(|| (n * mul).round() as u64)
 }
 
+fn charged(u: Usage) -> u64 {
+    u.input.saturating_sub(u.cached) + u.output
+}
+
 pub struct Run {
     start: Instant,
     base: Option<Usage>,
@@ -91,9 +95,8 @@ impl Run {
     }
 
     pub fn used(&self, current: Usage) -> u64 {
-        self.base.map_or(0, |b| {
-            (current.input + current.output).saturating_sub(b.input + b.output)
-        })
+        self.base
+            .map_or(0, |b| charged(current).saturating_sub(charged(b)))
     }
 
     pub fn elapsed(&self, now: Instant) -> Duration {
@@ -178,5 +181,21 @@ mod tests {
         assert_eq!(r.used(u(1_500, 200)), 600);
         let r = Run::new(Instant::now(), Some(Usage::default()));
         assert_eq!(r.used(u(10, 5)), 15);
+    }
+
+    #[test]
+    fn run_ignores_cache_reads() {
+        let claude = |uncached: u64, creation: u64, read: u64, output: u64| Usage {
+            input: uncached + creation + read,
+            cached: read,
+            output,
+            ..Default::default()
+        };
+        let r = Run::new(Instant::now(), Some(claude(100, 1_000, 60_000, 50)));
+        assert_eq!(r.used(claude(100, 1_000, 120_000, 50)), 0);
+        assert_eq!(r.used(claude(130, 1_000, 120_000, 50)), 30);
+        assert_eq!(r.used(claude(100, 1_400, 120_000, 50)), 400);
+        assert_eq!(r.used(claude(100, 1_000, 120_000, 75)), 25);
+        assert_eq!(r.used(claude(110, 1_200, 180_000, 80)), 240);
     }
 }

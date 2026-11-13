@@ -167,9 +167,9 @@ setup = "bin/setup.py --no-conda --no-direnv --no-interactive"
 
 ### Budgets
 
-`[budget]` caps each run in minutes and/or tokens (input + output). Labels `budget:minutes=45` or
-`budget:tokens=500k` override it (`k`/`M` suffixes, `0` = unlimited). Counters restart each time
-the bead enters running. Over budget, sulla kills the agent and holds the bead: the card shows a
+`[budget]` caps each run in minutes and/or tokens (uncached input + output; cache reads are free,
+cache writes count). Labels `budget:minutes=45` or `budget:tokens=500k` override it (`k`/`M`
+suffixes, `0` = unlimited). Counters restart each time the bead enters running. Over budget, sulla kills the agent and holds the bead: the card shows a
 red `⏸` with the reason, a `budget` notification fires, and `s` releases it for a fresh run. The
 zoomed card and `i` show e.g. `budget 12/30m 150.0k/500.0k tok`.
 
