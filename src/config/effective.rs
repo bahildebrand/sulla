@@ -362,6 +362,10 @@ mod tests {
             toml::Value::Array(vec!["~/.claude".into(), "~/.copilot".into()])
         );
         assert_eq!(
+            e.get(&["incus", "boot_timeout_secs"]).unwrap().value,
+            toml::Value::Integer(60)
+        );
+        assert_eq!(
             e.get(&["presets"]).unwrap().value,
             toml::Value::Table(toml::Table::new())
         );
@@ -403,12 +407,14 @@ mod tests {
         let d = Dir::new("nested");
         let layers = d.layers(
             Some("[incus]\nmemory = \"4GiB\"\n[incus.browse]\nhosts = [\"*.test\"]"),
-            Some("[incus.browse]\nports = [8000]\n[incus.env]\nFOO = \"1\""),
+            Some("[incus]\nboot_timeout_secs = 180\n[incus.browse]\nports = [8000]\n[incus.env]\nFOO = \"1\""),
             "",
         );
         let e = layers.effective().unwrap();
         let cfg = layers.config().unwrap();
         assert_eq!(source(&e, "incus.memory"), Source::Global);
+        assert_eq!(source(&e, "incus.boot_timeout_secs"), Source::Repo);
+        assert_eq!(cfg.incus.boot_timeout_secs, 180);
         assert_eq!(source(&e, "incus.golden"), Source::Default);
         assert_eq!(source(&e, "incus.browse.hosts"), Source::Global);
         assert_eq!(source(&e, "incus.browse.ports"), Source::Repo);

@@ -21,7 +21,6 @@ use crate::guard;
 use crate::sessions;
 
 const MAX_NAME: usize = 63;
-const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 const BOOT_POLL: Duration = Duration::from_secs(1);
 const ADDR_TRIES: u32 = 30;
 const BEADS_DEVICE: &str = "beads-dolt";
@@ -163,6 +162,14 @@ impl Cli {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn stdout<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
+        let out = Command::new(&self.bin)
+            .args(args)
+            .stderr(Stdio::null())
+            .output()?;
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
@@ -548,27 +555,46 @@ impl Driver {
     }
 
     fn wait_ready(&self, name: &str) -> Result<()> {
+        let limit = self.cfg.boot_timeout();
         let start = Instant::now();
-        let probes: [&[&str]; 2] = [
-            &["systemctl", "is-system-running", "--wait"],
-            &["docker", "info"],
-        ];
-        loop {
-            for p in probes {
-                let mut args = vec!["exec", name, "--"];
-                args.extend_from_slice(p);
-                if self.run(&args).is_ok() {
-                    return Ok(());
+        let left = || {
+            let secs = limit.saturating_sub(start.elapsed()).as_secs().max(1);
+            secs.to_string()
+        };
+        let state = loop {
+            let out = self.cli.stdout(&[
+                "exec",
+                name,
+                "--",
+                "timeout",
+                &left(),
+                "systemctl",
+                "is-system-running",
+                "--wait",
+            ])?;
+            let state = out.trim().to_string();
+            if system_ready(&state) {
+                if state != "running" {
+                    tracing::info!("incus: {name} booted with systemd {state}");
                 }
+                return Ok(());
             }
-            if start.elapsed() >= BOOT_TIMEOUT {
-                return Err(eyre!(
-                    "incus: {name} not ready after {}s",
-                    BOOT_TIMEOUT.as_secs()
-                ));
+            if self
+                .run(&["exec", name, "--", "timeout", &left(), "docker", "info"])
+                .is_ok()
+            {
+                return Ok(());
+            }
+            if start.elapsed() >= limit {
+                break state;
             }
             std::thread::sleep(BOOT_POLL);
-        }
+        };
+        let state = if state.is_empty() { "unknown" } else { &state };
+        Err(eyre!(
+            "incus: {name} not ready after {}s (systemd {state}), raise [incus] boot_timeout_secs if it boots slowly",
+            limit.as_secs()
+        ))
     }
 
     fn refresh_address(&self, slot: usize) {
@@ -588,7 +614,7 @@ impl Driver {
                 }
                 std::thread::sleep(BOOT_POLL);
             }
-            tracing::warn!("incus: no IPv4 on eth0 for {name}");
+            tracing::warn!("incus: no global IPv4 address for {name}");
         });
     }
 
@@ -946,12 +972,29 @@ fn browse_devices(ports: &[u16], slot: usize) -> BTreeMap<String, (String, Strin
         .collect()
 }
 
+fn system_ready(state: &str) -> bool {
+    matches!(state.trim(), "running" | "degraded")
+}
+
+fn nested_bridge(nic: &str) -> bool {
+    nic == "docker0" || nic.starts_with("br-")
+}
+
 fn parse_ipv4(json: &str, name: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let v: Value = serde_json::from_str(json).ok()?;
     let inst = v.as_array()?.iter().find(|i| i["name"] == name)?;
-    inst["state"]["network"]["eth0"]["addresses"]
-        .as_array()?
+    let mut nics: Vec<(&String, &Value)> = inst["state"]["network"]
+        .as_object()?
         .iter()
+        .filter(|(_, n)| n["type"] != "loopback")
+        .collect();
+    nics.sort_by_key(|(nic, n)| {
+        let attached = n["host_name"].as_str().is_some_and(|h| !h.is_empty());
+        (!attached, nested_bridge(nic))
+    });
+    nics.iter()
+        .filter_map(|(_, n)| n["addresses"].as_array())
+        .flatten()
         .find(|a| a["family"] == "inet" && a["scope"] == "global")?["address"]
         .as_str()
         .map(String::from)
@@ -1921,6 +1964,53 @@ mod tests {
         let s = light_script(1000, false);
         assert!(!s.contains("volume"));
         assert!(!s.contains("image") && !s.contains("builder") && !s.contains("system prune"));
+    }
+
+    #[test]
+    fn system_ready_accepts_running_and_degraded_only() {
+        assert!(system_ready("running"));
+        assert!(system_ready("degraded\n"));
+        assert!(!system_ready("starting"));
+        assert!(!system_ready("initializing"));
+        assert!(!system_ready("offline"));
+        assert!(!system_ready("maintenance"));
+        assert!(!system_ready("stopping"));
+        assert!(!system_ready(""));
+    }
+
+    #[test]
+    fn parse_ipv4_prefers_the_incus_nic_whatever_its_name() {
+        let json = r#"[{"name": "a", "state": {"network": {
+            "br-1f2e3d": {"host_name": "", "type": "broadcast", "addresses": [
+              {"family": "inet", "address": "172.18.0.1", "scope": "global"}
+            ]},
+            "docker0": {"host_name": "", "type": "broadcast", "addresses": [
+              {"family": "inet", "address": "172.17.0.1", "scope": "global"}
+            ]},
+            "enp5s0": {"host_name": "veth1234", "type": "broadcast", "addresses": [
+              {"family": "inet", "address": "10.10.0.7", "scope": "global"}
+            ]},
+            "lo": {"host_name": "", "type": "loopback", "addresses": [
+              {"family": "inet", "address": "127.0.0.1", "scope": "global"}
+            ]}
+        }}}]"#;
+        assert_eq!(parse_ipv4(json, "a").as_deref(), Some("10.10.0.7"));
+        let json = r#"[{"name": "a", "state": {"network": {
+            "docker0": {"addresses": [
+              {"family": "inet", "address": "172.17.0.1", "scope": "global"}
+            ]},
+            "mv0": {"host_name": "", "addresses": [
+              {"family": "inet6", "address": "fd42::7", "scope": "global"},
+              {"family": "inet", "address": "192.168.1.40", "scope": "global"}
+            ]}
+        }}}]"#;
+        assert_eq!(parse_ipv4(json, "a").as_deref(), Some("192.168.1.40"));
+        let json = r#"[{"name": "a", "state": {"network": {
+            "docker0": {"addresses": [
+              {"family": "inet", "address": "172.17.0.1", "scope": "global"}
+            ]}
+        }}}]"#;
+        assert_eq!(parse_ipv4(json, "a").as_deref(), Some("172.17.0.1"));
     }
 
     #[test]

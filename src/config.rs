@@ -219,6 +219,7 @@ pub struct IncusConfig {
     pub nofile: u64,
     pub reset_every: u32,
     pub reset_volumes: bool,
+    pub boot_timeout_secs: u64,
     pub mounts: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub init: Option<String>,
@@ -284,6 +285,12 @@ impl BrowseConfig {
     }
 }
 
+impl IncusConfig {
+    pub fn boot_timeout(&self) -> Duration {
+        Duration::from_secs(self.boot_timeout_secs.max(1))
+    }
+}
+
 impl Default for IncusConfig {
     fn default() -> Self {
         Self {
@@ -297,6 +304,7 @@ impl Default for IncusConfig {
             nofile: 262144,
             reset_every: 10,
             reset_volumes: true,
+            boot_timeout_secs: 60,
             mounts: vec!["~/.claude".into(), "~/.copilot".into()],
             env: BTreeMap::new(),
             init: None,
@@ -495,6 +503,8 @@ mod tests {
         assert_eq!(cfg.max_agents, 9);
         assert_eq!(cfg.incus.memory, "4GiB");
         assert_eq!(cfg.incus.golden, "sulla-golden");
+        assert_eq!(cfg.incus.boot_timeout_secs, 60);
+        assert_eq!(cfg.incus.boot_timeout(), Duration::from_secs(60));
         std::fs::remove_dir_all(d).unwrap();
     }
 

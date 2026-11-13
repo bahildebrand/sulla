@@ -122,6 +122,7 @@ memory = "8GiB"           # limits.memory per slot container
 nofile = 262144           # limits.kernel.nofile
 reset_every = 10          # hard reset a slot after this many beads, 0 = never
 reset_volumes = true      # light reset also prunes Docker volumes
+boot_timeout_secs = 60    # how long a slot container may take to boot before it fails
 mounts = ["~/.claude", "~/.copilot"] # host paths shared at the same path
 env = {}                  # extra env passed to agents in containers
 agent = "host"            # where Claude runs: "host" (Bash goes to the container) or "container"
@@ -261,6 +262,7 @@ cpus = 4                    # limits.cpu per slot, unset means no limit
 nofile = 262144             # limits.kernel.nofile, ClickHouse needs a high limit
 reset_every = 10            # hard reset a slot after this many beads, 0 = never
 reset_volumes = true        # light reset also prunes Docker volumes
+boot_timeout_secs = 60      # how long a slot may take to boot, raise for slow images
 mounts = ["~/.claude", "~/.copilot"]
 agent = "host"              # or "container"
 ```
