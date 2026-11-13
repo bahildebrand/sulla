@@ -292,3 +292,94 @@ fn pr_feedback_notifies_without_queueing_a_revision() {
     assert_eq!(h.app.status, "PR #7 for a: 1 new comment, U to revise");
     assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 1);
 }
+
+#[test]
+fn merged_pr_restacks_children_once_the_fetch_finishes() {
+    let mut h = Harness::new(
+        "merge-fetch",
+        &[("p", Some(State::Pr)), ("c", Some(State::Review))],
+    );
+    h.app.cfg.workflow = Workflow::Pr;
+    h.app.all[0].labels.push("pr:7".into());
+    worked(&h, "p", "main");
+    h.app.git.ensure_stacked_worktree("c", "p").unwrap();
+    worked(&h, "c", "sulla/p");
+    git_in(&h.dir, &["merge", "-q", "--ff-only", "sulla/p"]);
+    h.app
+        .on_pr("p", 7, Ok(pr_status(crate::pr::PrState::Merged, &[])));
+    assert!(h.app.status.starts_with("PR #7 merged"), "{}", h.app.status);
+    assert!(!h.app.status.contains("restacked"), "{}", h.app.status);
+    assert_eq!(h.app.background_pending, 1);
+    assert_eq!(h.app.git.stack_parent("c").as_deref(), Some("p"));
+    h.pump();
+    assert!(h.app.status.starts_with("PR #7 merged"), "{}", h.app.status);
+    assert!(h.app.status.ends_with(", restacked c"), "{}", h.app.status);
+    assert_eq!(h.app.git.stack_parent("c"), None);
+}
+
+fn queue_revision(h: &mut Harness) -> Bead {
+    h.app.cfg.workflow = Workflow::Pr;
+    h.app.all[0].labels.push("pr:7".into());
+    worked(h, "a", "main");
+    h.app
+        .on_pr("a", 7, Ok(pr_status(crate::pr::PrState::Open, &["c1"])));
+    h.app
+        .edit_local("a", |b| b.set_state_label(Some(State::Revise)));
+    h.bead("a")
+}
+
+#[test]
+fn revision_starts_once_the_fetch_and_rebase_finish() {
+    let mut h = Harness::new("revise-fetch", &[("a", Some(State::Pr))]);
+    let a = queue_revision(&mut h);
+    h.app.revise(&a);
+    assert!(h.app.is_starting("a"));
+    assert_eq!(h.app.background_pending, 1);
+    assert_eq!(h.state("a"), Some(State::Revise));
+    assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 1);
+    h.pump();
+    assert_eq!(h.state("a"), Some(State::Running));
+    assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 0);
+    assert!(h.app.pr_watch.beads["a"].revising.is_some());
+    assert!(!git_in(&h.dir, &["rev-parse", "refs/sulla/revise/a"]).is_empty());
+    assert!(h.app.agents.contains_key("a"));
+}
+
+#[test]
+fn revision_is_dropped_when_the_bead_leaves_revise_during_the_fetch() {
+    let mut h = Harness::new("revise-left", &[("a", Some(State::Pr))]);
+    let a = queue_revision(&mut h);
+    h.app.revise(&a);
+    h.app
+        .edit_local("a", |b| b.set_state_label(Some(State::Pr)));
+    h.pump();
+    assert!(!h.app.is_starting("a"));
+    assert_eq!(h.state("a"), Some(State::Pr));
+    assert_eq!(h.app.pr_watch.beads["a"].pending.count(), 1);
+    assert!(git_in(&h.dir, &["for-each-ref", "refs/sulla/revise"]).is_empty());
+    assert!(!h.app.agents.contains_key("a"));
+}
+
+#[test]
+fn published_revision_replies_on_the_pr_in_the_background() {
+    let mut h = Harness::new("reply-fetch", &[("a", Some(State::Pr))]);
+    h.app.cfg.pr.reply = true;
+    queue_revision(&mut h);
+    h.pump();
+    h.app.pr_watch.beads.get_mut("a").unwrap().take();
+    let a = h.bead("a");
+    h.app.published(
+        "a",
+        a,
+        Ok(crate::pr::Pr {
+            number: 7,
+            url: "u".into(),
+        }),
+    );
+    assert!(h.app.pr_watch.beads["a"].revising.is_none());
+    assert_eq!(h.app.background_pending, 1);
+    assert_eq!(h.app.status, "published a as PR #7 u");
+    h.pump();
+    assert_eq!(h.app.background_pending, 0);
+    assert_eq!(h.app.status, "published a as PR #7 u");
+}

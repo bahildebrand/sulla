@@ -1,15 +1,5 @@
 use super::*;
 
-fn worked(h: &Harness, id: &str, onto: &str) -> std::path::PathBuf {
-    let wt = h.app.git.ensure_worktree(id, onto).unwrap();
-    std::fs::write(wt.join(format!("{id}.txt")), "x\n").unwrap();
-    h.app
-        .git
-        .commit_pending(id, &format!("{id}: work"))
-        .unwrap();
-    wt
-}
-
 #[test]
 fn release_frees_the_worktree_and_keeps_the_branch_and_refs() {
     let mut h = Harness::new(

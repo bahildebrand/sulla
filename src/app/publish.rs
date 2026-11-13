@@ -24,6 +24,30 @@ fn rebase_command(up: &str, onto: &str) -> String {
     }
 }
 
+fn fetched_base(git: &Git, remote: &str, base: &str) -> String {
+    git.fetch_base(remote, base).unwrap_or_else(|e| {
+        tracing::warn!("fetch {base}: {e:#}");
+        base.to_string()
+    })
+}
+
+fn rebase_for_revision(git: &Git, remote: &str, base: &str, id: &str) -> Option<String> {
+    let onto = fetched_base(git, remote, base)
+        .trim_start_matches("refs/remotes/")
+        .to_string();
+    let up = git.upstream(id, &onto);
+    let e = git.rebase(id, &onto).err()?;
+    let Some(c) = e.downcast_ref::<RebaseConflict>() else {
+        tracing::warn!("rebase of {id} before revision: {e:#}");
+        return None;
+    };
+    let rebase = rebase_command(&up, &c.base);
+    Some(format!(
+        "Rebasing onto the latest {} hit conflicts. First run `{rebase}`, resolve every conflict while preserving the intent of both sides, and finish the rebase.",
+        c.base
+    ))
+}
+
 struct Publish {
     id: String,
     base: String,
@@ -114,7 +138,52 @@ impl App {
             return self.no_room(&id);
         }
         tracing::info!("revising {id} from PR feedback");
-        let r = self.start_revision(bead);
+        let r = self.revision_number(bead);
+        let Some(number) = self.report(r) else {
+            return self.revision_failed(id);
+        };
+        let failing = self
+            .pr_watch
+            .beads
+            .get(&id)
+            .map(|s| s.pending.failing.clone())
+            .unwrap_or_default();
+        let (git, remote, base, repo) = (
+            self.git.clone(),
+            self.cfg.pr.remote.clone(),
+            self.base.clone(),
+            self.repo.clone(),
+        );
+        let key = id.clone();
+        self.starting.insert(id.clone());
+        self.background(
+            move || {
+                let conflict = rebase_for_revision(&git, &remote, &base, &key);
+                (conflict, pr::failures(&repo, number, &failing))
+            },
+            move |app, (conflict, failures)| {
+                app.rebased_for_revision(id, number, conflict, failures)
+            },
+        );
+    }
+
+    fn rebased_for_revision(
+        &mut self,
+        id: String,
+        number: u64,
+        conflict: Option<String>,
+        failures: Vec<pr::Failure>,
+    ) {
+        self.starting.remove(&id);
+        let Some(bead) = self
+            .bead(&id)
+            .filter(|b| b.status != "closed" && b.state() == Some(State::Revise))
+            .cloned()
+        else {
+            tracing::info!("{id} left revise while fetching, not revising it");
+            return;
+        };
+        let r = self.start_revision(&bead, number, conflict, &failures);
         if self.report(r).is_some() {
             self.failed.remove(&id);
             self.status = format!("revising {id} from PR feedback");
@@ -130,7 +199,7 @@ impl App {
         self.bd_run(move |beads| beads.set_state(&id, State::Revise));
     }
 
-    fn start_revision(&mut self, bead: &Bead) -> Result<()> {
+    fn revision_number(&self, bead: &Bead) -> Result<u64> {
         let id = bead.id.as_str();
         let number: u64 = bead
             .label("pr")
@@ -139,21 +208,24 @@ impl App {
         if !self.git.worktree_path(id).join(".git").exists() {
             return Err(eyre!("{id} has no worktree to revise"));
         }
-        let conflict = self.rebase_for_revision(id);
+        Ok(number)
+    }
+
+    fn start_revision(
+        &mut self,
+        bead: &Bead,
+        number: u64,
+        conflict: Option<String>,
+        failures: &[pr::Failure],
+    ) -> Result<()> {
+        let id = bead.id.as_str();
         let pending = self
             .pr_watch
             .beads
             .get(id)
             .map(|s| s.pending.clone())
             .unwrap_or_default();
-        let failures = pr::failures(&self.repo, number, &pending.failing);
-        let text = pr::revise_prompt(
-            id,
-            number,
-            &pending.comments,
-            &failures,
-            conflict.as_deref(),
-        );
+        let text = pr::revise_prompt(id, number, &pending.comments, failures, conflict.as_deref());
         self.git.mark_revision(id)?;
         self.budget_runs.remove(id);
         self.edit_local(id, |b| b.set_state_label(Some(State::Running)));
@@ -184,28 +256,6 @@ impl App {
             tracing::warn!("pr watch: {e:#}");
         }
         Ok(())
-    }
-
-    fn rebase_for_revision(&self, id: &str) -> Option<String> {
-        let onto = self
-            .git
-            .fetch_base(&self.cfg.pr.remote, &self.base)
-            .map(|r| r.trim_start_matches("refs/remotes/").to_string())
-            .unwrap_or_else(|e| {
-                tracing::warn!("fetch {}: {e:#}", self.base);
-                self.base.clone()
-            });
-        let up = self.git.upstream(id, &onto);
-        let e = self.git.rebase(id, &onto).err()?;
-        let Some(c) = e.downcast_ref::<RebaseConflict>() else {
-            tracing::warn!("rebase of {id} before revision: {e:#}");
-            return None;
-        };
-        let rebase = rebase_command(&up, &c.base);
-        Some(format!(
-            "Rebasing onto the latest {} hit conflicts. First run `{rebase}`, resolve every conflict while preserving the intent of both sides, and finish the rebase.",
-            c.base
-        ))
     }
 
     pub(super) fn request_revise(&mut self, bead: &Bead) {
@@ -791,13 +841,17 @@ impl App {
         if !self.cfg.pr.reply || fb.is_empty() {
             return;
         }
-        let r = self
-            .git
-            .head(id)
-            .and_then(|head| pr::post_comment(&self.repo, number, &pr::reply(&fb, &head)));
-        if let Err(e) = r {
-            tracing::warn!("reply on PR #{number} for {id}: {e:#}");
-        }
+        let head = self.git.head(id);
+        let repo = self.repo.clone();
+        let key = id.to_string();
+        self.background(
+            move || head.and_then(|head| pr::post_comment(&repo, number, &pr::reply(&fb, &head))),
+            move |_, r| {
+                if let Err(e) = r {
+                    tracing::warn!("reply on PR #{number} for {key}: {e:#}");
+                }
+            },
+        );
     }
 
     pub(super) fn on_pr(&mut self, id: &str, number: u64, r: Result<PrStatus, String>) {
@@ -903,15 +957,22 @@ impl App {
             self.view = View::Board;
         }
         if !children.is_empty() {
-            let onto = self
-                .git
-                .fetch_base(&self.cfg.pr.remote, &self.base)
-                .unwrap_or_else(|e| {
-                    tracing::warn!("fetch {}: {e:#}", self.base);
-                    self.base.clone()
-                });
-            let r = self.restack_onto(children, onto);
-            self.status.push_str(&r.summary());
+            let (git, remote, base) = (
+                self.git.clone(),
+                self.cfg.pr.remote.clone(),
+                self.base.clone(),
+            );
+            let merged = self.status.clone();
+            self.background(
+                move || fetched_base(&git, &remote, &base),
+                move |app, onto| {
+                    let summary = app.restack_onto(children, onto).summary();
+                    if !summary.is_empty() {
+                        app.status = format!("{merged}{summary}");
+                    }
+                    app.mutated();
+                },
+            );
         }
         self.mutated();
     }

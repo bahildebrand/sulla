@@ -314,6 +314,7 @@ pub struct App {
     refresh: Sender<()>,
     bd_jobs: Sender<BdJob>,
     bd_pending: usize,
+    background_pending: usize,
     starting: HashSet<String>,
     launching: HashMap<String, Launching>,
     publishing: HashSet<String>,
@@ -436,6 +437,7 @@ impl App {
             refresh,
             bd_jobs,
             bd_pending: 0,
+            background_pending: 0,
             starting: HashSet::new(),
             launching: HashMap::new(),
             publishing: HashSet::new(),
@@ -755,6 +757,22 @@ impl App {
             Ok(()) => self.bd_pending += 1,
             Err(_) => self.fail("bd worker stopped"),
         }
+    }
+
+    fn background<T: Send + 'static>(
+        &mut self,
+        job: impl FnOnce() -> T + Send + 'static,
+        done: impl FnOnce(&mut App, T) + Send + 'static,
+    ) {
+        self.background_pending += 1;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = job();
+            let _ = tx.send(Event::Finished(Box::new(move |app: &mut App| {
+                app.background_pending -= 1;
+                done(app, r);
+            })));
+        });
     }
 
     fn bd_run(&mut self, job: impl FnOnce(&Beads) -> Result<()> + Send + 'static) {

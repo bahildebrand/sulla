@@ -187,6 +187,7 @@ impl Harness {
         while !self.app.launching.is_empty()
             || !self.app.starting.is_empty()
             || self.app.bd_pending > 0
+            || self.app.background_pending > 0
         {
             let wait = deadline.saturating_duration_since(Instant::now());
             let ev = self.rx.recv_timeout(wait).expect("launch did not finish");
@@ -279,6 +280,16 @@ fn recorder() -> (Done, impl FnOnce(&mut App, Result<()>) + Send + 'static) {
     (done, move |_: &mut App, r: Result<()>| {
         *d.lock().unwrap() = Some(r.is_ok());
     })
+}
+
+fn worked(h: &Harness, id: &str, onto: &str) -> std::path::PathBuf {
+    let wt = h.app.git.ensure_worktree(id, onto).unwrap();
+    std::fs::write(wt.join(format!("{id}.txt")), "x\n").unwrap();
+    h.app
+        .git
+        .commit_pending(id, &format!("{id}: work"))
+        .unwrap();
+    wt
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
