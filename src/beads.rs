@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::health::{Status as Health, Tool};
+use crate::proc;
 use serve::{Fail, Http, Readiness, Server, Status as ServeStatus};
 pub use serve::{NO_TELEMETRY, beads_dir, dolt_port, metadata, server_mode, start_dolt};
 
@@ -263,6 +264,8 @@ const READY_EXCLUDES: [&str; 4] = ["sulla:held", "sulla:backlog", "sulla:pr", "s
 pub struct Beads {
     repo: PathBuf,
     server: Arc<Server>,
+    bin: PathBuf,
+    timeout: std::time::Duration,
     #[cfg(test)]
     closes: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
@@ -272,9 +275,18 @@ impl Beads {
         Self {
             repo: repo.to_path_buf(),
             server: Arc::new(Server::new(repo)),
+            bin: PathBuf::from("bd"),
+            timeout: proc::BD,
             #[cfg(test)]
             closes: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_cli(mut self, bin: &Path, timeout: std::time::Duration) -> Self {
+        self.bin = bin.to_path_buf();
+        self.timeout = timeout;
+        self
     }
 
     #[cfg(test)]
@@ -389,12 +401,12 @@ impl Beads {
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new("bd");
+        let mut cmd = Command::new(&self.bin);
         cmd.args(args).current_dir(&self.repo);
         if self.server.mode {
             cmd.env(serve::NO_TELEMETRY.0, serve::NO_TELEMETRY.1);
         }
-        let out = cmd.output()?;
+        let out = proc::output(&mut cmd, None, self.timeout)?;
         if !out.status.success() {
             bail!(
                 "bd {}: {}",

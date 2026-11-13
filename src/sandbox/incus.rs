@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,6 +17,7 @@ use crate::beads;
 use crate::browse;
 use crate::config::{AgentKind, IncusAgent, IncusConfig};
 use crate::guard;
+use crate::proc;
 use crate::sessions;
 
 const MAX_NAME: usize = 63;
@@ -152,7 +152,7 @@ struct Cli {
 
 impl Cli {
     fn run<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
-        let out = Command::new(&self.bin).args(args).output()?;
+        let out = proc::output(Command::new(&self.bin).args(args), None, proc::INCUS)?;
         if !out.status.success() {
             let argv: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
             return Err(eyre!(
@@ -166,26 +166,16 @@ impl Cli {
     }
 
     fn stdout<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
-        let out = Command::new(&self.bin)
-            .args(args)
-            .stderr(Stdio::null())
-            .output()?;
+        let out = proc::output(Command::new(&self.bin).args(args), None, proc::INCUS)?;
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn feed<S: AsRef<std::ffi::OsStr>>(&self, args: &[S], input: &str) -> Result<()> {
-        let mut child = Command::new(&self.bin)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| eyre!("{} has no stdin", self.bin))?
-            .write_all(input.as_bytes())?;
-        let out = child.wait_with_output()?;
+        let out = proc::output(
+            Command::new(&self.bin).args(args),
+            Some(input.as_bytes()),
+            proc::INCUS,
+        )?;
         if !out.status.success() {
             return Err(eyre!(
                 "{} exec: {}",

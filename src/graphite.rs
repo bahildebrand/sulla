@@ -5,6 +5,7 @@ use color_eyre::{Report, Result, eyre::bail};
 
 use crate::config::PrTool;
 use crate::health::Probe;
+use crate::proc;
 
 pub const GT: &str = "gt";
 
@@ -13,7 +14,11 @@ pub fn probe() -> Probe {
 }
 
 fn gt(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(GT).args(args).current_dir(dir).output()?;
+    let out = proc::output(
+        Command::new(GT).args(args).current_dir(dir),
+        None,
+        proc::NETWORK,
+    )?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = if err.trim().is_empty() {

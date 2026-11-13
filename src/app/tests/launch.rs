@@ -244,3 +244,37 @@ fn delete_forgets_recorded_sessions() {
     assert!(!h.app.bead_sessions.contains_key("t-1"));
     assert!(!h.app.git.sessions().contains_key("t-1"));
 }
+
+#[test]
+fn hung_bd_call_times_out_into_an_error_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new("bd-hang", &[("t-1", None)]);
+    let bin = h.dir.join("bd-hang");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\n[ \"$1\" = show ] && exec sleep 30\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ready = (0..100).any(|_| {
+        let busy = std::process::Command::new(&bin)
+            .status()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::ExecutableFileBusy);
+        if busy {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !busy
+    });
+    assert!(ready, "{} stayed busy", bin.display());
+    let beads = Beads::new(&h.dir).with_cli(&bin, Duration::from_millis(200));
+    h.app.bd_jobs = spawn_bd_worker(beads, h.app.tx.clone());
+    let started = Instant::now();
+    h.app.bd_run(|b| b.show_text("t-1").map(drop));
+    h.pump();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        h.app.status.starts_with("error:") && h.app.status.contains("timed out"),
+        "{}",
+        h.app.status
+    );
+}

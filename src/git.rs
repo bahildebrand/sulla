@@ -1,10 +1,11 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 use color_eyre::{Result, eyre::bail};
 
+use crate::proc;
 use crate::ui::review::Rejection;
 
 pub const DEFAULT_PREFIX: &str = "sulla/";
@@ -15,8 +16,18 @@ pub struct Git {
     prefix: String,
 }
 
+fn git(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir);
+    c
+}
+
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output()?;
+    run_for(dir, args, proc::GIT)
+}
+
+fn run_for(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    let out = proc::output(git(dir).args(args), None, timeout)?;
     if !out.status.success() {
         bail!(
             "git {}: {}",
@@ -457,11 +468,11 @@ impl Git {
         let mb = self.review_base(id, base)?;
         let mut out = run(&wt, &["diff", "--no-color", "--no-ext-diff", &mb])?;
         for f in run(&wt, &["ls-files", "--others", "--exclude-standard"])?.lines() {
-            let o = Command::new("git")
-                .arg("-C")
-                .arg(&wt)
-                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", f])
-                .output()?;
+            let o = proc::output(
+                git(&wt).args(["diff", "--no-color", "--no-index", "--", "/dev/null", f]),
+                None,
+                proc::GIT,
+            )?;
             out.push_str(&String::from_utf8_lossy(&o.stdout));
         }
         Ok(out)
@@ -569,18 +580,11 @@ impl Git {
         }
         Self::commit_all(&wt, message)?;
         if !rejection.patch.is_empty() {
-            let mut child = Command::new("git")
-                .arg("-C")
-                .arg(&wt)
-                .args(["apply", "-R", "--whitespace=nowarn", "-"])
-                .stdin(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdout(Stdio::null())
-                .spawn()?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(rejection.patch.as_bytes())?;
-            }
-            let out = child.wait_with_output()?;
+            let out = proc::output(
+                git(&wt).args(["apply", "-R", "--whitespace=nowarn", "-"]),
+                Some(rejection.patch.as_bytes()),
+                proc::GIT,
+            )?;
             if !out.status.success() {
                 bail!(
                     "rejected hunks no longer apply, reload the diff (R): {}",
@@ -658,11 +662,15 @@ impl Git {
             args.push("--force-with-lease");
         }
         args.extend([remote, refspec.as_str()]);
-        run(&self.repo, &args).map(drop)
+        run_for(&self.repo, &args, proc::NETWORK).map(drop)
     }
 
     pub fn fetch_base(&self, remote: &str, base: &str) -> Result<String> {
-        run(&self.repo, &["fetch", "--quiet", remote, base])?;
+        run_for(
+            &self.repo,
+            &["fetch", "--quiet", remote, base],
+            proc::NETWORK,
+        )?;
         let r = format!("refs/remotes/{remote}/{base}");
         self.rev(&r)?;
         Ok(r)
@@ -843,10 +851,8 @@ impl Git {
     }
 
     pub fn merge_conflicts(&self, a: &str, b: &str) -> Result<Vec<String>> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args([
+        let out = proc::output(
+            git(&self.repo).args([
                 "merge-tree",
                 "-z",
                 "--write-tree",
@@ -854,8 +860,10 @@ impl Git {
                 "--no-messages",
                 a,
                 b,
-            ])
-            .output()?;
+            ]),
+            None,
+            proc::GIT,
+        )?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         match out.status.code() {
             Some(0) => Ok(Vec::new()),

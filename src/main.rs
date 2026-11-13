@@ -16,6 +16,7 @@ mod lock;
 mod notify;
 mod pr;
 mod presets;
+mod proc;
 mod sandbox;
 mod scheduler;
 mod sessions;

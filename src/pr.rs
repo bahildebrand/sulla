@@ -7,6 +7,7 @@ use color_eyre::{Result, eyre::bail};
 use serde::{Deserialize, Serialize};
 
 use crate::health::Probe;
+use crate::proc;
 
 pub const GH: &str = "gh";
 pub const MARKER: &str = "<!-- sulla -->";
@@ -25,7 +26,11 @@ pub struct Pr {
 }
 
 fn gh(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(GH).args(args).current_dir(repo).output()?;
+    let out = proc::output(
+        Command::new(GH).args(args).current_dir(repo),
+        None,
+        proc::NETWORK,
+    )?;
     if !out.status.success() {
         bail!(
             "gh {}: {}",
@@ -561,7 +566,11 @@ struct RawPrCheck {
 }
 
 fn gh_lenient(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(GH).args(args).current_dir(repo).output()?;
+    let out = proc::output(
+        Command::new(GH).args(args).current_dir(repo),
+        None,
+        proc::NETWORK,
+    )?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() && stdout.trim().is_empty() {
         bail!(
