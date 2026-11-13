@@ -234,3 +234,93 @@ fn board_release_backlog_asks_first() {
     assert_eq!(h.state("b-2"), None);
     assert_eq!(h.state("p-1"), None);
 }
+
+fn press_on(h: &mut Harness, column: Column, id: &str, c: char) -> String {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    h.app.status.clear();
+    h.app.col = Column::ALL.iter().position(|x| *x == column).unwrap();
+    h.app.rows[h.app.col] = h.app.columns()[h.app.col]
+        .iter()
+        .position(|b| b.id == id)
+        .unwrap();
+    h.app
+        .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    h.app.status.clone()
+}
+
+#[test]
+fn board_keys_that_cannot_act_say_why() {
+    let mut h = Harness::new(
+        "silent-keys",
+        &[("r-1", Some(State::Running)), ("d-1", None)],
+    );
+    h.app.edit_local("d-1", |b| b.status = "closed".into());
+    park(&mut h, &["r-1"]);
+    assert!(h.app.agents.get("r-1").is_some_and(|a| a.alive));
+    let running = Column::InProgress;
+    assert_eq!(
+        press_on(&mut h, running, "r-1", 's'),
+        "r-1 is not held or in backlog"
+    );
+    assert_eq!(
+        press_on(&mut h, running, "r-1", 'A'),
+        "agent already running for r-1"
+    );
+    assert_eq!(
+        press_on(&mut h, running, "r-1", 'B'),
+        "agent running for r-1, X to stop it first"
+    );
+    assert_eq!(
+        press_on(&mut h, Column::Done, "d-1", 'D'),
+        "d-1 is done, nothing to discard"
+    );
+    assert_eq!(
+        press_on(&mut h, Column::Done, "d-1", 'F'),
+        "d-1 is done, nothing to retry"
+    );
+    assert_eq!(
+        press_on(&mut h, Column::Done, "d-1", 'B'),
+        "d-1 is closed, it cannot go to backlog"
+    );
+}
+
+#[test]
+fn board_priority_keys_report_the_change_and_the_limits() {
+    let mut h = Harness::new("priority-keys", &[("p-1", None)]);
+    let pending = Column::Pending;
+    h.app.edit_local("p-1", |b| {
+        b.status = "open".into();
+        b.priority = 0;
+    });
+    assert_eq!(press_on(&mut h, pending, "p-1", '+'), "p-1 is already P0");
+    assert_eq!(h.bead("p-1").priority, 0);
+    assert_eq!(
+        press_on(&mut h, pending, "p-1", '-'),
+        "priority p-1: P0 -> P1"
+    );
+    assert_eq!(h.bead("p-1").priority, 1);
+    h.app.edit_local("p-1", |b| b.priority = 4);
+    assert_eq!(press_on(&mut h, pending, "p-1", '-'), "p-1 is already P4");
+    assert_eq!(h.bead("p-1").priority, 4);
+    assert_eq!(
+        press_on(&mut h, pending, "p-1", '='),
+        "priority p-1: P4 -> P3"
+    );
+    assert_eq!(h.bead("p-1").priority, 3);
+}
+
+#[test]
+fn release_on_a_failed_bead_says_it_cleared_the_failure() {
+    let mut h = Harness::new("release-failed", &[("p-1", None)]);
+    h.app.edit_local("p-1", |b| b.status = "open".into());
+    h.app.failed.insert("p-1".into());
+    assert_eq!(
+        press_on(&mut h, Column::Pending, "p-1", 's'),
+        "cleared the launch failure of p-1, it can start again"
+    );
+    assert!(!h.app.failed.contains("p-1"));
+    assert_eq!(
+        press_on(&mut h, Column::Pending, "p-1", 's'),
+        "p-1 is not held or in backlog"
+    );
+}

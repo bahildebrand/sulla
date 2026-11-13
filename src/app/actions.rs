@@ -139,13 +139,22 @@ impl App {
     }
 
     pub(super) fn release(&mut self, bead: &Bead) {
-        self.failed.remove(&bead.id);
-        if matches!(bead.state(), Some(State::Held | State::Backlog)) {
-            self.edit_local(&bead.id, |b| b.set_state_label(None));
-            self.status = format!("released {}", bead.id);
-            let bead = bead.clone();
-            self.bd_run(move |b| b.clear_state(&bead));
+        let was_failed = self.failed.remove(&bead.id);
+        if !matches!(bead.state(), Some(State::Held | State::Backlog)) {
+            self.status = if was_failed {
+                format!(
+                    "cleared the launch failure of {}, it can start again",
+                    bead.id
+                )
+            } else {
+                format!("{} is not held or in backlog", bead.id)
+            };
+            return;
         }
+        self.edit_local(&bead.id, |b| b.set_state_label(None));
+        self.status = format!("released {}", bead.id);
+        let bead = bead.clone();
+        self.bd_run(move |b| b.clear_state(&bead));
     }
 
     fn backlog(&self) -> Vec<Bead> {
@@ -195,10 +204,12 @@ impl App {
         if self.refuse_released(&bead.id) {
             return;
         }
-        if self.agents.contains_key(&bead.id)
-            || self.is_starting(&bead.id)
-            || bead.status == "closed"
-        {
+        if bead.status == "closed" {
+            self.status = format!("{} is closed, it cannot go to backlog", bead.id);
+            return;
+        }
+        if self.agents.contains_key(&bead.id) || self.is_starting(&bead.id) {
+            self.status = format!("agent running for {}, X to stop it first", bead.id);
             return;
         }
         self.edit_local(&bead.id, |b| b.set_state_label(Some(State::Backlog)));
@@ -315,11 +326,15 @@ impl App {
     }
 
     pub(super) fn request_retry(&mut self, id: String) {
-        if agent::reviewed_bead(&id).is_some()
-            || id == CHAT_ID
-            || self.in_flight(&id)
-            || self.branch_in_use(&id)
-        {
+        if id == CHAT_ID {
+            self.status = "the conversation cannot be retried, C starts a new one".into();
+            return;
+        }
+        if let Some(bead) = agent::reviewed_bead(&id) {
+            self.status = format!("{id} is a reviewer, retry {bead} from the board");
+            return;
+        }
+        if self.in_flight(&id) || self.branch_in_use(&id) {
             return;
         }
         self.mode = Mode::Input {
@@ -391,7 +406,11 @@ impl App {
     }
 
     pub(super) fn request_edit(&mut self, id: &str) {
-        if id == CHAT_ID || self.refuse_released(id) {
+        if id == CHAT_ID {
+            self.status = "the conversation has no worktree".into();
+            return;
+        }
+        if self.refuse_released(id) {
             return;
         }
         let path = self.git.worktree_path(id);
@@ -406,7 +425,11 @@ impl App {
     }
 
     pub(super) fn request_shell(&mut self, id: &str) {
-        if id == CHAT_ID || self.refuse_released(id) {
+        if id == CHAT_ID {
+            self.status = "the conversation has no worktree".into();
+            return;
+        }
+        if self.refuse_released(id) {
             return;
         }
         let dir = self.git.worktree_path(id);
@@ -437,7 +460,19 @@ impl App {
         self.suspend = Some(Suspend::Shell { cmd, place });
     }
 
-    pub(super) fn set_priority(&mut self, id: &str, priority: u8) {
+    pub(super) fn bump_priority(&mut self, bead: &Bead, up: bool) {
+        let (from, id) = (bead.priority, &bead.id);
+        let to = match up {
+            true if from == 0 => return self.status = format!("{id} is already P0"),
+            false if from >= 4 => return self.status = format!("{id} is already P4"),
+            true => from - 1,
+            false => from + 1,
+        };
+        self.status = format!("priority {id}: P{from} -> P{to}");
+        self.set_priority(id, to);
+    }
+
+    fn set_priority(&mut self, id: &str, priority: u8) {
         self.edit_local(id, |b| b.priority = priority);
         let id = id.to_string();
         self.bd_run(move |b| b.set_priority(&id, priority));

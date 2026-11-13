@@ -219,6 +219,7 @@ impl App {
 
     pub(super) fn relaunch_then(&mut self, id: &str, then: impl FnOnce(&mut App) + Send + 'static) {
         if self.agents.get(id).is_some_and(|a| a.alive) {
+            self.status = format!("agent already running for {id}");
             return;
         }
         if self.is_starting(id) {
@@ -241,6 +242,7 @@ impl App {
             return;
         }
         let Some(b) = self.bead(id).cloned() else {
+            self.status = format!("no bead {id}");
             return;
         };
         let resume = self.git.worktree_path(id).join(".git").exists();

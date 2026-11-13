@@ -596,10 +596,14 @@ impl App {
             KeyCode::Char('V') => self.start_review(&b.id),
             KeyCode::Char('r') => self.open_review(b.id),
             KeyCode::Char('X') => self.confirm_kill(b.id),
-            KeyCode::Char('D') if Column::ALL[self.col] != Column::Done => {
-                self.confirm_discard(b.id)
+            KeyCode::Char('D') if Column::ALL[self.col] == Column::Done => {
+                self.status = format!("{} is done, nothing to discard", b.id)
             }
-            KeyCode::Char('F') if Column::ALL[self.col] != Column::Done => self.request_retry(b.id),
+            KeyCode::Char('F') if Column::ALL[self.col] == Column::Done => {
+                self.status = format!("{} is done, nothing to retry", b.id)
+            }
+            KeyCode::Char('D') => self.confirm_discard(b.id),
+            KeyCode::Char('F') => self.request_retry(b.id),
             KeyCode::Char('R') => self.mark_review(&b.id),
             KeyCode::Char('s') => self.release(&b),
             KeyCode::Char('S') => self.confirm_release_backlog(),
@@ -610,10 +614,8 @@ impl App {
             KeyCode::Char('w') => self.request_release(b.id),
             KeyCode::Char('t') => self.show_check(b.id),
             KeyCode::Char('T') => self.rerun_check(&b.id),
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.set_priority(&b.id, b.priority.saturating_sub(1))
-            }
-            KeyCode::Char('-') => self.set_priority(&b.id, (b.priority + 1).min(4)),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.bump_priority(&b, true),
+            KeyCode::Char('-') => self.bump_priority(&b, false),
             _ => {}
         }
     }
@@ -626,7 +628,9 @@ impl App {
         let bead = agent::reviewed_bead(&id).unwrap_or(&id).to_string();
         let agent = self.agents.get_mut(&id);
         match (k.code, agent) {
-            (KeyCode::Char('R' | 'r'), _) if chat => {}
+            (KeyCode::Char('R' | 'r'), _) if chat => {
+                self.status = "the conversation has no review".into()
+            }
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
                 if !self.back_to_review(id) {
                     self.view = View::Board;
