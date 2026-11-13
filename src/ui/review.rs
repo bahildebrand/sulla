@@ -508,19 +508,14 @@ impl Diff {
             .position(|c| self.comment_pos(c) == Some(pos))
     }
 
-    pub fn delete_comments_at_cursor(&mut self) -> usize {
-        let Some(pos) = self.cursor_pos() else {
-            return 0;
-        };
-        let keep: Vec<bool> = self
-            .comments
-            .iter()
-            .map(|c| self.comment_pos(c) != Some(pos))
+    pub fn delete_comment_at_cursor(&mut self) -> Option<(usize, usize)> {
+        let pos = self.cursor_pos()?;
+        let here: Vec<usize> = (0..self.comments.len())
+            .filter(|&i| self.comment_pos(&self.comments[i]) == Some(pos))
             .collect();
-        let before = self.comments.len();
-        let mut keep = keep.into_iter();
-        self.comments.retain(|_| keep.next().unwrap_or(true));
-        before - self.comments.len()
+        let &newest = here.last()?;
+        self.comments.remove(newest);
+        Some((here.len(), here.len()))
     }
 
     pub fn feedback(&self) -> Option<String> {
@@ -792,6 +787,18 @@ fn header_line(diff: &Diff, h: &Header) -> Line<'static> {
     Line::from(spans)
 }
 
+fn truncate_left(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let tail: String = s.chars().skip(len + 1 - max).collect();
+    format!("…{tail}")
+}
+
 pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
     let [top, area] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
     f.render_widget(header_line(diff, &h), top);
@@ -840,12 +847,18 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
         .iter()
         .enumerate()
         .map(|(fi, x)| {
-            let base = x.name.rsplit('/').next().unwrap_or(&x.name);
             let n = pos
                 .iter()
                 .filter(|p| p.is_some_and(|(f, _)| f == fi))
                 .count();
-            let name = |glyph: &str, style: Style| Span::styled(format!("{glyph} {base}"), style);
+            let badge = if n > 0 {
+                format!(" ✎{n}")
+            } else {
+                String::new()
+            };
+            let room = (side as usize).saturating_sub(5 + badge.chars().count());
+            let path = truncate_left(&x.name, room);
+            let name = |glyph: &str, style: Style| Span::styled(format!("{glyph} {path}"), style);
             let mut spans = vec![if x.name == COMMIT_MSG {
                 name("◆", Style::new().fg(theme::PEACH))
             } else if conflicted.contains(x.name.as_str()) {
@@ -863,10 +876,7 @@ pub fn render(f: &mut Frame, area: Rect, diff: &Diff, h: Header) {
                 name("·", Style::new().fg(theme::TEXT))
             }];
             if n > 0 {
-                spans.push(Span::styled(
-                    format!(" ✎{n}"),
-                    Style::new().fg(theme::MAUVE).bold(),
-                ));
+                spans.push(Span::styled(badge, Style::new().fg(theme::MAUVE).bold()));
             }
             ListItem::new(Line::from(spans))
         })
@@ -1201,9 +1211,9 @@ mod tests {
         assert_eq!(c[1]["old_line"], 1);
         assert_eq!(c[1]["new_line"], serde_json::Value::Null);
         assert_eq!(c[1]["comment"], "why \"removed\"?");
-        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
         d.set_cursor(6);
-        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
         assert!(d.feedback().is_none());
     }
 
@@ -1236,7 +1246,7 @@ mod tests {
         assert_eq!(d.comment_at_cursor(), None);
         d.set_cursor(11);
         assert_eq!(d.comment_at_cursor(), Some(0));
-        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
     }
 
     #[test]
@@ -1383,7 +1393,7 @@ mod tests {
         assert_eq!(d.comment_at_cursor(), None);
         d.set_cursor(0);
         assert_eq!(d.comment_at_cursor(), Some(0));
-        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
     }
 
     #[test]
@@ -1408,7 +1418,77 @@ mod tests {
         d.next_file();
         d.set_cursor(0);
         assert_eq!(d.comment_at_cursor(), Some(0));
-        assert_eq!(d.delete_comments_at_cursor(), 1);
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
         assert_eq!(d.comments.len(), 1);
+    }
+
+    #[test]
+    fn x_deletes_newest_comment_on_line_only() {
+        let mut d = Diff::parse("x", SAMPLE);
+        d.set_cursor(6);
+        assert!(d.add_comment("first", 1));
+        assert!(d.add_comment("second", 1));
+        assert!(d.add_comment("third", 1));
+        d.set_cursor(5);
+        assert!(d.add_comment("elsewhere", 1));
+        d.set_cursor(6);
+        assert_eq!(d.delete_comment_at_cursor(), Some((3, 3)));
+        let texts: Vec<&str> = d.comments.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["first", "second", "elsewhere"]);
+        assert_eq!(d.delete_comment_at_cursor(), Some((2, 2)));
+        assert_eq!(d.delete_comment_at_cursor(), Some((1, 1)));
+        assert_eq!(d.delete_comment_at_cursor(), None);
+        assert_eq!(d.comments.len(), 1);
+        assert_eq!(d.comments[0].text, "elsewhere");
+    }
+
+    #[test]
+    fn x_on_line_without_comments_deletes_nothing() {
+        let mut d = Diff::parse("x", SAMPLE);
+        d.set_cursor(5);
+        assert!(d.add_comment("keep", 1));
+        d.set_cursor(6);
+        assert_eq!(d.delete_comment_at_cursor(), None);
+        assert_eq!(d.comments.len(), 1);
+    }
+
+    #[test]
+    fn truncate_left_keeps_the_tail() {
+        assert_eq!(truncate_left("src/ui/mod.rs", 20), "src/ui/mod.rs");
+        assert_eq!(truncate_left("src/ui/mod.rs", 11), "…/ui/mod.rs");
+        assert_eq!(truncate_left("src/ui/mod.rs", 1), "…");
+        assert_eq!(truncate_left("src/ui/mod.rs", 0), "");
+    }
+
+    #[test]
+    fn same_named_files_are_distinguishable_in_narrow_panel() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let text = "diff --git a/src/ui/mod.rs b/src/ui/mod.rs\n--- a/src/ui/mod.rs\n+++ b/src/ui/mod.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/src/app/mod.rs b/src/app/mod.rs\n--- a/src/app/mod.rs\n+++ b/src/app/mod.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let d = Diff::parse("x", text);
+        let mut t = Terminal::new(TestBackend::new(48, 10)).unwrap();
+        t.draw(|f| {
+            render(
+                f,
+                f.area(),
+                &d,
+                Header {
+                    title: "",
+                    loc: None,
+                    app: None,
+                    ai: None,
+                    conflict: None,
+                    check: None,
+                    released: false,
+                    marked: None,
+                },
+            )
+        })
+        .unwrap();
+        let buf = t.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect();
+        assert!(rows.iter().any(|r| r.contains("…/ui/mod.rs")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("…app/mod.rs")), "{rows:#?}");
     }
 }

@@ -254,7 +254,7 @@ feedback or pressing `V` restarts the count. Beads that return to Review for any
 bead) are not auto reviewed.
 
 Cards and the Review header show `✓ai` or `✎ai`. AI comments appear inline in cyan as `ai:` (or
-`ai (sent):`) and can be edited (`C`), deleted (`x`) or sent (`S`) with yours. They are cleared on
+`ai (sent):`) and can be edited (`C`), deleted one at a time, newest first (`x`), or sent (`S`) with yours. They are cleared on
 a new AI review, when you send feedback, or when the bead goes back to running.
 
 ### Publishing

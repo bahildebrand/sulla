@@ -705,8 +705,10 @@ impl App {
                 None => self.status = "no editable comment on this line".into(),
             },
             KeyCode::Char('x') => {
-                let n = d.delete_comments_at_cursor();
-                self.status = format!("deleted {n} comment(s)");
+                self.status = match d.delete_comment_at_cursor() {
+                    Some((i, n)) => format!("deleted comment {i}/{n} on this line"),
+                    None => "no comments here".into(),
+                };
             }
             KeyCode::Char('S') => match d.feedback() {
                 Some(text) => {

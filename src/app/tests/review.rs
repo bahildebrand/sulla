@@ -228,6 +228,26 @@ fn review_reload_keeps_comments() {
 }
 
 #[test]
+fn review_x_deletes_one_comment_per_press() {
+    use crossterm::event::KeyCode;
+    let mut h = reviewable("review-x");
+    press(&mut h, KeyCode::Tab);
+    press(&mut h, KeyCode::Char('G'));
+    for text in ["one", "two"] {
+        press(&mut h, KeyCode::Char('c'));
+        type_text(&mut h, text);
+    }
+    assert_eq!(open_diff(&h).comments.len(), 2, "{}", h.app.status);
+    press(&mut h, KeyCode::Char('x'));
+    assert_eq!(h.app.status, "deleted comment 2/2 on this line");
+    assert_eq!(open_diff(&h).comments[0].text, "one");
+    press(&mut h, KeyCode::Char('x'));
+    assert_eq!(h.app.status, "deleted comment 1/1 on this line");
+    press(&mut h, KeyCode::Char('x'));
+    assert_eq!(h.app.status, "no comments here");
+}
+
+#[test]
 fn review_note_carries_pending_inline_comments() {
     use crossterm::event::KeyCode;
     let mut h = reviewable("review-note");
