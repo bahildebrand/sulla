@@ -218,3 +218,44 @@ fn losing_focus_counts_as_away_and_regaining_it_returns() {
     assert!(h.app.status.is_empty());
     assert!(h.app.notifier.sent.is_empty());
 }
+
+#[test]
+fn error_statuses_render_in_the_error_colour() {
+    use crate::ui::theme;
+    let mut h = Harness::new("error-colour", &[("a", Some(State::Review))]);
+    h.app.status = "all quiet".into();
+    assert_eq!(
+        find(&screen(&h.app, 200, 40), "all quiet"),
+        Some(theme::TEXT)
+    );
+    h.app
+        .report::<()>(Err(color_eyre::eyre::eyre!("bd update a failed")));
+    assert_eq!(h.app.status, "error: bd update a failed");
+    assert_eq!(
+        find(&screen(&h.app, 200, 40), "error: bd update a failed"),
+        Some(theme::ERROR)
+    );
+    h.app.status = format!("{}bad toml", crate::config::reload::FAILED);
+    assert_eq!(
+        find(&screen(&h.app, 200, 40), "bad toml"),
+        Some(theme::ERROR)
+    );
+}
+
+#[test]
+fn a_fresh_error_is_not_hidden_by_a_notification() {
+    use crate::ui::theme;
+    let mut h = Harness::new("error-chime", &[("a", Some(State::Review))]);
+    h.app
+        .report::<()>(Err(color_eyre::eyre::eyre!("bd update a failed")));
+    h.app.notify(Trigger::Review, "a", "A");
+    assert_eq!(h.app.chime(), Some("🔔 a ready for review"));
+    let buf = screen(&h.app, 200, 40);
+    assert_eq!(find(&buf, "error: bd update a failed"), Some(theme::ERROR));
+    assert!(find(&buf, "a ready for review").is_some());
+    h.app.on_input(Instant::now());
+    assert!(!h.app.fresh_error());
+    let buf = screen(&h.app, 200, 40);
+    assert_eq!(find(&buf, "error: bd update a failed"), None);
+    assert!(find(&buf, "a ready for review").is_some());
+}

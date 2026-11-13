@@ -29,7 +29,7 @@ impl App {
             Err(e) => {
                 tracing::warn!("config reload: {e:#}");
                 let msg = reload::describe(&e);
-                self.status = format!("{FAILED}{msg}");
+                self.set_error(format!("{FAILED}{msg}"));
                 self.reload.error = Some(msg);
             }
         }

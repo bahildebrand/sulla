@@ -227,6 +227,12 @@ pub enum Mode {
 
 const ESC_TIMEOUT: Duration = Duration::from_millis(300);
 const CHIME: Duration = Duration::from_secs(5);
+const ERROR_FRESH: Duration = Duration::from_secs(10);
+pub const ERROR: &str = "error: ";
+
+pub fn is_error(status: &str) -> bool {
+    status.starts_with(ERROR) || status.starts_with(config_reload::FAILED)
+}
 
 pub struct App {
     pub cfg: Config,
@@ -270,6 +276,7 @@ pub struct App {
     focused: Option<bool>,
     last_input: Instant,
     chime: Option<(String, Instant)>,
+    error_at: Option<Instant>,
     pub pr_watch: pr::Watch,
     pr_refresh: Option<Sender<()>>,
     pub stalls: HashMap<String, Stall>,
@@ -355,6 +362,7 @@ impl App {
             focused: None,
             last_input: started,
             chime: None,
+            error_at: None,
             pr_watch,
             pr_refresh,
             stalls: HashMap::new(),
@@ -745,7 +753,7 @@ impl App {
         });
         match self.bd_jobs.send(job) {
             Ok(()) => self.bd_pending += 1,
-            Err(_) => self.status = "error: bd worker stopped".into(),
+            Err(_) => self.fail("bd worker stopped"),
         }
     }
 
@@ -769,7 +777,7 @@ impl App {
             Ok(v) => Some(v),
             Err(e) => {
                 tracing::warn!("{e:#}");
-                self.status = format!("error: {e}");
+                self.fail(e);
                 None
             }
         }
@@ -813,6 +821,22 @@ impl App {
             self.notifier.idle(),
             now.saturating_duration_since(self.last_input),
         )
+    }
+
+    fn fail(&mut self, e: impl std::fmt::Display) {
+        self.set_error(format!("{ERROR}{e}"));
+    }
+
+    pub(super) fn set_error(&mut self, status: String) {
+        self.status = status;
+        self.error_at = Some(Instant::now());
+    }
+
+    pub fn fresh_error(&self) -> bool {
+        is_error(&self.status)
+            && self
+                .error_at
+                .is_some_and(|at| at >= self.last_input && at.elapsed() < ERROR_FRESH)
     }
 
     pub fn chime(&self) -> Option<&str> {

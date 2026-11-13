@@ -97,8 +97,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn status_spans(status: &str) -> Vec<Span<'static>> {
     let text = Style::new().fg(theme::TEXT);
-    if status.starts_with(reload::FAILED) {
-        return vec![Span::styled(format!(" {status}"), text.fg(theme::RED))];
+    if crate::app::is_error(status) {
+        return vec![Span::styled(format!(" {status}"), text.fg(theme::ERROR))];
     }
     match status.split_once(reload::RESTART_SEP) {
         Some((head, keys)) => vec![
@@ -198,12 +198,15 @@ fn status_line(f: &mut Frame, area: Rect, app: &App) {
                     Style::new().fg(theme::YELLOW).bold(),
                 ));
             }
-            match app.chime() {
-                Some(c) => spans.push(Span::styled(
+            let chime = app.chime();
+            if chime.is_none() || app.fresh_error() {
+                spans.extend(status_spans(&app.status));
+            }
+            if let Some(c) = chime {
+                spans.push(Span::styled(
                     format!(" {c}"),
                     Style::new().fg(theme::YELLOW).bold(),
-                )),
-                None => spans.extend(status_spans(&app.status)),
+                ));
             }
             spans
         }

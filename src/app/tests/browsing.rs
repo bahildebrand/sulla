@@ -193,27 +193,6 @@ fn probing_runs_off_the_ui_thread_and_skips_without_ports() {
     drop(held);
 }
 
-fn screen(app: &App, w: u16, ht: u16) -> ratatui::buffer::Buffer {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    let mut t = Terminal::new(TestBackend::new(w, ht)).unwrap();
-    t.draw(|f| crate::ui::draw(f, app)).unwrap();
-    t.backend().buffer().clone()
-}
-
-fn find(buf: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Color> {
-    let area = buf.area;
-    for y in 0..area.height {
-        let row: Vec<&str> = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
-        let line: String = row.concat();
-        if let Some(at) = line.find(text) {
-            let x = line[..at].chars().count() as u16;
-            return Some(buf[(x, y)].fg);
-        }
-    }
-    None
-}
-
 #[test]
 fn app_status_shows_on_cards_titles_and_review_header() {
     use crate::ui::theme;

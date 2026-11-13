@@ -330,3 +330,24 @@ fn write_repo_config(h: &Harness, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, body).unwrap();
 }
+
+pub(super) fn screen(app: &App, w: u16, ht: u16) -> ratatui::buffer::Buffer {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut t = Terminal::new(TestBackend::new(w, ht)).unwrap();
+    t.draw(|f| crate::ui::draw(f, app)).unwrap();
+    t.backend().buffer().clone()
+}
+
+pub(super) fn find(buf: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Color> {
+    let area = buf.area;
+    for y in 0..area.height {
+        let row: Vec<&str> = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let line: String = row.concat();
+        if let Some(at) = line.find(text) {
+            let x = line[..at].chars().count() as u16;
+            return Some(buf[(x, y)].fg);
+        }
+    }
+    None
+}

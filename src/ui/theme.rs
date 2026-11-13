@@ -28,6 +28,7 @@ pub const BLUE: Color = Color::Rgb(137, 180, 250);
 pub const LAVENDER: Color = Color::Rgb(180, 190, 254);
 pub const MAUVE: Color = Color::Rgb(203, 166, 247);
 pub const PINK: Color = Color::Rgb(245, 194, 231);
+pub const ERROR: Color = RED;
 
 pub const ADD_BG: Color = Color::Rgb(38, 56, 48);
 pub const ADD_GUTTER: Color = Color::Rgb(46, 74, 60);
