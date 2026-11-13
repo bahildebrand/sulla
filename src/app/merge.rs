@@ -98,18 +98,22 @@ impl App {
             self.status = format!("cannot merge {id}: blocked by open {}", blockers.join(", "));
             return;
         }
-        if self.git.was_merged(id) {
+        if self.git.was_merged(id, &self.base) {
             self.remove_agent(id, Outcome::Merged);
-            self.untrack(id);
             self.status = match self.close_merged(id) {
                 Ok(()) => format!("{id} was already merged, closed bead"),
                 Err(e) => format!("{id} was already merged but bd close failed: {e}"),
             };
+            self.clean_up_merged(id);
             let r = self.restack_from(self.git.children(id));
             self.status.push_str(&r.summary());
             self.view = View::Board;
             return self.mutated();
         }
+        self.land_merge(id);
+    }
+
+    pub(super) fn land_merge(&mut self, id: &str) {
         let title = self.bead(id).map(|b| b.title.clone()).unwrap_or_default();
         self.stop_check(id);
         let slot = self.take_agent(id);
@@ -118,11 +122,7 @@ impl App {
         let r = self
             .git
             .drop_rejected(id, &self.base, &msg, &rejection)
-            .and_then(|_| self.git.land(id, &self.base, &msg))
-            .and_then(|_| {
-                self.untrack(id);
-                self.git.remove(id)
-            });
+            .and_then(|_| self.git.land(id, &self.base, &msg));
         let outcome = if r.is_ok() {
             Outcome::Merged
         } else {
@@ -148,11 +148,24 @@ impl App {
                 Ok(()) => format!("merged {id} into {}", self.base),
                 Err(e) => format!("merged {id} into {} but bd close failed: {e}", self.base),
             };
+            self.clean_up_merged(id);
             let r = self.restack_from(self.git.children(id));
             self.status.push_str(&r.summary());
             self.view = View::Board;
         }
         self.mutated();
+    }
+
+    fn clean_up_merged(&mut self, id: &str) {
+        self.untrack(id);
+        if let Err(e) = self.git.remove(id) {
+            tracing::warn!("cleaning up {id} after merge: {e:#}");
+            self.status.push_str(&format!(
+                "; cleanup failed: {e}. Remove {} by hand, then run `git worktree prune` and `git branch -D {}`",
+                self.git.worktree_path(id).display(),
+                self.git.branch(id)
+            ));
+        }
     }
 
     fn restack_from(&mut self, queue: Vec<String>) -> Restacked {

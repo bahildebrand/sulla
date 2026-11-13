@@ -771,10 +771,15 @@ impl Git {
         run(&self.worktree_path(id), &["status", "--porcelain"])
     }
 
-    pub fn was_merged(&self, id: &str) -> bool {
-        !self.worktree_path(id).join(".git").exists()
-            && self.ref_exists(&merged_ref(id, "base"))
-            && self.ref_exists(&merged_ref(id, "head"))
+    pub fn was_merged(&self, id: &str, base: &str) -> bool {
+        let head = merged_ref(id, "head");
+        let br = self.branch(id);
+        let contains =
+            |a: &str, b: &str| run(&self.repo, &["merge-base", "--is-ancestor", a, b]).is_ok();
+        self.ref_exists(&merged_ref(id, "base"))
+            && self.ref_exists(&head)
+            && contains(&head, base)
+            && (!self.branch_exists(&br) || contains(&br, &head))
     }
 
     pub fn rev(&self, r: &str) -> Result<String> {
@@ -1278,6 +1283,24 @@ mod tests {
                 .trim()
                 .is_empty()
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn was_merged_follows_base_not_the_worktree() {
+        let (dir, g) = scratch("was-merged");
+        let wt = g.ensure_worktree("x-1", "main").unwrap();
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        g.commit_pending("x-1", "x-1: work").unwrap();
+        assert!(!g.was_merged("x-1", "main"));
+        g.land("x-1", "main", "x-1: work").unwrap();
+        assert!(wt.join(".git").exists());
+        assert!(g.was_merged("x-1", "main"));
+        std::fs::write(wt.join("c.txt"), "c\n").unwrap();
+        g.commit_pending("x-1", "x-1: more").unwrap();
+        assert!(!g.was_merged("x-1", "main"));
+        g.remove("x-1").unwrap();
+        assert!(g.was_merged("x-1", "main"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

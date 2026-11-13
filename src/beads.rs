@@ -263,6 +263,8 @@ const READY_EXCLUDES: [&str; 4] = ["sulla:held", "sulla:backlog", "sulla:pr", "s
 pub struct Beads {
     repo: PathBuf,
     server: Arc<Server>,
+    #[cfg(test)]
+    closes: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl Beads {
@@ -270,7 +272,14 @@ impl Beads {
         Self {
             repo: repo.to_path_buf(),
             server: Arc::new(Server::new(repo)),
+            #[cfg(test)]
+            closes: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn record_closes(&mut self) -> Arc<std::sync::Mutex<Vec<String>>> {
+        self.closes.get_or_insert_default().clone()
     }
 
     pub fn server_mode(&self) -> bool {
@@ -623,6 +632,11 @@ impl Beads {
     }
 
     pub fn close(&self, id: &str, reason: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(closes) = &self.closes {
+            closes.lock().unwrap().push(id.to_string());
+            return Ok(());
+        }
         self.via(
             self.http_write("issues.close"),
             |h| h.close(id, reason, false),

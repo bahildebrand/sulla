@@ -20,6 +20,7 @@ mod config;
 mod config_editing;
 mod evict;
 mod launch;
+mod merge;
 mod notify;
 mod publish;
 mod release_reclaim;
