@@ -14,6 +14,8 @@ cargo run -- setup <bead>            # rerun [hooks] setup in a bead's worktree
 cargo run -- config                  # show the effective config and where each key comes from
 ```
 
+Only one sulla runs per repo: the TUI holds an exclusive lock on `.sulla/lock` and a second one exits with the pid of the first.
+
 The repo must be a git repo. If it has no beads database yet, `sulla init` creates one, a Dolt
 SQL server by default (`bd init --server`), and for an existing embedded database it prints how to
 migrate without losing data (it never migrates on its own). It adds `.sulla/` to

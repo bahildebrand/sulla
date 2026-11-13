@@ -12,6 +12,7 @@ mod graphite;
 mod guard;
 mod health;
 mod init;
+mod lock;
 mod notify;
 mod pr;
 mod presets;
@@ -159,6 +160,7 @@ fn main() -> Result<()> {
         Some(Cmd::Status) => return browse::status(&cfg, &repo),
         _ => {}
     }
+    let _lock = lock::acquire(&repo)?;
     beads::Beads::new(&repo)
         .list_all()
         .wrap_err("bd is not usable here, run `bd init` in the repo")?;
